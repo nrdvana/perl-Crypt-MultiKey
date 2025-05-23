@@ -1,0 +1,22 @@
+TYPEMAP
+cmk_key*                   O_CMK_KEY
+const cmk_key*             O_CMK_KEY
+maybe_cmk_key              O_CMK_KEY
+cmk_secret*                O_CMK_SECRET
+const cmk_secret*          O_CMK_SECRET
+maybe_cmk_secret           O_CMK_SECRET
+cmk_locked_aes_key*        O_CMK_LOCKED_AES_KEY
+const cmk_locked_aes_key*  O_CMK_LOCKED_AES_KEY
+maybe_cmk_locked_aes_key   O_CMK_SECRET_AES_KEY
+
+INPUT
+O_CMK_KEY
+   $var= cmk_key_from_magic($arg, @{[ $type =~ /^maybe/? "0" : "OR_DIE" ]});
+
+INPUT
+O_CMK_SECRET
+   $var= cmk_secret_from_magic($arg, @{[ $type =~ /^maybe/? "0" : "OR_DIE" ]});
+
+INPUT
+O_CMK_LOCKED_AES_KEY
+   $var= cmk_locked_aes_key_from_magic($arg, @{[ $type =~ /^maybe/? "0" : "OR_DIE" ]});
