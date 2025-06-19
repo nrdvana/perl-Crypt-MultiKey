@@ -17,7 +17,7 @@ typedef unsigned char cmk_gcm_tag[CMK_GCM_TAG_LEN];
 
 /* The keys used by this module are a public/private pair, with the private key
  * encrypted by a password using AES-256.  The "password" that unlocks the private
- * half of this key can either be the AES key itself (if pbkdf2_iterations == 0)
+ * half of this key can either be the raw AES key (if pbkdf2_iterations == 0)
  * or needs run through pbkdf2 to generate the AES key.
  * If pbkdf2_iterations are 0, then the salt is not used.
  *
@@ -27,6 +27,7 @@ typedef unsigned char cmk_gcm_tag[CMK_GCM_TAG_LEN];
  * after a call to cmk_key_x25519_create.
  */
 typedef struct {
+   int32_t            format;
    cmk_x25519_pubkey  pubkey;
    cmk_x25519_privkey privkey;
    cmk_x25519_privkey privkey_encrypted;
@@ -35,37 +36,42 @@ typedef struct {
    bool               unlocked;
 } cmk_key_x25519;
 
-/* Only one key type for now, later this might be a type-selected union. */
-typedef cmk_key_x25519 cmk_key;
+typedef union {
+   int32_t            format;
+   cmk_key_x25519     x25519;
+} cmk_key;
 
-/* Generate an X25519 key pair and encrypt the private key with AES-256.
+#define CMK_KEYFORMAT_X25519 1
+
+/* Generate a public/private key pair and encrypt the private key with AES-256.
  * Process the password with pbkdf2 if the iterations count is not zero.
- * If pbkdf2_iter == 0, pw must be the correct length for AES.
+ * If pbkdf2_iter == 0, pw is the AES key itself and must be the correct length.
  */
-extern void cmk_key_x25519_create(cmk_key_x25519 *key, const char *pw, size_t pw_len, int pbkdf2_iter);
+extern void cmk_key_create(cmk_key *key, int type, secret_buffer *pw, int pbkdf2_iter);
 
-/* Initialize x25519 key with previous values */
-extern void cmk_key_x25519_init(cmk_key_x25519 *key, const cmk_x25519_pubkey pubkey,
-   const cmk_x25519_privkey privkey_enc, const cmk_kdf_salt kdf_salt, int kdf_iters);
+/* Initialize key struct from previous values */
+extern void cmk_key_import(cmk_key *key, HV *in);
 
-/* Using a password matching the one that created the key (which may be a direct AES key)
- * populate key->privkey and mark the key as unlocked.
- */
-extern void cmk_key_unlock(cmk_key *key, const char *pw, size_t pw_len);
-
-/* Wipe any secrets from the key.
- */
-extern void cmk_key_lock(cmk_key *key);
+/* Encode public fields to JSON-compatible structure in a hashref */
+extern void cmk_key_export(cmk_key *key, HV *out);
 
 /* Wipe any secrets from the key.
  * Also future-proofing in case struct later contains allocated portions.
  */
 extern void cmk_key_destroy(cmk_key *key);
 
-/* This struct describes a "locked" AES key, encrypted by a cmk_key_x25519 plus an ephemeral
- * public key passed through a KDF to compute an AES key that encrypts the actual AES key.
- * These fields are "public" (non-secret).  When combined with an unlocked cmk_key_x25519,
- * they can produce the original AES key of a cmk_secret.
+/* Using a password matching the one that created the key (which may be a direct AES key)
+ * populate key->privkey and mark the key as unlocked.
+ */
+extern void cmk_key_unlock(cmk_key *key, secret_buffer *pw);
+
+/* Wipe any secrets from the key, returning it to a locked state.
+ */
+extern void cmk_key_lock(cmk_key *key);
+
+/* This struct holds an encrypted AES key of a lockbox, encrypted by a cmk_key plus an ephemeral
+ * public key passed through a KDF to compute an AES key that encrypts the lockbox AES key.
+ * These fields are "public" (non-secret).
  */
 typedef struct {
    cmk_x25519_pubkey pubkey;
@@ -73,55 +79,72 @@ typedef struct {
    cmk_aes_key       aes_key_encrypted;
    cmk_aes_nonce     nonce;
    cmk_gcm_tag       gcm_tag;
-} cmk_locked_aes_key;
+} cmk_key_slot;
 
+/* Create a cmk_key_slot from an unlocked lockbox and a public key */
+extern void cmk_key_slot_create(cmk_key_slot *slot, cmk_lockbox *lockbox, cmk_key *key);
+
+/* Import the value of a cmk_key_slot into an uninitialized struct, reading from a hashref */
+extern void cmk_key_slot_import(cmk_key_slot *slot, HV *in);
+
+/* Export the values of a cmk_key_slot into a hashref */
+extern void cmk_key_slot_export(cmk_key_slot *slot, HV *out);
+
+/* Free resources og a key slot.
+ * Currently this is a no-op since the struct doesn't contain any secrets.
+ */
+extern void cmk_key_slot_destroy(cmk_key_slot *slot);
+
+/* This struct represents a simple wrapper around the parameters for an encryption context.
+ * When created, it contains a secret AES key which is used to encrypt a secret.  You can then
+ * create cmk_key_slot records that hold an encrypted version of that AES key before wiping the
+ * AES key.  After that, you need an unlocked cmk_key_slot to restore the original AES key and
+ * re-create the encryption context to decrypt the secret.
+ */
 typedef struct {
    cmk_aes_key   aes_key;
    cmk_aes_nonce nonce;
    cmk_gcm_tag   gcm_tag;
    bool unlocked: 1,
         gcm_tag_initialized: 1;
-} cmk_secret;
+} cmk_lockbox;
 
 /* Create a new 'unlocked" secret.  Generates a random AES key, and nonce.
  * gcm_tag is not initialized until an encryption occurs.
  */
-void cmk_secret_create(cmk_secret *secret);
+extern void cmk_lockbox_create(cmk_lockbox *lockbox);
 
-/* Initialize a secret with previous values.  It will initially be locked if aes_key is NULL.
- * nonce and gcm_tag cannot be null.
- */
-void cmk_secret_init(cmk_secret *secret, const cmk_aes_key aes_key, const cmk_aes_nonce nonce, const cmk_gcm_tag gcm_tag);
+/* Import the value of a cmk_lockbox into an uninitialized struct, reading from a hashref */
+extern void cmk_lockbox_import(cmk_lockbox *lockbox, HV *in);
 
-/* Unlock a secret by decrypting the secret AES key from the given lock and its key
+/* Export the public values of a cmk_lockbox into a hashref */
+extern void cmk_lockbox_export(cmk_lockbox *lockbox, HV *out);
+
+/* Currently just wipes secrets, but could free allocated things in the future. */
+extern void cmk_lockbox_destroy(cmk_lockbox *lockbox);
+
+/* Unlock an encryption by decrypting the secret AES key from the given lock and its key
  * (which must also be unlocked).  nonce and gcm_tag fields must already be initialized.
  */
-void cmk_secret_unlock(cmk_secret *secret, const cmk_locked_aes_key *lock, const cmk_key_x25519 *key);
+extern void cmk_lockbox_unlock(cmk_lockbox *lockbox, const cmk_key_slot *slot, const cmk_key *key);
 
-/* Initialize a cmk_locked_aes_key struct by creating a new ephemeral public/private keypair,
- * computing an AES key from a shared secret derived via X25519 using the key’s public key and
- * a newly generated ephemeral private key and a KDF, then encrypt the AES key of a cmk_secret
- * and store it in the lock.
- */
-void cmk_locked_aes_key_create(cmk_locked_aes_key *lock, const cmk_secret *secret, const cmk_key_x25519 *key);
+/* This deletes the aes_key from the struct. */
+extern void cmk_lockbox_lock(cmk_lockbox *lockbox);
 
-/* Using an "unlocked" secret (where aes_key is populated) encrypt from the input buffer into
+/* Using an "unlocked" lockbox (where aes_key is populated) encrypt from the input buffer into
  * the output buffer, and update the gcm_tag of the secret.  This uses AES-GCM so the length of
  * the input will equal the length of the output.  Caller must ensure output is allocated to at
  * least 'len' bytes.  The output buffer *may* be the same pointer as the input buffer, for
  * in-place operation, but otherwise the buffers may not overlap.
  */
-void cmk_secret_encrypt_buffer(cmk_secret *secret, const unsigned char *in, size_t len, unsigned char *out);
+extern void cmk_lockbox_encrypt_buffer(cmk_lockbox *lockbox, const secret_buffer *in, secret_buffer *out);
 
-/* Using an "unlocked" secret (where aes_key is populated) decrypt from the input buffer into
+/* Using an "unlocked" lockbox (where aes_key is populated) decrypt from the input buffer into
  * the output buffer.  This uses AES-GCM so the length of the input will equal the length of
  * the output.  Caller must ensure output is allocated to at least 'len' bytes.  The output
  * buffer *may* be the same pointer as the input buffer, for in-place operation, but otherwise
  * the buffers may not overlap.
  */
-void cmk_secret_decrypt_buffer(cmk_secret *secret, const unsigned char *in, size_t len, unsigned char *out);
-
-/* Currently just wipes secrets, but could free allocated things in the future. */
-void cmk_secret_destroy(cmk_secret *secret);
+extern void cmk_lockbox_decrypt_buffer(cmk_lockbox *lockbox, const secret_buffer *in, secret_buffer *out);
 
 #endif /* define CMK_H */
