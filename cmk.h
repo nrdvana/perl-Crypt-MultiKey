@@ -1,6 +1,8 @@
 #ifndef CMK_H
 #define CMK_H
 
+#include <SecretBuffer.h>
+
 #define CMK_PUBKEY_LEN 32
 #define CMK_PRIVKEY_LEN 32
 #define CMK_AES_NONCE_LEN 12
@@ -43,6 +45,11 @@ typedef union {
 
 #define CMK_KEYFORMAT_X25519 1
 
+#define CMK_MAGIC_AUTOCREATE 1
+#define CMK_MAGIC_OR_DIE     2
+#define CMK_MAGIC_UNDEF_OK   4
+extern cmk_key* cmk_key_from_magic(SV *ref, int flags);
+
 /* Generate a public/private key pair and encrypt the private key with AES-256.
  * Process the password with pbkdf2 if the iterations count is not zero.
  * If pbkdf2_iter == 0, pw is the AES key itself and must be the correct length.
@@ -69,32 +76,6 @@ extern void cmk_key_unlock(cmk_key *key, secret_buffer *pw);
  */
 extern void cmk_key_lock(cmk_key *key);
 
-/* This struct holds an encrypted AES key of a lockbox, encrypted by a cmk_key plus an ephemeral
- * public key passed through a KDF to compute an AES key that encrypts the lockbox AES key.
- * These fields are "public" (non-secret).
- */
-typedef struct {
-   cmk_x25519_pubkey pubkey;
-   cmk_kdf_salt      kdf_salt;
-   cmk_aes_key       aes_key_encrypted;
-   cmk_aes_nonce     nonce;
-   cmk_gcm_tag       gcm_tag;
-} cmk_key_slot;
-
-/* Create a cmk_key_slot from an unlocked lockbox and a public key */
-extern void cmk_key_slot_create(cmk_key_slot *slot, cmk_lockbox *lockbox, cmk_key *key);
-
-/* Import the value of a cmk_key_slot into an uninitialized struct, reading from a hashref */
-extern void cmk_key_slot_import(cmk_key_slot *slot, HV *in);
-
-/* Export the values of a cmk_key_slot into a hashref */
-extern void cmk_key_slot_export(cmk_key_slot *slot, HV *out);
-
-/* Free resources og a key slot.
- * Currently this is a no-op since the struct doesn't contain any secrets.
- */
-extern void cmk_key_slot_destroy(cmk_key_slot *slot);
-
 /* This struct represents a simple wrapper around the parameters for an encryption context.
  * When created, it contains a secret AES key which is used to encrypt a secret.  You can then
  * create cmk_key_slot records that hold an encrypted version of that AES key before wiping the
@@ -109,7 +90,21 @@ typedef struct {
         gcm_tag_initialized: 1;
 } cmk_lockbox;
 
-/* Create a new 'unlocked" secret.  Generates a random AES key, and nonce.
+/* This struct holds an encrypted AES key of a lockbox, encrypted by a cmk_key plus an ephemeral
+ * public key passed through a KDF to compute an AES key that encrypts the lockbox AES key.
+ * These fields are "public" (non-secret).
+ */
+typedef struct {
+   cmk_x25519_pubkey pubkey;
+   cmk_kdf_salt      kdf_salt;
+   cmk_aes_key       aes_key_encrypted;
+   cmk_aes_nonce     nonce;
+   cmk_gcm_tag       gcm_tag;
+} cmk_key_slot;
+
+extern cmk_lockbox* cmk_lockbox_from_magic(SV *ref, int flags);
+
+/* Create a new "unlocked" lockbox.  Generates a random AES key, and nonce.
  * gcm_tag is not initialized until an encryption occurs.
  */
 extern void cmk_lockbox_create(cmk_lockbox *lockbox);
@@ -146,5 +141,21 @@ extern void cmk_lockbox_encrypt_buffer(cmk_lockbox *lockbox, const secret_buffer
  * the buffers may not overlap.
  */
 extern void cmk_lockbox_decrypt_buffer(cmk_lockbox *lockbox, const secret_buffer *in, secret_buffer *out);
+
+extern cmk_key_slot* cmk_key_slot_from_magic(SV *ref, int flags);
+
+/* Create a cmk_key_slot from an unlocked lockbox and a public key */
+extern void cmk_key_slot_create(cmk_key_slot *slot, cmk_lockbox *lockbox, cmk_key *key);
+
+/* Import the value of a cmk_key_slot into an uninitialized struct, reading from a hashref */
+extern void cmk_key_slot_import(cmk_key_slot *slot, HV *in);
+
+/* Export the values of a cmk_key_slot into a hashref.  (all fields are public) */
+extern void cmk_key_slot_export(cmk_key_slot *slot, HV *out);
+
+/* Free resources og a key slot.
+ * Currently this is a no-op since the struct doesn't contain any secrets.
+ */
+extern void cmk_key_slot_destroy(cmk_key_slot *slot);
 
 #endif /* define CMK_H */

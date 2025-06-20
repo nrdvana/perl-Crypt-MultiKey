@@ -2,21 +2,24 @@ TYPEMAP
 cmk_key*                   O_CMK_KEY
 const cmk_key*             O_CMK_KEY
 maybe_cmk_key              O_CMK_KEY
-cmk_secret*                O_CMK_SECRET
-const cmk_secret*          O_CMK_SECRET
-maybe_cmk_secret           O_CMK_SECRET
-cmk_locked_aes_key*        O_CMK_LOCKED_AES_KEY
-const cmk_locked_aes_key*  O_CMK_LOCKED_AES_KEY
-maybe_cmk_locked_aes_key   O_CMK_SECRET_AES_KEY
+auto_cmk_key               O_CMK_KEY
+cmk_lockbox*               O_CMK_LOCKBOX
+const cmk_lockbox*         O_CMK_LOCKBOX
+maybe_cmk_lockbox          O_CMK_LOCKBOX
+auto_cmk_lockbox           O_CMK_LOCKBOX
+cmk_key_slot*              O_CMK_KEY_SLOT
+const cmk_key_slot*        O_CMK_KEY_SLOT
+maybe_cmk_key_slot         O_CMK_KEY_SLOT
+auto_cmk_key_slot          O_CMK_KEY_SLOT
 
 INPUT
 O_CMK_KEY
-   $var= cmk_key_from_magic($arg, @{[ $type =~ /^maybe/? "0" : "OR_DIE" ]});
+   $var= cmk_key_from_magic($arg, @{[ $type =~ /^auto/? q{AUTOCREATE} : $type =~ /^maybe/? 0 : q{OR_DIE} ]});
 
 INPUT
-O_CMK_SECRET
-   $var= cmk_secret_from_magic($arg, @{[ $type =~ /^maybe/? "0" : "OR_DIE" ]});
+O_CMK_LOCKBOX
+   $var= cmk_lockbox_from_magic($arg, @{[ $type =~ /^auto/? q{AUTOCREATE} : $type =~ /^maybe/? 0 : q{OR_DIE} ]});
 
 INPUT
-O_CMK_LOCKED_AES_KEY
-   $var= cmk_locked_aes_key_from_magic($arg, @{[ $type =~ /^maybe/? "0" : "OR_DIE" ]});
+O_CMK_KEY_SLOT
+   $var= cmk_key_slot_from_magic($arg, @{[ $type =~ /^auto/? q{AUTOCREATE} : $type =~ /^maybe/? 0 : q{OR_DIE} ]});

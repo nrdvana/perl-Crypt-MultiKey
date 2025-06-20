@@ -3,29 +3,33 @@
 #include "XSUB.h"
 #include "ppport.h"
 
-#ifdef HAVE_STDBOOL
-  #include <stdbool.h>
-#elif !defined(bool)
-  #define bool int
-  #define true 1
-  #define false 0
+#include "CryptMultiKey_config.h"
+
+#ifndef HAVE_BOOL
+   #define bool int
+   #define true 1
+   #define false 0
 #endif
 
 #include "cmk.h"
 
 /**********************************************************************************************\
-* Typemap code that converts from Perl objects to C structs and back
+* XS Utils
 \**********************************************************************************************/
 
-/* destructor for cmk_key magic */
-static int cmk_key_magic_free(pTHX_ SV* sv, MAGIC* mg) {
-   if (mg->mg_ptr) {
-      cmk_key_destroy((cmk_key*) mg->mg_ptr);
-      Safefree(mg->mg_ptr);
-      mg->mg_ptr= NULL;
-   }
-   return 0; /* ignored anyway */
+/* For exported constant dualvars */
+#define EXPORT_ENUM(x) newCONSTSUB(stash, #x, new_enum_dualvar(aTHX_ x, newSVpvs_share(#x)))
+static SV * new_enum_dualvar(pTHX_ IV ival, SV *name) {
+   SvUPGRADE(name, SVt_PVNV);
+   SvIV_set(name, ival);
+   SvIOK_on(name);
+   SvREADONLY_on(name);
+   return name;
 }
+
+/**********************************************************************************************\
+* Typemap code that converts from Perl objects to C structs and back
+\**********************************************************************************************/
 
 #ifdef USE_ITHREADS
 /* currently it is safe to clone all cmk_ structs */
@@ -37,213 +41,156 @@ static int cmk_key_magic_dup(pTHX_ MAGIC *mg, CLONE_PARAMS *param) {
    mg->mg_ptr= (char*) clone;
    return 0;
 };
+static int cmk_key_slot_magic_dup(pTHX_ MAGIC *mg, CLONE_PARAMS *param) {
+   cmk_key_slot *clone;
+   PERL_UNUSED_VAR(param);
+   Newxz(clone, 1, cmk_key_slot);
+   memcpy(clone, mg->mg_ptr, sizeof(cmk_key_slot));
+   mg->mg_ptr= (char*) clone;
+   return 0;
+};
+static int cmk_lockbox_magic_dup(pTHX_ MAGIC *mg, CLONE_PARAMS *param) {
+   cmk_lockbox *clone;
+   PERL_UNUSED_VAR(param);
+   Newxz(clone, 1, cmk_lockbox);
+   memcpy(clone, mg->mg_ptr, sizeof(cmk_lockbox));
+   mg->mg_ptr= (char*) clone;
+   return 0;
+};
+#define SET_MGf_DUP_FLAG(mg) do { magic->mg_flags |= MGf_DUP; } while (0)
 #else
-#define cmk_key_magic_dup NULL
+#define cmk_key_magic_dup 0
+#define cmk_key_slot_magic_dup 0
+#define cmk_lockbox_magic_dup 0
+#define SET_MGf_DUP_FLAG(mg) ((void)0)
 #endif
 
-/* Magic virtual method table for cmk_key.
- * Pointer to this struct is also used as an ID for type of magic
- */
-static MGVTBL cmk_key_magic_vt= {
-   NULL, /* get */
-   NULL, /* write */
-   NULL, /* length */
-   NULL, /* clear */
+static int cmk_key_magic_free(pTHX_ SV *sv, MAGIC *mg);
+static MGVTBL cmk_key_magic_vtbl = {
+   NULL, NULL, NULL, NULL,
    cmk_key_magic_free,
-   NULL, /* copy */
+   NULL,
    cmk_key_magic_dup
 #ifdef MGf_LOCAL
    ,NULL
 #endif
 };
 
-/* destructor for cmk_secret magic */
-static int cmk_secret_magic_free(pTHX_ SV* sv, MAGIC* mg) {
-   if (mg->mg_ptr) {
-      cmk_secret_destroy((cmk_secret*) mg->mg_ptr);
-      Safefree(mg->mg_ptr);
-      mg->mg_ptr = NULL;
-   }
-   return 0;
-}
-
-#ifdef USE_ITHREADS
-static int cmk_secret_magic_dup(pTHX_ MAGIC *mg, CLONE_PARAMS *param) {
-   cmk_secret *clone;
-   PERL_UNUSED_VAR(param);
-   Newxz(clone, 1, cmk_secret);
-   memcpy(clone, mg->mg_ptr, sizeof(cmk_secret));
-   mg->mg_ptr = (char*) clone;
-   return 0;
-}
-#else
-#define cmk_secret_magic_dup NULL
-#endif
-
-static MGVTBL cmk_secret_magic_vt = {
+static int cmk_key_slot_magic_free(pTHX_ SV *sv, MAGIC *mg);
+static MGVTBL cmk_key_slot_magic_vtbl = {
    NULL, NULL, NULL, NULL,
-   cmk_secret_magic_free,
+   cmk_key_slot_magic_free,
    NULL,
-   cmk_secret_magic_dup
+   cmk_key_slot_magic_dup
 #ifdef MGf_LOCAL
    ,NULL
 #endif
 };
 
-static int cmk_locked_aes_key_magic_free(pTHX_ SV* sv, MAGIC* mg) {
-   if (mg->mg_ptr) {
-      Safefree(mg->mg_ptr);
-      mg->mg_ptr = NULL;
-   }
-   return 0;
-}
-
-#ifdef USE_ITHREADS
-static int cmk_locked_aes_key_magic_dup(pTHX_ MAGIC *mg, CLONE_PARAMS *param) {
-   cmk_locked_aes_key *clone;
-   PERL_UNUSED_VAR(param);
-   Newxz(clone, 1, cmk_locked_aes_key);
-   memcpy(clone, mg->mg_ptr, sizeof(cmk_locked_aes_key));
-   mg->mg_ptr = (char*) clone;
-   return 0;
-}
-#else
-#define cmk_locked_aes_key_magic_dup NULL
-#endif
-
-static MGVTBL cmk_locked_aes_key_magic_vt = {
+static int cmk_lockbox_magic_free(pTHX_ SV *sv, MAGIC *mg);
+static MGVTBL cmk_lockbox_magic_vtbl = {
    NULL, NULL, NULL, NULL,
-   cmk_locked_aes_key_magic_free,
+   cmk_lockbox_magic_free,
    NULL,
-   cmk_locked_aes_key_magic_dup
+   cmk_lockbox_magic_dup
 #ifdef MGf_LOCAL
    ,NULL
 #endif
 };
 
-/* Return the cmk_key struct attached to a Perl object via MAGIC.
- * The 'obj' should be a reference to a blessed SV.
- * Use flag OR_DIE for a built-in croak() if the return value would be NULL.
+/* destructor for cmk_key magic */
+static int cmk_key_magic_free(pTHX_ SV* sv, MAGIC* mg) {
+   if (mg->mg_ptr) {
+      cmk_key_destroy((cmk_key*) mg->mg_ptr);
+      Safefree(mg->mg_ptr);
+      mg->mg_ptr= NULL;
+   }
+   return 0; /* ignored anyway */
+}
+
+/* destructor for cmk_key_slot magic */
+static int cmk_key_slot_magic_free(pTHX_ SV* sv, MAGIC* mg) {
+   if (mg->mg_ptr) {
+      cmk_key_slot_destroy((cmk_key_slot*) mg->mg_ptr);
+      Safefree(mg->mg_ptr);
+      mg->mg_ptr= NULL;
+   }
+   return 0; /* ignored anyway */
+}
+
+/* destructor for cmk_lockbox magic */
+static int cmk_lockbox_magic_free(pTHX_ SV* sv, MAGIC* mg) {
+   if (mg->mg_ptr) {
+      cmk_lockbox_destroy((cmk_lockbox*) mg->mg_ptr);
+      Safefree(mg->mg_ptr);
+      mg->mg_ptr= NULL;
+   }
+   return 0; /* ignored anyway */
+}
+
+/* Given a SV which you expect to be a reference to a blessed object with cmk_key magic,
+ * return the secret_buffer struct pointer.
+ * With no flags, this returns NULL is any of the above assumption is not correct.
+ * Specify AUTOCREATE to create a new secret_buffer (and attach with magic) if it is a blessed
+ * object and doesn't have the magic yet.
+ * Specify OR_DIE if you want an exception instead of NULL return value.
+ * Specify UNDEF_OK if you want input C<undef> to translate to C<NULL> even when OR_DIE is
+ * requested.
  */
-#define OR_DIE     1
-#define AUTOCREATE 2
-static cmk_key* cmk_key_from_magic(SV *obj, int flags) {
-   SV *sv;
-   MAGIC* magic;
-   cmk_key *key;
-
-   if (!sv_isobject(obj)) {
-      if (flags & OR_DIE)
-         croak("Not an object");
-      return NULL;
-   }
-   sv= SvRV(obj);
-   if (SvMAGICAL(sv) && (magic= mg_findext(sv, PERL_MAGIC_ext, &TreeRBXS_magic_vt)))
-      return (struct cmk_key*) magic->mg_ptr;
-
-   if (flags & AUTOCREATE) {
-      Newxz(key, 1, cmk_key);
-      magic= sv_magicext(sv, NULL, PERL_MAGIC_ext, &cmk_key_magic_vt, (const char*) key, 0);
-#ifdef USE_ITHREADS
-      magic->mg_flags |= MGf_DUP;
-#endif
-      return tree;
-   }
-   if (flags & OR_DIE)
-      croak("Object lacks 'cmk_key' magic");
-   return NULL;
-}
-
-static cmk_locked_aes_key* cmk_locked_aes_key_from_magic(SV *obj, int flags) {
+#define AUTOCREATE CMK_MAGIC_AUTOCREATE
+#define OR_DIE     CMK_MAGIC_OR_DIE
+#define UNDEF_OK   CMK_MAGIC_UNDEF_OK
+static void * X_from_magic(SV *obj, int flags, MGVTBL *vtbl, const char * struct_name, size_t struct_size) {
    SV *sv;
    MAGIC *magic;
-   cmk_locked_aes_key *lock;
+   char *p;
+
+   if ((!obj || !SvOK(obj)) && (flags & CMK_MAGIC_UNDEF_OK))
+      return NULL;
 
    if (!sv_isobject(obj)) {
-      if (flags & OR_DIE)
+      if (flags & CMK_MAGIC_OR_DIE)
          croak("Not an object");
       return NULL;
    }
    sv = SvRV(obj);
-   if (SvMAGICAL(sv) && (magic = mg_findext(sv, PERL_MAGIC_ext, &cmk_locked_aes_key_magic_vt)))
-      return (cmk_locked_aes_key*) magic->mg_ptr;
+   if (SvMAGICAL(sv) && (magic = mg_findext(sv, PERL_MAGIC_ext, vtbl)))
+      return magic->mg_ptr;
 
-   if (flags & AUTOCREATE) {
-      Newxz(lock, 1, cmk_locked_aes_key);
-      magic = sv_magicext(sv, NULL, PERL_MAGIC_ext, &cmk_locked_aes_key_magic_vt, (const char*) lock, 0);
-#ifdef USE_ITHREADS
-      magic->mg_flags |= MGf_DUP;
-#endif
-      return lock;
+   if (flags & CMK_MAGIC_AUTOCREATE) {
+      Newxz(p, struct_size, char);
+      magic = sv_magicext(sv, NULL, PERL_MAGIC_ext, vtbl, p, 0);
+      SET_MGf_DUP_FLAG(mg);
+      return p;
    }
-   if (flags & OR_DIE)
-      croak("Object lacks 'cmk_locked_aes_key' magic");
+   if (flags & CMK_MAGIC_OR_DIE)
+      croak("Object lacks '%s' magic", struct_name);
    return NULL;
 }
 
-static cmk_secret* cmk_secret_from_magic(SV *obj, int flags) {
-   SV *sv;
-   MAGIC *magic;
-   cmk_secret *secret;
-
-   if (!sv_isobject(obj)) {
-      if (flags & OR_DIE)
-         croak("Not an object");
-      return NULL;
-   }
-   sv = SvRV(obj);
-   if (SvMAGICAL(sv) && (magic = mg_findext(sv, PERL_MAGIC_ext, &cmk_secret_magic_vt)))
-      return (cmk_secret*) magic->mg_ptr;
-
-   if (flags & AUTOCREATE) {
-      Newxz(secret, 1, cmk_secret);
-      magic = sv_magicext(sv, NULL, PERL_MAGIC_ext, &cmk_secret_magic_vt, (const char*) secret, 0);
-#ifdef USE_ITHREADS
-      magic->mg_flags |= MGf_DUP;
-#endif
-      return secret;
-   }
-   if (flags & OR_DIE)
-      croak("Object lacks 'cmk_secret' magic");
-   return NULL;
+cmk_key * cmk_key_from_magic(SV *obj, int flags) {
+   return (cmk_key*) X_from_magic(obj, flags, &cmk_key_magic_vtbl, "Crypt::MultiKey::Key", sizeof(cmk_key));
+}
+cmk_key_slot * cmk_key_slot_from_magic(SV *obj, int flags) {
+   return (cmk_key_slot*) X_from_magic(obj, flags, &cmk_key_slot_magic_vtbl, "Crypt::MultiKey::KeySlot", sizeof(cmk_key_slot));
+}
+cmk_lockbox * cmk_lockbox_from_magic(SV *obj, int flags) {
+   return (cmk_lockbox*) X_from_magic(obj, flags, &cmk_lockbox_magic_vtbl, "Crypt::MultiKey::Lockbox", sizeof(cmk_lockbox));
 }
 
-static cmk_secret_buffer* cmk_secret_buffer_from_magic(SV *obj, int flags) {
-   SV *sv;
-   MAGIC *magic;
-   cmk_secret_buffer *buf;
-
-   if (!sv_isobject(obj)) {
-      if (flags & OR_DIE)
-         croak("Not an object");
-      return NULL;
-   }
-   sv = SvRV(obj);
-   if (SvMAGICAL(sv) && (magic = mg_findext(sv, PERL_MAGIC_ext, &cmk_secret_buffer_magic_vt)))
-      return (cmk_secret_buffer*) magic->mg_ptr;
-
-   if (flags & AUTOCREATE) {
-      Newxz(buf, 1, cmk_secret_buffer);
-      magic = sv_magicext(sv, NULL, PERL_MAGIC_ext, &cmk_secret_magic_vt, (const char*) buf, 0);
-#ifdef USE_ITHREADS
-      magic->mg_flags |= MGf_DUP;
-#endif
-      return secret;
-   }
-   if (flags & OR_DIE)
-      croak("Object lacks 'cmk_secret_buffer' magic");
-   return NULL;
-}
-
-typedef cmk_key            *maybe_cmk_key;
-typedef cmk_secret         *maybe_cmk_secret;
-typedef cmk_locked_aes_key *maybe_cmk_locked_aes_key;
-typedef cmk_secret_buffer  *auto_cmk_secret_buffer;
+typedef cmk_key *       maybe_cmk_key;
+typedef cmk_key *       auto_cmk_key;
+typedef cmk_key_slot *  maybe_cmk_key_slot;
+typedef cmk_key_slot *  auto_cmk_key_slot;
+typedef cmk_lockbox *   maybe_cmk_lockbox;
+typedef cmk_lockbox *   auto_cmk_lockbox;
+#define KEYFORMAT_X25519 CMK_KEYFORMAT_X25519
 
 /**********************************************************************************************\
 * Crypt::MultiKey::Key API
 \**********************************************************************************************/
-MODULE = Crypt::MultiKey                 PACKAGE = Crypt::MultiKey::Key
+MODULE = Crypt::MultiKey                PACKAGE = Crypt::MultiKey::Key
+PROTOTYPES: DISABLE
 
 bool
 _is_initialized(key)
@@ -254,31 +201,151 @@ _is_initialized(key)
       RETVAL
 
 void
-_init_existing(obj, password, pbkdf_iters)
-   SV *obj
-   SV *password
-   int pbkdf_iters
-   INIT:
-      cmk_key key;
-      STRLEN len;
-      const char *pw_str;
+_create(key, type, password, pbkdf2_iters)
+   auto_cmk_key key
+   int type
+   secret_buffer *password
+   int pbkdf2_iters
+   PPCODE:
+      cmk_key_create(key, type, password, pbkdf2_iters);
+
+void
+import(key, src)
+   auto_cmk_key key
+   HV *src
+   PPCODE:
+      cmk_key_import(key, src);
+
+void
+export(key, dst)
+   auto_cmk_key key
+   HV *dst
+   PPCODE:
+      cmk_key_export(key, dst);
+      if (GIMME_V != G_VOID) {
+         ST(0)= sv_2mortal(newRV_inc((SV*) dst));
+         XSRETURN(1);
+      } else {
+         XSRETURN(0);
+      }
+
+void
+unlock(key, buf)
+   cmk_key *key
+   secret_buffer *buf
+   PPCODE:
+      cmk_key_unlock(key, buf);
+
+void
+lock(key)
+   cmk_key *key
+   PPCODE:
+      cmk_key_lock(key);
+
+MODULE =  Crypt::MultiKey               PACKAGE = Crypt::MultiKey::Lockbox
+
+bool
+_is_initialized(lb)
+   maybe_cmk_lockbox lb
    CODE:
-      if (cmk_secret_from_magic(obj, 0))
-         croak("Already initialized");
-      if (!SvPOK(password))
-         croak("Password must be a scalar");
-      if (pbkdf_iters < 0 || pbkdf_iters == INT_MAX)
-         croak("pbkdf_iterations cannot be negative or INT_MAX");
-      pw_str= SvPVbyte_force(pw_pv, len);
-      /* dies if it fails */
-      cmk_key_x25519_create(&key, pw_str, len, pbkdf2_iters);
-      /* clone into a dynamic allocation, then wipe it */
+      RETVAL = (lb != NULL);
+   OUTPUT:
+      RETVAL
+
+void
+_create(lb)
+   auto_cmk_lockbox lb
+   PPCODE:
+      cmk_lockbox_create(lb);
+
+void
+import(lb, src)
+   auto_cmk_lockbox lb
+   HV *src
+   PPCODE:
+      cmk_lockbox_import(lb, src);
+
+void
+export(lb, dst)
+   cmk_lockbox *lb
+   HV *dst
+   PPCODE:
+      cmk_lockbox_export(lb, dst);
+      if (GIMME_V != G_VOID) {
+         ST(0)= sv_2mortal(newRV_inc((SV*) dst));
+         XSRETURN(1);
+      } else {
+         XSRETURN(0);
+      }
+
+void
+_unlock(lb, slot, key)
+   cmk_lockbox *lb
+   cmk_key_slot *slot
+   cmk_key *key
+   PPCODE:
+      cmk_lockbox_unlock(lb, slot, key);
+
+void
+lock(lb)
+   cmk_lockbox *lb
+   PPCODE:
+      cmk_lockbox_lock(lb);
+
+void
+encrypt(lb, plain, cipher)
+   cmk_lockbox *lb
+   secret_buffer *plain
+   secret_buffer *cipher
+   PPCODE:
+      cmk_lockbox_encrypt_buffer(lb, plain, cipher);
       
-      
+void
+decrypt(lb, cipher, plain)
+   cmk_lockbox *lb
+   secret_buffer *cipher
+   secret_buffer *plain
+   PPCODE:
+      cmk_lockbox_decrypt_buffer(lb, cipher, plain);
+
+MODULE = Crypt::MultiKey                PACKAGE = Crypt::MultiKey::KeySlot
+
+bool
+_is_initialized(slot)
+   maybe_cmk_key_slot slot
+   CODE:
+      RETVAL = (slot != NULL);
+   OUTPUT:
+      RETVAL
+
+void
+_create(slot, lb, key)
+   auto_cmk_key_slot slot
+   cmk_lockbox *lb
+   cmk_key *key
+   PPCODE:
+      cmk_key_slot_create(slot, lb, key);
+
+void
+import(slot, src)
+   auto_cmk_key_slot slot
+   HV *src
+   PPCODE:
+      cmk_key_slot_import(slot, src);
+
+void
+export(slot, dst)
+   cmk_key_slot *slot
+   HV *dst
+   PPCODE:
+      cmk_key_slot_export(slot, dst);
+      if (GIMME_V != G_VOID) {
+         ST(0)= sv_2mortal(newRV_inc((SV*) dst));
+         XSRETURN(1);
+      } else {
+         XSRETURN(0);
+      }
+
 BOOT:
-   HV *inc= get_hv("INC", GV_ADD);
-   AV *isa;
-   hv_stores(inc, "Math::3Space::Projection",                  newSVpvs("Math/3Space.pm"));
-   hv_stores(inc, "Math::3Space::Projection::Frustum",         newSVpvs("Math/3Space.pm"));
-   isa= get_av("Math::3Space::Projection::Frustum::ISA", GV_ADD);
-   av_push(isa, newSVpvs("Math::3Space::Projection"));
+   HV *stash= gv_stashpvs("Crypt::MultiKey", 1);
+   EXPORT_ENUM(KEYFORMAT_X25519);

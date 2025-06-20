@@ -4,12 +4,12 @@ package Crypt::MultiKey;
 
 =head1 SYNOPSIS
 
-  use Crypt::MultiKey qw( repo secret key );
+  use Crypt::MultiKey qw( repo lockbox key );
   
   # List available plugins for unlocking keys
-  say for Crypt::MultiKey->mechanisms;
+  say for Crypt::MultiKey->key_mechanisms;
   
-  # List available plugins for applying secrets to systems
+  # List available plugins for applying secrets to targets
   say for Crypt::MultiKey->applications;
   
   my $repo= repo('/some/path/');
@@ -19,7 +19,7 @@ package Crypt::MultiKey;
   $repo->new_key('pw',  Password => { source => \*STDIN });
   $repo->new_key($name2, SSHAgentSignature => { pubkey => $pubkey_string });
   $repo->new_key($name3, SSLCert => { cert_path => $path_to_cert });
-  $repo->new_secret('ZFS-key', { data => \$scalar })->lock_with($repo->key_list);
+  $repo->new_lockbox('ZFS-key', { data => \$scalar })->lock_with($repo->key_list);
   
   my $secret= $repo->secret('ZFS-key');
   # OR:

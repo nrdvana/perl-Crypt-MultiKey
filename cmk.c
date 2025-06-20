@@ -3,6 +3,8 @@
 #include "XSUB.h"
 #include "ppport.h"
 
+#include "CryptMultiKey_config.h"
+
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/err.h>
@@ -11,16 +13,13 @@
 #include <string.h>
 #include <stdlib.h>
 
-#ifdef HAVE_STDBOOL
-  #include <stdbool.h>
-#elif !defined(bool)
-  #define bool int
-  #define true 1
-  #define false 0
+#ifndef HAVE_BOOL
+   #define bool int
+   #define true 1
+   #define false 0
 #endif
 
 #include "cmk.h"
-#include "SecretBuffer.h"
 
 void cmk_key_create(cmk_key *key, int type, secret_buffer *pw, int pbkdf2_iter) {
    const char *err = NULL;

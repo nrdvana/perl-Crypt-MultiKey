@@ -154,7 +154,7 @@ EOF
 	# this crappy code.  we don't worry about portable pathnames,
 	# as the old code didn't either.
 	(my $mdir = $self->{name}) =~ s{::}{/}g;
-	my $mod_lib_fname;
+	my $mod_lib_fname= '';
 	if ($has_c_api) {
 		require DynaLoader;
 		($mod_lib_fname)= $mdir =~ m,([^/]+)$,;
@@ -162,6 +162,7 @@ EOF
 	}
 	print $file <<"EOT";
 
+	# back-compat for older ExtUtils::Depends which look for this variable
 	\$CORE = undef;
 	foreach (\@INC) {
 		if ( -f \$_ . "/$mdir/Install/Files.pm") {
@@ -193,37 +194,36 @@ EOF
 		
 		# Convert typemaps to absolute paths
 		\$_= File::Spec->rel2abs(\$_, \$instpath) for \@{ \$vars->{TYPEMAPS} };
-		
-		# If this module exports C API functions from its library, need to add
+EOT
+	print $file <<"EOT" if $has_c_api;
+		# This module exports C API functions from its library, so need to add
 		# the XS library itself to the libs.
-		if (\$self->{c_api}) {
-			require DynaLoader;
-			my \@search= map File::Spec->catdir(\$_, qw( auto @{[ join ' ', split /::/, $self->{name} ]} )), \@INC;
-			my \$path= DynaLoader::dl_findfile(map("-L\$_", \@search), "$mod_lib_fname")
-				or die "Can't locate shared library for module \$class (looked for $mod_lib_fname.\$DynaLoader::dl_dlext)";
-			my (\$vol,\$dirs,\$file) = File::Spec->splitpath(\$path);
-			\$dirs =~ s,[\\\\/]\$,,; # remove trailing slash
-			
-			# On win32, need to reference the '.a' or '.lib' file instead of the '.dll'
-			if (\$^O eq 'MSWin32') {
-				my \$libfile= substr(\$file, 0, -1-length \$DynaLoader::dl_dlext);
-				if (-f File::Spec->catpath(\$vol, \$dirs, "\$libfile.lib")) { # MSVC
-					\$file= "\$libfile.lib";
-				} elsif (-f File::Spec->catpath(\$vol, \$dirs, "\$libfile.a")) { # MinGW
-					\$file= "\$libfile.a";
-				} else {
-					warn "Can't determine import library name from \$path; didn't find \$libfile.lib or \$libfile.a in \$dirs";
-				}
+		require DynaLoader;
+		my \@search= map File::Spec->catdir(\$_, qw( auto @{[ join ' ', split /::/, $self->{name} ]} )), \@INC;
+		my \$path= DynaLoader::dl_findfile(map("-L\$_", \@search), "$mod_lib_fname")
+			or die "Can't locate shared library for module \$class (looked for $mod_lib_fname.\$DynaLoader::dl_dlext)";
+		my (\$vol,\$dirs,\$file) = File::Spec->splitpath(\$path);
+		\$dirs =~ s,[\\\\/]\$,,; # remove trailing slash
+
+		# On win32, need to reference the '.a' or '.lib' file instead of the '.dll'
+		if (\$^O eq 'MSWin32') {
+			my \$libfile= substr(\$file, 0, -1-length \$DynaLoader::dl_dlext);
+			if (-f File::Spec->catpath(\$vol, \$dirs, "\$libfile.lib")) { # MSVC
+				\$file= "\$libfile.lib";
+			} elsif (-f File::Spec->catpath(\$vol, \$dirs, "\$libfile.a")) { # MinGW
+				\$file= "\$libfile.a";
+			} else {
+				warn "Can't determine import library name from \$path; didn't find \$libfile.lib or \$libfile.a in \$dirs";
 			}
-			my \$libpath = File::Spec->catpath(\$vol,\$dirs,'');
-			\$vars->{LIBS}= "-L"._maybe_quote_path(\$libpath)." -l\$file \$vars->{LIBS}";
 		}
+		my \$libpath = File::Spec->catpath(\$vol,\$dirs,'');
+		\$vars->{LIBS}= "-L"._maybe_quote_path(\$libpath)." -l\$file \$vars->{LIBS}";
+EOT
+	print $file <<"EOT";
 		return \$vars;
 	}
+        1;
 EOT
-
-	print $file "\n1;\n";
-
 	close $file;
 
 	# we need to ensure that the file we just created gets put into
