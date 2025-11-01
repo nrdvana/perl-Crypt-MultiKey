@@ -4,43 +4,83 @@ package Crypt::MultiKey;
 
 =head1 SYNOPSIS
 
-  use Crypt::MultiKey qw( repo lockbox key );
+  use Crypt::MultiKey;
+  use Crypt::SecretBuffer 'secret';
   
-  # List available plugins for unlocking keys
+  # List available plugins for activating keys
   say for Crypt::MultiKey->key_mechanisms;
   
-  # List available plugins for applying secrets to targets
+  # List available plugins for applying vaults to targets
   say for Crypt::MultiKey->applications;
   
-  my $repo= repo('/some/path/');
-  say $_->name for $repo->secret_list;
+  my $repo= Crypt::MultiKey->new('/some/path/');
+  say $_->name for $repo->vault_list;
   say $_->name for $repo->key_list;
+
+  # Create a password-based key
+  print "Enter your password: ";
+  my $pw= secret;
+  $pw->append_console_line(STDIN) or die "aborted";
+  $repo->new_key('master_pw', Password => { password => $pw });
   
-  $repo->new_key('pw',  Password => { source => \*STDIN });
-  $repo->new_key($name2, SSHAgentSignature => { pubkey => $pubkey_string });
-  $repo->new_key($name3, SSLCert => { cert_path => $path_to_cert });
-  $repo->new_lockbox('ZFS-key', { data => \$scalar })->lock_with($repo->key_list);
+  # Create a key that can be activated by your SSH agent
+  $repo->new_key("ssh-$username", SSHAgentSignature => { pubkey => $pubkey_string });
   
-  my $secret= $repo->secret('ZFS-key');
-  # OR:
-  my $secret= secret($path);
-  $secret->unlock_interactive; # prompts to unlock secret
-  $secret->apply(ZFS => $pool_name);
+  # Create a key that can be activated by the holder of the key to a SSL certificate
+  $repo->new_key('our_keyserver', KeyServer => { url => $url });
+  
+  # Create a vault and store into it the secret used to encrypt a ZFS dataset
+  my $vault= $repo->new_vault('ZFS-key');
+  $vault->pair_with($repo->key_list);
+  my $zfs_key= secret(append_random => 16);
+  $vault->store('zfs_key', $zfs_key);
+  
+  ... # later,
+  
+  my $vault= $repo->vault('ZFS-key');
+  $vault->unlock(interactive => 1); # try ssh agent, try key server, fall back to pw
+  my $zfs_key= $vault->load('zfs_key');
 
 =head1 DESCRIPTION
 
-This module implements a "key wrapping scheme" where secrets are encrypted with an internal
-secret and then that secret is encrypted with one or more public keys, such that B<any> of the
-private keys can unlock the secret to decrypt the data.  Further, the private keys can be
-encrypted with a secret such as a SSH Agent signature, or Yubikey challenge-response.
+This module is an implementation of a "key wrapping scheme" (such as done by age or libsodium),
+but with a focus on applying it to specifc workflows rather than being just an abstract tool.
 
-Unlike some other tools, more secrets can be added later, automatically wrapped by each of the
-known public keys.  Likewise, as long as you have one unlocked key, you can add additional keys
-and apply wrappings to all existing secrets in the directory.
+Since there are so many "secrets" and "keys" involved in this system, I'm using the following
+metaphor to help disambiguate them:
 
-Finally, when it is time to unlock a secret, you can automatically scan whether any of the known
-keys are unlocked or can be unlocked in the current environment (such as checking your ssh-agent
-or looking for a Yubikey on the USB bus)
+=over
+
+=item Vault
+
+A Vault object is an encrytion context that can be used to encrypt or decrypt user data, and is
+initially created with a secret AES symmetric key in an "unlocked" state.  The Vault
+conceptually contains a key/value dictionary of secrets which can be loaded and stored while
+the vault is unlocked.  The Vault may be paired with any number of Key objects, and pairing can
+only occur while the Vault is unlocked.  *Any* paired key can unlock the Vault.
+
+Vaults are stored in a JSON file, with the encrypted name/value data stored in hexidecimal.
+For larger encrypted data (over a configurable threshold), a directory of the same name of the
+Vault file is created and the large data streams are written to files named with GUIDs.
+The names of data stored in the Vault cannot be determined without first unlocking the Vault.
+The name/value data stored in the Vault is not intended to be a performant database, but rather
+just a simple convenient way to store more than one thing in the same Vault.  The Vault is
+re-encrypted and written to disk after every ->store operation.
+
+=item Key
+
+The Key objects are wrappers around a public/private key system, and then the private half
+is either encrypted or stored separately.  A Key is "enabled" when the private half is known
+and "disabled" when it isn't.  The private half is used to decrypt the AES key of a Vault.
+
+The fact that every Key has a public component is what allows them to be paired with a Vault
+even while they are disabled.  The practical application of this is that you can establish a
+Key for a hardware device, or a password physically stored in a safe deposit box, and then
+later pair this Key with new Vaults without first needing to enable it.
+
+=back
+
+=head2 Motivation
 
 The use case this module was designed to solve was to allow encryped volumes on a server to be
 unlocked with more than one method:
@@ -49,7 +89,7 @@ unlocked with more than one method:
 
 =item * A key server, using SSL certs for authentication
 
-=item * A SSH private key served by an Agent
+=item * A SSH private key from the Agent of a logged-in user
 
 =item * A Yubikey
 
@@ -58,79 +98,87 @@ unlocked with more than one method:
 =back
 
 Every time the server boots, it needs the encrypted volumes unlocked.  If it is online, it
-contacts the central key server and the key server is in posession of a SSH key which can be used
-to decrypt the secret.  If the key server is offline, an admin with a SSH key can connect and
-forward their SSH agent to unlock the volumes.  If an admin can't connect remotely or can't be
-reached, someone on-site with a physically secure Yubikey can retrieve and plug in the key and
-then udev rules automatically trigger to unlock the encrypted volumes.  If all else fails,
-someone can go to the safe deposit box and get the sheet of paper where the secret is written.
+contacts the central key server and the key server is able to send a response that allows the
+activation of that key.   If the key server is offline or unavailable, an admin with a SSH key
+can connect and forward their SSH agent to unlock the volumes.  If an admin can't connect
+remotely or can't be reached, someone on-site with a physically secure Yubikey can retrieve and
+plug in the key and then udev rules automatically trigger to unlock the encrypted volumes.
+If all else fails, someone can go to the safe deposit box and get the sheet of paper where the
+secret is written.
 
-This module collection facilitates the described workflow.
+This module collection facilitates all of that.
 
-=head1 DESIGN
+=head2 Design
 
-This module uses OpenSSL to encrypt and decrypt arbitrary length data, using AES.  The key for
-AES is created in memory, used to encrypt your actual secret, and then a wrapping of that key
-is created using each of the public keys you previously created.  This way, any of the keys can
-be used to decrypt their wrapping to retrieve the AES key, and decrypt the original data.
+A typical directory of MultiKey files might look like:
 
-This module consists of a "Repo" (directory) containing Keys (key-XXXXX.json) and secrets
-(secret-XXXXX.json) and sometimes a separate file for the secret data (secret-XXXXX.aes) to
-avoid a large secret needing to be encoded as base64 in json.
+  /etc/mk/
+  /etc/mk/vault-root.json
+  /etc/mk/vault-root/12345678-1234-12-12-123456789ABCDEF.enc
+  /etc/mk/key-master_pw.json
+  /etc/mk/key-yubikey.json
+  /etc/mk/key-our_company_keyserver.json
+  /etc/mk/key-ssh_user1.json
 
-The Key json generally looks like:
+Vaults start with C<"vault-">.  In this case there is only one, named C<"root">.
+The contents of the vault named "root" could include any number of name/value pairs, but at
+least one of them was large enough to get written out as its own file in the C<< vault-root/ >>
+subdirectory.  The vault json includes details about which keys it has been paired with, such
+as the salt that was used in the pairing for the encryption context.  It references the keys
+by UUID rather than filename, so you can rename the key files without breaking things.
 
-  { uuid: "1234-5678-12-123456-1234",
-    pubkey: "base64.....",
-    privkey: "base64.....",   /* encrypted */
-    
-    /* fields for password-encrypted privkey */
-    pbkdf2_iter: N,
-    salt: "base64.....",
-    
-    /* fields for yubikey chal/resp encrypted privkey */
-    yubikey_serial: "...",
-    
-    /* fields for ssh-agent chal/resp encrypted privkey */
-    ssh_agent_pubkey: "ssh-dsa HJGFKJHGJKHGKJHGJKHGJKGH Hostname"
-  }
+Keys are stored in files with the prefix C<< key- >>.  In this example, there is one key named
+'master_pw' encrypted with a password, one key named 'yubikey' that is tied to a specific USB
+hardware device, one key named 'our_company_keyserver' which refers to a different host by URL,
+and a key named 'ssh_user1' which is linked to the ssh key of user1.  Each key json contains
+the UUID, and public key components of the public/private keypair.  It will also contain details
+which algorithm to use to enable it.
 
-And each secret generally looks like:
-
-  { uuid: "1234-5678-12-123456-1234",
-    locks: [
-      {
-        key: $uuid, /* references a Key file by UUID */
-        pubkey: "base64.....",
-        nonce: "base64.....",
-        gcm_tag: "base64.....",
-        hkdf_salt: "base64.....",
-        aes_key_enc: "base64.....",
-      },
-      ... /* for each key which can unlock the secret */
-    ],
-    data: "base64....."                      /* if secret is small */
-    data: { uri: "file:secret-Example.enc" } /* if secret is large */
-  }
+While you *can* put all the files into a standard directory layout like this, you are not
+required to.  You could pair a key with a vault then completely remove the key file from the
+filesystem to e.g. a USB stick.  Later, your perl script could point a MultiKey instance at the
+file on the removable media to make the key available as if it had been in the directory with
+the others.
 
 =cut
 
 use strict;
 use warnings;
-use Exporter 'import';
-our @EXPORT_OK= qw( secret );
+use Carp;
+require Crypt::MultiKey::Key;
 
-sub secret {
-   require Crypt::MultiKey::Secret;
-   if (@_ != 1) {
-      return Crypt::MultiKey::Secret->new(@_);
-   } elsif (ref $_[0] eq 'HASH') {
-      return Crypt::MultiKey::Secret->new($_[0]);
-   } elsif (ref $_[0] eq 'SCALAR') {
-      return Crypt::MultiKey::Secret->new_from_string($_[0]);
-   } else {
-      return Crypt::MultiKey::Secret->new_from_file($_[0]);
-   }
+sub new_vault {
+   my ($self, $name)= splice @_, 0, 2;
+   my $path= $self->_subpath("vault-$name.json");
+   $self->{vault}{$name} || -e $path
+      and croak "Path already exists: $path";
+   my @opts= ref $_[0] eq 'HASH'? %{$_[0]} : @_;
+   Crypt::MultiKey::Vault->new(path => $path, name => $name, @opts);
+}
+sub vault {
+   my ($self, $name)= @_;
+   $self->{vault}{$name} //= do {
+      my $path= $self->_subpath("vault-$name.json");
+      return undef unless -f $path;
+      Crypt::MultiKey::Vault->new_from_file($path);
+   };
+}
+
+sub new_key {
+   my ($self, $name, $type)= splice @_, 0, 3;
+   my $path= $self->_subpath("key-$name.json");
+   $self->{key}{$name} || -e $path
+      and croak "Key '$name' already exists";
+   my @opts= ref $_[0] eq 'HASH'? %{$_[0]} : @_;
+   Crypt::MultiKey::Key->load_class_for_type($type)->new(path => $path, name => $name, @opts);
+}
+sub key {
+   my ($self, $name)= @_;
+   $self->{key}{$name} //= do {
+      my $path= $self->_subpath("key-$name.json");
+      return undef unless -f $path;
+      Crypt::MultiKey::Key->new_from_file($path);
+   };
 }
 
 1;
