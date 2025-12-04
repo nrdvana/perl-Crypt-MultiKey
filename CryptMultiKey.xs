@@ -11,6 +11,7 @@
    #define false 0
 #endif
 
+#include <openssl/evp.h>
 #include "cmk.h"
 
 /**********************************************************************************************\
@@ -27,6 +28,7 @@ static SV * new_enum_dualvar(pTHX_ IV ival, SV *name) {
    return name;
 }
 
+#if 0
 /**********************************************************************************************\
 * Typemap code that converts from Perl objects to C structs and back
 \**********************************************************************************************/
@@ -49,11 +51,11 @@ static int cmk_key_slot_magic_dup(pTHX_ MAGIC *mg, CLONE_PARAMS *param) {
    mg->mg_ptr= (char*) clone;
    return 0;
 };
-static int cmk_lockbox_magic_dup(pTHX_ MAGIC *mg, CLONE_PARAMS *param) {
-   cmk_lockbox *clone;
+static int cmk_vault_magic_dup(pTHX_ MAGIC *mg, CLONE_PARAMS *param) {
+   cmk_vault *clone;
    PERL_UNUSED_VAR(param);
-   Newxz(clone, 1, cmk_lockbox);
-   memcpy(clone, mg->mg_ptr, sizeof(cmk_lockbox));
+   Newxz(clone, 1, cmk_vault);
+   memcpy(clone, mg->mg_ptr, sizeof(cmk_vault));
    mg->mg_ptr= (char*) clone;
    return 0;
 };
@@ -61,7 +63,7 @@ static int cmk_lockbox_magic_dup(pTHX_ MAGIC *mg, CLONE_PARAMS *param) {
 #else
 #define cmk_key_magic_dup 0
 #define cmk_key_slot_magic_dup 0
-#define cmk_lockbox_magic_dup 0
+#define cmk_vault_magic_dup 0
 #define SET_MGf_DUP_FLAG(mg) ((void)0)
 #endif
 
@@ -87,12 +89,12 @@ static MGVTBL cmk_key_slot_magic_vtbl = {
 #endif
 };
 
-static int cmk_lockbox_magic_free(pTHX_ SV *sv, MAGIC *mg);
-static MGVTBL cmk_lockbox_magic_vtbl = {
+static int cmk_vault_magic_free(pTHX_ SV *sv, MAGIC *mg);
+static MGVTBL cmk_vault_magic_vtbl = {
    NULL, NULL, NULL, NULL,
-   cmk_lockbox_magic_free,
+   cmk_vault_magic_free,
    NULL,
-   cmk_lockbox_magic_dup
+   cmk_vault_magic_dup
 #ifdef MGf_LOCAL
    ,NULL
 #endif
@@ -118,10 +120,10 @@ static int cmk_key_slot_magic_free(pTHX_ SV* sv, MAGIC* mg) {
    return 0; /* ignored anyway */
 }
 
-/* destructor for cmk_lockbox magic */
-static int cmk_lockbox_magic_free(pTHX_ SV* sv, MAGIC* mg) {
+/* destructor for cmk_vault magic */
+static int cmk_vault_magic_free(pTHX_ SV* sv, MAGIC* mg) {
    if (mg->mg_ptr) {
-      cmk_lockbox_destroy((cmk_lockbox*) mg->mg_ptr);
+      cmk_vault_destroy((cmk_vault*) mg->mg_ptr);
       Safefree(mg->mg_ptr);
       mg->mg_ptr= NULL;
    }
@@ -174,17 +176,18 @@ cmk_key * cmk_key_from_magic(SV *obj, int flags) {
 cmk_key_slot * cmk_key_slot_from_magic(SV *obj, int flags) {
    return (cmk_key_slot*) X_from_magic(obj, flags, &cmk_key_slot_magic_vtbl, "Crypt::MultiKey::KeySlot", sizeof(cmk_key_slot));
 }
-cmk_lockbox * cmk_lockbox_from_magic(SV *obj, int flags) {
-   return (cmk_lockbox*) X_from_magic(obj, flags, &cmk_lockbox_magic_vtbl, "Crypt::MultiKey::Lockbox", sizeof(cmk_lockbox));
+cmk_vault * cmk_vault_from_magic(SV *obj, int flags) {
+   return (cmk_vault*) X_from_magic(obj, flags, &cmk_vault_magic_vtbl, "Crypt::MultiKey::vault", sizeof(cmk_vault));
 }
 
-typedef cmk_key *       maybe_cmk_key;
+typedef cmk_key_pubkey *       maybe_cmk_key;
 typedef cmk_key *       auto_cmk_key;
 typedef cmk_key_slot *  maybe_cmk_key_slot;
 typedef cmk_key_slot *  auto_cmk_key_slot;
-typedef cmk_lockbox *   maybe_cmk_lockbox;
-typedef cmk_lockbox *   auto_cmk_lockbox;
-#define KEYFORMAT_X25519 CMK_KEYFORMAT_X25519
+typedef cmk_vault *   maybe_cmk_vault;
+typedef cmk_vault *   auto_cmk_vault;
+
+#endif
 
 /**********************************************************************************************\
 * Crypt::MultiKey::Key API
@@ -192,160 +195,40 @@ typedef cmk_lockbox *   auto_cmk_lockbox;
 MODULE = Crypt::MultiKey                PACKAGE = Crypt::MultiKey::Key
 PROTOTYPES: DISABLE
 
-bool
-_is_initialized(key)
-   maybe_cmk_key key
-   CODE:
-      RETVAL = (key != NULL);
-   OUTPUT:
-      RETVAL
+void
+_keygen(key_obj, type)
+   SV *key_obj
+   const char *type
+   PPCODE:
+      cmk_key_keygen(key_obj, type);
+      XSRETURN(1);
 
 void
-_create(key, type, password, pbkdf2_iters)
-   auto_cmk_key key
-   int type
-   secret_buffer *password
-   int pbkdf2_iters
+_init_keyslot(key_obj, slot, secret)
+   SV *key_obj
+   HV *slot
+   SV *secret
+   INIT:
+      EVP_PKEY *pubkey= cmk_key_get_pubkey(key_obj);
+      STRLEN len;
+      const char *buf= secret_buffer_SvPVbyte(secret, &len);
    PPCODE:
-      cmk_key_create(key, type, password, pbkdf2_iters);
+      cmk_key_slot_create(slot, pubkey, buf, len);
+      XSRETURN(1);
 
 void
-import(key, src)
-   auto_cmk_key key
-   HV *src
+_unlock_keyslot(key_obj, slot)
+   SV *key_obj
+   HV *slot
+   INIT:
+      EVP_PKEY *privkey= cmk_key_get_privkey(key_obj);
+      SV *secret_ref;
+      secret_buffer *secret_out= secret_buffer_new(0, &secret_ref);
    PPCODE:
-      cmk_key_import(key, src);
+      cmk_key_slot_unlock(slot, privkey, secret_out);
+      PUSHs(secret_ref);
 
-void
-export(key, dst)
-   auto_cmk_key key
-   HV *dst
-   PPCODE:
-      cmk_key_export(key, dst);
-      if (GIMME_V != G_VOID) {
-         ST(0)= sv_2mortal(newRV_inc((SV*) dst));
-         XSRETURN(1);
-      } else {
-         XSRETURN(0);
-      }
-
-void
-unlock(key, buf)
-   cmk_key *key
-   secret_buffer *buf
-   PPCODE:
-      cmk_key_unlock(key, buf);
-
-void
-lock(key)
-   cmk_key *key
-   PPCODE:
-      cmk_key_lock(key);
-
-MODULE =  Crypt::MultiKey               PACKAGE = Crypt::MultiKey::Lockbox
-
-bool
-_is_initialized(lb)
-   maybe_cmk_lockbox lb
-   CODE:
-      RETVAL = (lb != NULL);
-   OUTPUT:
-      RETVAL
-
-void
-_create(lb)
-   auto_cmk_lockbox lb
-   PPCODE:
-      cmk_lockbox_create(lb);
-
-void
-import(lb, src)
-   auto_cmk_lockbox lb
-   HV *src
-   PPCODE:
-      cmk_lockbox_import(lb, src);
-
-void
-export(lb, dst)
-   cmk_lockbox *lb
-   HV *dst
-   PPCODE:
-      cmk_lockbox_export(lb, dst);
-      if (GIMME_V != G_VOID) {
-         ST(0)= sv_2mortal(newRV_inc((SV*) dst));
-         XSRETURN(1);
-      } else {
-         XSRETURN(0);
-      }
-
-void
-_unlock(lb, slot, key)
-   cmk_lockbox *lb
-   cmk_key_slot *slot
-   cmk_key *key
-   PPCODE:
-      cmk_lockbox_unlock(lb, slot, key);
-
-void
-lock(lb)
-   cmk_lockbox *lb
-   PPCODE:
-      cmk_lockbox_lock(lb);
-
-void
-encrypt(lb, plain, cipher)
-   cmk_lockbox *lb
-   secret_buffer *plain
-   secret_buffer *cipher
-   PPCODE:
-      cmk_lockbox_encrypt_buffer(lb, plain, cipher);
-      
-void
-decrypt(lb, cipher, plain)
-   cmk_lockbox *lb
-   secret_buffer *cipher
-   secret_buffer *plain
-   PPCODE:
-      cmk_lockbox_decrypt_buffer(lb, cipher, plain);
-
-MODULE = Crypt::MultiKey                PACKAGE = Crypt::MultiKey::KeySlot
-
-bool
-_is_initialized(slot)
-   maybe_cmk_key_slot slot
-   CODE:
-      RETVAL = (slot != NULL);
-   OUTPUT:
-      RETVAL
-
-void
-_create(slot, lb, key)
-   auto_cmk_key_slot slot
-   cmk_lockbox *lb
-   cmk_key *key
-   PPCODE:
-      cmk_key_slot_create(slot, lb, key);
-
-void
-import(slot, src)
-   auto_cmk_key_slot slot
-   HV *src
-   PPCODE:
-      cmk_key_slot_import(slot, src);
-
-void
-export(slot, dst)
-   cmk_key_slot *slot
-   HV *dst
-   PPCODE:
-      cmk_key_slot_export(slot, dst);
-      if (GIMME_V != G_VOID) {
-         ST(0)= sv_2mortal(newRV_inc((SV*) dst));
-         XSRETURN(1);
-      } else {
-         XSRETURN(0);
-      }
+MODULE =  Crypt::MultiKey               PACKAGE = Crypt::MultiKey::Coffer
 
 BOOT:
    HV *stash= gv_stashpvs("Crypt::MultiKey", 1);
-   EXPORT_ENUM(KEYFORMAT_X25519);

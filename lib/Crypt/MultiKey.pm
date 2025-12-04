@@ -7,12 +7,6 @@ package Crypt::MultiKey;
   use Crypt::MultiKey;
   use Crypt::SecretBuffer 'secret';
   
-  # List available plugins for activating keys
-  say for Crypt::MultiKey->key_mechanisms;
-  
-  # List available plugins for applying vaults to targets
-  say for Crypt::MultiKey->applications;
-  
   my $repo= Crypt::MultiKey->new('/some/path/');
   say $_->name for $repo->vault_list;
   say $_->name for $repo->key_list;
@@ -180,5 +174,25 @@ sub key {
       Crypt::MultiKey::Key->new_from_file($path);
    };
 }
+
+# For security, only permit loading packages which are known to be installed
+our %_lazy_load_ok= map +($_ => 1), qw(
+   Crypt::MultiKey::Key::Unencrypted
+   Crypt::MultiKey::Key::Manual
+   Crypt::MultiKey::Key::Password
+   Crypt::MultiKey::Key::Yubikey
+   Crypt::MultiKey::Key::SSHAgentSignature
+);
+
+sub _lazy_load_class {
+   my ($class)= @_;
+   croak "For security, class '$class' cannot be 'require'd on demand"
+      unless $_lazy_load_ok{$class};
+   (my $fname= $subclass . '.pm') =~ s,::,/,g;
+   require $fname;
+   return $class;
+}
+
+require Crypt::MultiKey::Key;
 
 1;
