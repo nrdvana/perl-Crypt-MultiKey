@@ -12,6 +12,7 @@
 #endif
 
 #include <openssl/evp.h>
+#include <openssl/rand.h>
 #include "cmk.h"
 
 /**********************************************************************************************\
@@ -189,11 +190,15 @@ typedef cmk_vault *   auto_cmk_vault;
 
 #endif
 
-/**********************************************************************************************\
-* Crypt::MultiKey::Key API
-\**********************************************************************************************/
-MODULE = Crypt::MultiKey                PACKAGE = Crypt::MultiKey::Key
+MODULE = Crypt::MultiKey                PACKAGE = Crypt::MultiKey
 PROTOTYPES: DISABLE
+
+void
+_generate_uuid_v4()
+   PPCODE:
+      XPUSHs(cmk_generate_uuid_v4(sv_newmortal()));
+
+MODULE = Crypt::MultiKey                PACKAGE = Crypt::MultiKey::Key
 
 void
 _keygen(key_obj, type)
@@ -204,29 +209,39 @@ _keygen(key_obj, type)
       XSRETURN(1);
 
 void
-_init_keyslot(key_obj, slot, secret)
+encrypt_secret(key_obj, secret, enc_out=NULL)
    SV *key_obj
-   HV *slot
    SV *secret
+   HV *enc_out
    INIT:
       EVP_PKEY *pubkey= cmk_key_get_pubkey(key_obj);
       STRLEN len;
       const char *buf= secret_buffer_SvPVbyte(secret, &len);
    PPCODE:
-      cmk_key_slot_create(slot, pubkey, buf, len);
+      if (!enc_out) {
+         enc_out= newHV();
+         ST(0)= sv_2mortal(newRV_inc((SV*)enc_out));
+      } else {
+         ST(0)= ST(2);
+      }
+      cmk_key_encrypt(pubkey, buf, len, enc_out);
       XSRETURN(1);
 
 void
-_unlock_keyslot(key_obj, slot)
+decrypt_secret(key_obj, enc, secret_out=NULL)
    SV *key_obj
-   HV *slot
+   HV *enc
+   secret_buffer *secret_out
    INIT:
       EVP_PKEY *privkey= cmk_key_get_privkey(key_obj);
-      SV *secret_ref;
-      secret_buffer *secret_out= secret_buffer_new(0, &secret_ref);
    PPCODE:
-      cmk_key_slot_unlock(slot, privkey, secret_out);
-      PUSHs(secret_ref);
+      if (!secret_out) {
+         secret_out= secret_buffer_new(0, &(ST(0)));
+      } else {
+         ST(0)= ST(2);
+      }
+      cmk_key_decrypt(privkey, enc, secret_out);
+      XSRETURN(1);
 
 MODULE =  Crypt::MultiKey               PACKAGE = Crypt::MultiKey::Coffer
 

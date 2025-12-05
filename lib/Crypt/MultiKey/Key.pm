@@ -4,6 +4,7 @@ use warnings;
 use Carp;
 use Crypt::SecretBuffer qw/ HEX /;
 use Crypt::SecretBuffer::INI;
+use Crypt::MultiKey;
 
 =head1 DESCRIPTION
 
@@ -92,20 +93,19 @@ sub new {
    my %attrs= @_;
    my $self= bless {}, $class;
    # Initialize UUID unless provided
-   $self->{uuid}= delete $attrs{uuid} // Crypt::MultiKey::_generate_uuid();
-   $self->{uuid} =~ /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
+   $self->{uuid}= uc(delete $attrs{uuid} // Crypt::MultiKey::_generate_uuid_v4());
+   $self->{uuid} =~ /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/i
       or croak "Invalid UUID: $self->{uuid}";
    # Create new random keypair, or validate existing public/private key vs. type
    $self->{type}= delete $attrs{type} // 'x25519';
    $self->{public}= delete $attrs{public};
    $self->{private}= delete $attrs{private};
-   $self->_validate_or_create_keypair;
+   $self->_keygen($self->{type})
+      unless defined $self->{public} or defined $self->{private};
    # consume other attributes
    for (qw( private_encrypted private_encrypted_cipher pbkdf2_iter pbkdf2_salt )) {
       $self->{$_}= delete $attrs{$_} if defined $attrs{$_};
    }
-   # If encrypted with a cipher, validate we support the cipher
-   $self->_validate_cipher;
    # Every remaining attribute must have a writable accessor
    $self->$_($attrs{$_}) for keys %attrs;
    return $self;
@@ -201,5 +201,23 @@ sub clear_private {
    # SecretBuffer destructor takes care of wiping the secret
    delete $_[0]{private};
 }
+
+=method encrypt_secret
+
+  $fields= $key->encrypt_secret($secret);
+  $key->encrypt_secret($secret, \%fields_out);
+
+Encrypt a secret with the public half of this key.  The return value is a hashref containing the
+ciphertext in C<< ->{encrypted} >> and other fields that depend on the type of key used.
+
+=method decrypt_secret
+
+  $secret_buffer= $key->decrypt_secret(\%fields);
+  $key->decrypt_secret(\%fields, $secret_buffer_out);
+
+Decrypt a secret stored in a hash of fields and store the original secret in a
+L<SecretBuffer object|Crypt::SecretBuffer>.
+
+=cut
 
 1;

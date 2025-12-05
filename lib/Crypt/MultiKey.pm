@@ -139,16 +139,19 @@ the others.
 use strict;
 use warnings;
 use Carp;
-require Crypt::MultiKey::Key;
+use parent qw( DynaLoader );
+sub dl_load_flags {0x01} # Share extern symbols with other modules
+__PACKAGE__->bootstrap;
 
 sub new_vault {
    my ($self, $name)= splice @_, 0, 2;
    my $path= $self->_subpath("vault-$name.json");
    $self->{vault}{$name} || -e $path
       and croak "Path already exists: $path";
-   my @opts= ref $_[0] eq 'HASH'? %{$_[0]} : @_;
-   Crypt::MultiKey::Vault->new(path => $path, name => $name, @opts);
+   my @opts= ( path => $path, name => $name, ref $_[0] eq 'HASH'? %{$_[0]} : @_ );
+   Crypt::MultiKey::Vault->new(@opts)
 }
+
 sub vault {
    my ($self, $name)= @_;
    $self->{vault}{$name} //= do {
@@ -160,12 +163,13 @@ sub vault {
 
 sub new_key {
    my ($self, $name, $type)= splice @_, 0, 3;
-   my $path= $self->_subpath("key-$name.json");
+   my $path= $self ->_subpath("key-$name.json");
    $self->{key}{$name} || -e $path
       and croak "Key '$name' already exists";
-   my @opts= ref $_[0] eq 'HASH'? %{$_[0]} : @_;
-   Crypt::MultiKey::Key->load_class_for_type($type)->new(path => $path, name => $name, @opts);
+   my @opts= ( path => $path, name => $name, ref $_[0] eq 'HASH'? %{$_[0]} : @_ );
+   Crypt::MultiKey::Key->load_class_for_type($type)->new(@opts)
 }
+
 sub key {
    my ($self, $name)= @_;
    $self->{key}{$name} //= do {
@@ -188,7 +192,7 @@ sub _lazy_load_class {
    my ($class)= @_;
    croak "For security, class '$class' cannot be 'require'd on demand"
       unless $_lazy_load_ok{$class};
-   (my $fname= $subclass . '.pm') =~ s,::,/,g;
+   (my $fname= $class . '.pm') =~ s,::,/,g;
    require $fname;
    return $class;
 }

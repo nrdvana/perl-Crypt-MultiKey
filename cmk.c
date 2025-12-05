@@ -34,9 +34,12 @@
 #define CMK_KDF_SALT_LEN 32
 #define CMK_WRAP_KEY_LEN 32  /* AES-256 */
 
-static char* cmk_prepare_sv_buffer(SV *sv, size_t size) {
+char* cmk_prepare_sv_buffer(SV *sv, size_t size) {
    STRLEN len;
-   char *p= SvPVbyte_force(sv, len);
+   char *p;
+   if (!SvOK(sv)) /* avoid "uninitialized value in subroutine" warning */
+      sv_setpvs(sv, "");
+   p= SvPVbyte_force(sv, len);
    if (len < size) {
       SvGROW(sv, size+1);
       SvCUR_set(sv, size);
@@ -48,6 +51,37 @@ static char* cmk_prepare_sv_buffer(SV *sv, size_t size) {
       p[size]= '\0';
    }
    return p;
+}
+
+/* Generate a version 4 (random) UUID into the provided SV.
+ * UUID v4 format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
+ * where x is random hex digit, y is one of 8,9,a,b
+ * 
+ * Byte layout:
+ * - Bytes 0-15: 16 random bytes with specific bits set:
+ *   - Byte 6: high nibble = 0x4 (version 4)
+ *   - Byte 8: high 2 bits = 0b10 (variant RFC4122)
+ */
+SV* cmk_generate_uuid_v4(SV *buf_sv) {
+   U8 *byte_pos, *hex_pos, *next_dash;
+   U8 *buf= (U8*) cmk_prepare_sv_buffer(buf_sv, 36);
+   /* Generate 16 random bytes */
+   if (RAND_bytes((char*) buf, 16) != 1)
+      croak("RAND_bytes failed");
+   /* Set version to 4 (bits 12-15 of time_hi_and_version field = byte 6, high nibble) */
+   buf[6] = (buf[6] & 0x0F) | 0x40;
+   /* Set variant to RFC4122 (bits 6-7 of clock_seq_hi_and_reserved = byte 8, high 2 bits = 0b10) */
+   buf[8] = (buf[8] & 0x3F) | 0x80;
+   /* convert the 16 bytes to hex notation with dashes (36 chars long) */
+   for (hex_pos= buf + 35, byte_pos= buf + 15, next_dash= buf + 10; byte_pos >= buf; byte_pos--) {
+      *hex_pos-- = "0123456789ABCDEF"[*byte_pos >> 4];
+      *hex_pos-- = "0123456789ABCDEF"[*byte_pos & 0xF];
+      if (byte_pos == next_dash && next_dash != buf + 2) {
+         *hex_pos-- = '-';
+         next_dash -= 2;
+      }
+   }
+   return buf_sv;
 }
 
 /**********************************************************************************************
@@ -164,22 +198,23 @@ EVP_PKEY *cmk_EVP_PKEY_keygen(const char *type, const char **params, int param_c
    EVP_PKEY_CTX *ctx= NULL;
    EVP_PKEY *pkey= NULL;
    BIGNUM *bignum= NULL;
+   int type_len= strlen(type);
 
-   if (strcmp(type, "X25519") == 0) {
+   if (type_len == 6 && foldEQ(type, "x25519", 6)) {
       if (param_count > 0)
          GOTO_CLEANUP_CROAK("x25519 does not take any parameters");
       ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_X25519, NULL);
       if (!ctx || EVP_PKEY_keygen_init(ctx) <= 0)
-         GOTO_CLEANUP_CROAK("keygen init (X25519) failed");
+         GOTO_CLEANUP_CROAK("keygen init (x25519) failed");
    }  
-   else if (strcmp(type, "ED25519") == 0) {
+   else if (type_len == 7 && foldEQ(type, "ED25519", 7)) {
       if (param_count > 0)
          GOTO_CLEANUP_CROAK("x25519 does not take any parameters");
       ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_X25519, NULL);
       if (!ctx || EVP_PKEY_keygen_init(ctx) <= 0)
          GOTO_CLEANUP_CROAK("keygen init (ED25519) failed");
    }
-   if (strcmp(type, "RSA") == 0) {
+   else if (type_len == 3 && foldEQ(type, "RSA", 3)) {
       int i, bits= 4096;
       ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
       if (!ctx || EVP_PKEY_keygen_init(ctx) <= 0)
@@ -217,7 +252,7 @@ EVP_PKEY *cmk_EVP_PKEY_keygen(const char *type, const char **params, int param_c
       if (EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, bits) <= 0)
          GOTO_CLEANUP_CROAK("set_rsa_keygen_bits failed");
    }
-   else if (strcmp(type, "EC") == 0) {
+   else if (type_len == 2 && foldEQ(type, "EC", 2)) {
       int i;
       ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, NULL);
       if (!ctx || EVP_PKEY_keygen_init(ctx) <= 0)
@@ -243,6 +278,9 @@ EVP_PKEY *cmk_EVP_PKEY_keygen(const char *type, const char **params, int param_c
             GOTO_CLEANUP_CROAK("Unknown EC parameter");
          }
       }
+   }
+   else {
+      croak("unknown key type '%s'", type);
    }
    if (EVP_PKEY_keygen(ctx, &pkey) <= 0)
       GOTO_CLEANUP_CROAK("keygen failed");
@@ -566,7 +604,7 @@ void cmk_key_decrypt_private(SV *key_obj, const U8 *pass, size_t pass_len) {
  * uses the shared secret to encrypt the secret, then stores the public half of the ephemeral
  * key along side the other fields.
  */
-void cmk_key_slot_create(HV *slot, EVP_PKEY *public_key, const U8 *secret, size_t secret_len) {
+void cmk_key_encrypt(EVP_PKEY *public_key, const U8 *secret, size_t secret_len, HV *enc_out) {
    const char *err = NULL;
    SV *hv_store_val= NULL;
    EVP_PKEY *ephemeral = NULL;
@@ -576,7 +614,7 @@ void cmk_key_slot_create(HV *slot, EVP_PKEY *public_key, const U8 *secret, size_
    EVP_PKEY_CTX *rsa_ctx = NULL;
    EVP_CIPHER_CTX *aes_ctx = NULL;
 
-   unsigned char *shared_secret = NULL;
+   U8 *shared_secret = NULL;
    size_t shared_len = 0;
 
    U8 aes_wrap_key[CMK_WRAP_KEY_LEN];
@@ -596,8 +634,8 @@ void cmk_key_slot_create(HV *slot, EVP_PKEY *public_key, const U8 *secret, size_
    int type = 0;
    int outlen = 0;
 
-   if (!slot || !public_key || !secret || secret_len == 0)
-      croak("cmk_key_slot_create: invalid arguments");
+   if (!enc_out || !public_key || !secret || secret_len == 0)
+      croak("invalid arguments");
 
    /* RSA keys encrypt/decrypt directly, but DSA-style keys need to create an ephermeral
     * key to perform a handshake with, to produce a shared secret.
@@ -687,7 +725,7 @@ void cmk_key_slot_create(HV *slot, EVP_PKEY *public_key, const U8 *secret, size_
          GOTO_CLEANUP_CROAK("RSA encrypt failed");
    }
    else {
-      GOTO_CLEANUP_CROAK("Unsupported key type for cmk_key_slot_create");
+      GOTO_CLEANUP_CROAK("Unsupported key type");
    }
 
    /* ---------- AES-GCM encrypt the coffer cipher_key using aes_wrap_key ---------- */
@@ -720,25 +758,25 @@ void cmk_key_slot_create(HV *slot, EVP_PKEY *public_key, const U8 *secret, size_
 
    /* ---------- Store public results in slot HV ---------- */
    if (kdf)
-      if (!hv_stores(slot, "kdf_salt", (hv_store_val= newSVpvn(kdf_salt, sizeof(kdf_salt)))))
+      if (!hv_stores(enc_out, "kdf_salt", (hv_store_val= newSVpvn(kdf_salt, sizeof(kdf_salt)))))
          GOTO_CLEANUP_CROAK("write ->{kdf_salt}");
 
    if (ephemeral_pub_der)
-      if (!hv_stores(slot, "ephemeral_pubkey", (hv_store_val= newSVpvn(ephemeral_pub_der, ephemeral_pub_der_len))))
+      if (!hv_stores(enc_out, "ephemeral_pubkey", (hv_store_val= newSVpvn(ephemeral_pub_der, ephemeral_pub_der_len))))
          GOTO_CLEANUP_CROAK("write ->{ephemeral_pubkey}");
 
    if (rsa_ct)
-      if (!hv_stores(slot, "encrypted_wrap_key", (hv_store_val= newSVpvn(rsa_ct, rsa_ct_len))))
+      if (!hv_stores(enc_out, "encrypted_wrap_key", (hv_store_val= newSVpvn(rsa_ct, rsa_ct_len))))
          GOTO_CLEANUP_CROAK("write ->{encrypted_wrap_key}");
 
-   if (!hv_stores(slot, "aes_gcm_nonce", (hv_store_val= newSVpvn(nonce, sizeof nonce))))
+   if (!hv_stores(enc_out, "aes_gcm_nonce", (hv_store_val= newSVpvn(nonce, sizeof nonce))))
       GOTO_CLEANUP_CROAK("write ->{aes_gcm_nonce}");
 
-   if (!hv_stores(slot, "aes_gcm_tag",   (hv_store_val= newSVpvn(gcm_tag, sizeof gcm_tag))))
+   if (!hv_stores(enc_out, "aes_gcm_tag",   (hv_store_val= newSVpvn(gcm_tag, sizeof gcm_tag))))
       GOTO_CLEANUP_CROAK("write ->{aes_gcm_tag}");
 
-   if (!hv_stores(slot, "encrypted_coffer_key", (hv_store_val= newSVpvn(secret_ct, (STRLEN)secret_ct_len))))
-      GOTO_CLEANUP_CROAK("write ->{encrypted_coffer_key}");
+   if (!hv_stores(enc_out, "encrypted_secret", (hv_store_val= newSVpvn(secret_ct, (STRLEN)secret_ct_len))))
+      GOTO_CLEANUP_CROAK("write ->{encrypted_secret}");
 
 cleanup:
    if (shared_secret)
@@ -765,8 +803,204 @@ cleanup:
    }
 }
 
-void cmk_key_slot_unlock(HV *slot, EVP_PKEY *private_key, secret_buffer *cipher_key_out) {
-   
+/* This function decrypts a secret from a key slot using a private key.
+ * It reverses the process of cmk_key_slot_create by:
+ * - For RSA keys: decrypting the wrapper key, then using it to decrypt the secret
+ * - For DSA-like keys: deriving the shared secret from the ephemeral public key,
+ *   then using it to decrypt the secret
+ */
+void cmk_key_decrypt(EVP_PKEY *private_key, HV *enc_in, secret_buffer *secret_out) {
+   const char *err = NULL;
+   EVP_PKEY *ephemeral_pub = NULL;
+   EVP_PKEY_CTX *ctx = NULL;
+   EVP_PKEY_CTX *kdf = NULL;
+   EVP_PKEY_CTX *rsa_ctx = NULL;
+   EVP_CIPHER_CTX *aes_ctx = NULL;
+
+   U8 *shared_secret = NULL;
+   size_t shared_len = 0;
+
+   U8 aes_wrap_key[CMK_WRAP_KEY_LEN];
+
+   SV **svp;
+   U8 *kdf_salt = NULL;
+   STRLEN kdf_salt_len = 0;
+   U8 *nonce = NULL;
+   STRLEN nonce_len = 0;
+   U8 *gcm_tag = NULL;
+   STRLEN gcm_tag_len = 0;
+   U8 *secret_ct = NULL;
+   STRLEN secret_ct_len = 0;
+   U8 *ephemeral_pub_der = NULL;
+   STRLEN ephemeral_pub_der_len = 0;
+   U8 *rsa_ct = NULL;
+   size_t rsa_ct_len = 0;
+
+   U8 *secret_pt = NULL;
+   int outlen = 0;
+   int type = 0;
+
+   if (!enc_in || !private_key || !secret_out)
+      croak("invalid arguments");
+
+   /* Extract required fields from slot hash */
+   svp = hv_fetchs(enc_in, "aes_gcm_nonce", 0);
+   if (!svp || !*svp) GOTO_CLEANUP_CROAK("Missing aes_gcm_nonce");
+   nonce = (U8*)SvPV(*svp, nonce_len);
+   if (nonce_len != CMK_AES_NONCE_LEN)
+      GOTO_CLEANUP_CROAK("Invalid aes_gcm_nonce length");
+
+   svp = hv_fetchs(enc_in, "aes_gcm_tag", 0);
+   if (!svp || !*svp) GOTO_CLEANUP_CROAK("Missing aes_gcm_tag");
+   gcm_tag = (U8*)SvPV(*svp, gcm_tag_len);
+   if (gcm_tag_len != CMK_GCM_TAG_LEN)
+      GOTO_CLEANUP_CROAK("Invalid aes_gcm_tag length");
+
+   svp = hv_fetchs(enc_in, "encrypted_secret", 0);
+   if (!svp || !*svp) GOTO_CLEANUP_CROAK("Missing encrypted_coffer_key");
+   secret_ct = (U8*)SvPV(*svp, secret_ct_len);
+
+   /* Determine key type and decrypt accordingly */
+   type = EVP_PKEY_base_id(private_key);
+
+   if (type == EVP_PKEY_X25519 || type == EVP_PKEY_X448
+    || type == EVP_PKEY_EC     || type == EVP_PKEY_DH
+   ) {
+      /* ---- DSA-like branch: derive shared secret from ephemeral public key ---- */
+
+      /* 1. Extract ephemeral public key and KDF salt */
+      svp = hv_fetchs(enc_in, "ephemeral_pubkey", 0);
+      if (!svp || !*svp) GOTO_CLEANUP_CROAK("Missing ephemeral_pubkey");
+      ephemeral_pub_der = (U8*)SvPV(*svp, ephemeral_pub_der_len);
+
+      svp = hv_fetchs(enc_in, "kdf_salt", 0);
+      if (!svp || !*svp) GOTO_CLEANUP_CROAK("Missing kdf_salt");
+      kdf_salt = (U8*)SvPV(*svp, kdf_salt_len);
+      if (kdf_salt_len != CMK_KDF_SALT_LEN)
+         GOTO_CLEANUP_CROAK("Invalid kdf_salt length");
+
+      /* 2. Decode ephemeral public key from DER */
+      {
+         const U8 *p = ephemeral_pub_der;  /* d2i advances the pointer */
+         ephemeral_pub = d2i_PUBKEY(NULL, &p, ephemeral_pub_der_len);
+         if (!ephemeral_pub)
+            GOTO_CLEANUP_CROAK("Failed to decode ephemeral public key");
+      }
+
+      /* 3. Derive shared secret: private_key + ephemeral_pub */
+      ctx = EVP_PKEY_CTX_new(private_key, NULL);
+      if (!ctx ||
+         EVP_PKEY_derive_init(ctx) <= 0 ||
+         EVP_PKEY_derive_set_peer(ctx, ephemeral_pub) <= 0
+      )
+         GOTO_CLEANUP_CROAK("Derive init failed");
+
+      /* Query required length */
+      if (EVP_PKEY_derive(ctx, NULL, &shared_len) <= 0 || shared_len == 0)
+         GOTO_CLEANUP_CROAK("Derive (size) failed");
+
+      shared_secret = OPENSSL_malloc(shared_len);
+      if (!shared_secret)
+         GOTO_CLEANUP_CROAK("malloc for shared_secret failed");
+
+      if (EVP_PKEY_derive(ctx, shared_secret, &shared_len) <= 0)
+         GOTO_CLEANUP_CROAK("Deriving shared secret failed");
+
+      /* 4. HKDF(shared_secret) -> aes_wrap_key */
+      kdf = EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, NULL);
+      if (!kdf ||
+         EVP_PKEY_derive_init(kdf) <= 0 ||
+         EVP_PKEY_CTX_set_hkdf_md(kdf, EVP_sha256()) <= 0 ||
+         EVP_PKEY_CTX_set1_hkdf_salt(kdf, kdf_salt, kdf_salt_len) <= 0 ||
+         EVP_PKEY_CTX_set1_hkdf_key(kdf, shared_secret, shared_len) <= 0 ||
+         EVP_PKEY_CTX_add1_hkdf_info(kdf, (unsigned char *)"cmk-wrap", 8) <= 0 ||
+         EVP_PKEY_derive(kdf, aes_wrap_key, &(size_t){ CMK_WRAP_KEY_LEN }) <= 0
+      )
+         GOTO_CLEANUP_CROAK("HKDF failed");
+   }
+   else if (type == EVP_PKEY_RSA || type == EVP_PKEY_RSA_PSS) {
+      /* ---- RSA branch: decrypt wrap key using RSA-OAEP ---- */
+
+      /* 1. Extract encrypted wrap key */
+      svp = hv_fetchs(enc_in, "encrypted_wrap_key", 0);
+      if (!svp || !*svp) GOTO_CLEANUP_CROAK("Missing encrypted_wrap_key");
+      rsa_ct = (U8*)SvPV(*svp, rsa_ct_len);
+
+      /* 2. RSA-OAEP decrypt to get wrap key */
+      rsa_ctx = EVP_PKEY_CTX_new(private_key, NULL);
+      if (!rsa_ctx
+         || EVP_PKEY_decrypt_init(rsa_ctx) <= 0
+         || EVP_PKEY_CTX_set_rsa_padding(rsa_ctx, RSA_PKCS1_OAEP_PADDING) <= 0
+         || EVP_PKEY_CTX_set_rsa_oaep_md(rsa_ctx, EVP_sha256()) <= 0
+         || EVP_PKEY_CTX_set_rsa_mgf1_md(rsa_ctx, EVP_sha256()) <= 0
+      )
+         GOTO_CLEANUP_CROAK("RSA decrypt init failed");
+
+      {
+         size_t wrap_key_len = sizeof(aes_wrap_key);
+         if (EVP_PKEY_decrypt(rsa_ctx, aes_wrap_key, &wrap_key_len, rsa_ct, rsa_ct_len) <= 0
+               || wrap_key_len != CMK_WRAP_KEY_LEN
+            )
+            GOTO_CLEANUP_CROAK("RSA decrypt failed");
+      }
+   }
+   else {
+      GOTO_CLEANUP_CROAK("Unsupported key type");
+   }
+
+   /* ---------- AES-GCM decrypt the secret using aes_wrap_key ---------- */
+
+   secret_pt = OPENSSL_malloc(secret_ct_len);
+   if (!secret_pt)
+      GOTO_CLEANUP_CROAK("malloc for plaintext failed");
+
+   aes_ctx = EVP_CIPHER_CTX_new();
+   if (!aes_ctx
+      || EVP_DecryptInit_ex(aes_ctx, EVP_aes_256_gcm(), NULL, NULL, NULL) != 1
+      || EVP_CIPHER_CTX_ctrl(aes_ctx, EVP_CTRL_GCM_SET_IVLEN, (int)nonce_len, NULL) != 1
+      || EVP_DecryptInit_ex(aes_ctx, NULL, NULL, aes_wrap_key, nonce) != 1
+   )
+      GOTO_CLEANUP_CROAK("AES-GCM decrypt init failed");
+
+   if (EVP_DecryptUpdate(aes_ctx, secret_pt, &outlen, secret_ct, (int)secret_ct_len) != 1)
+      GOTO_CLEANUP_CROAK("AES-GCM decrypt failed");
+
+   /* Set expected tag */
+   if (EVP_CIPHER_CTX_ctrl(aes_ctx, EVP_CTRL_GCM_SET_TAG, (int)gcm_tag_len, gcm_tag) != 1)
+      GOTO_CLEANUP_CROAK("AES-GCM set tag failed");
+
+   /* Finalize and verify tag */
+   {
+      int final_len = 0;
+      if (EVP_DecryptFinal_ex(aes_ctx, secret_pt + outlen, &final_len) != 1)
+         GOTO_CLEANUP_CROAK("AES-GCM decrypt final failed (authentication failed)");
+      outlen += final_len;
+   }
+
+   /* Copy decrypted secret to output buffer */
+   secret_buffer_set_len(secret_out, (size_t)outlen);
+   memcpy(secret_out->data, secret_pt, (size_t)outlen);
+
+cleanup:
+   if (shared_secret)
+      OPENSSL_clear_free(shared_secret, shared_len);
+
+   OPENSSL_cleanse(aes_wrap_key, sizeof aes_wrap_key);
+
+   if (secret_pt) {
+      OPENSSL_cleanse(secret_pt, secret_ct_len);
+      OPENSSL_free(secret_pt);
+   }
+
+   if (ctx) EVP_PKEY_CTX_free(ctx);
+   if (kdf) EVP_PKEY_CTX_free(kdf);
+   if (rsa_ctx) EVP_PKEY_CTX_free(rsa_ctx);
+
+   if (ephemeral_pub) EVP_PKEY_free(ephemeral_pub);
+   if (aes_ctx) EVP_CIPHER_CTX_free(aes_ctx);
+
+   if (err)
+      cmk_croak_with_ssl_error(err);
 }
 
 #if 0

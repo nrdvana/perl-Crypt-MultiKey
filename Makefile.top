@@ -29,8 +29,9 @@ my $test= ExtUtils::CFeatureTest->new;
 $test->header('stdbool.h');
 $test->feature(HAVE_BOOL      => 'bool x= true; return x == false;');
 
-$test->feature(HAVE_LIBSSL    => 'unsigned char buf[1]; return RAND_bytes(buf, 1) == 1? 0 : 1;',
-               { h => 'openssl/rand.h', -l => 'ssl' });
+$test->require_feature(HAVE_LIBSSL
+               => 'unsigned char buf[1]; return RAND_bytes(buf, 1) == 1? 0 : 1;',
+               { h => 'openssl/rand.h', -l => [ 'ssl', 'crypto' ] });
 
 $test->write_config_header('CryptMultiKey_config.h');
 $test->export_deps($dep);
