@@ -16,6 +16,9 @@ use Crypt::MultiKey;
   $pass->append_console_line(STDIN) or die;
   $key->encrypt_private($pass);
   
+  # Throw away the private half
+  $key->clear_private;
+  
   # encrypt some other data with the public half of the key
   my $enc= $key->encrypt("Example Plaintext");
   say JSON->new->encode($enc); # It's a hashref that you can serialize
@@ -47,29 +50,37 @@ The type of public-key cryptography used.  The default is C<'x25519'>.
 =attribute mechanism
 
 The mechanism for decrypting/restoring the C<privkey>.  This is used as a class name suffix for
-the Key object and affects the behavior of the Key object.
+the Key object and affects the behavior of the Key object.  Any key with the L<private_pkcs8>
+attribute can be decrypted using L</decrypt_private>, but this attribute indicates the I<source>
+of the password, such as whether it is a human-typed text password, or a password generated from
+a YubiKey's hash function, etc.  Keys with the mechanism 'Password' will interactively prompt the
+user on the console, where keys with the mechanism 'SSHAgent' will silently query the SSH agent
+for whether the required SSH key is available.
 
 =attribute public
 
-The public key encoded as C<SubjectPublicKeyInfo> format of OpenSSL.
+The public key encoded as C<SubjectPublicKeyInfo> format of OpenSSL.  (raw bytes, not PEM)
 
 =attribute private
 
 The private key stored in a SecretBuffer object, encoded as a per-algorithm format from OpenSSL's
-C<i2d_PublicKey> function.  This is *not* encrypted, and this field will typically be cleared
+C<i2d_PublicKey> function.  This is I<not> encrypted, and this field will typically be cleared
 using L</clear_private> after password-encrypting it to the L</private_pkcs8> field with the
-L</encrypt_private> method.
+L</encrypt_private> method.  But, you also have the option to serialize this field if you have
+a secure storage medium available.
 
 =attribute private_pkcs8
 
-The private key encrypted with a password and encoded in C<PCKS#8> format.
+The private key encrypted with a password and encoded in C<PCKS#8> format, which embodies all the
+details like numbr of KDF iterations and the salt value that was used.  PKCS#8 is the underlying
+binary format that gets encoded as Base64 in a PEM file.  This field holds the raw bytes, not PEM.
 Call L</decrypt_private> to reconstruct the L</private> field from this field.
 
 =cut
 
 sub uuid { $_[0]{uuid} }
 sub type { $_[0]{type} }
-sub mechanism { die "needs overridden by subclass" }
+sub mechanism { undef; }
 sub public { $_[0]{public} }
 sub private {
    my $self= shift;
