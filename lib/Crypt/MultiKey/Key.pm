@@ -6,15 +6,35 @@ use Crypt::SecretBuffer qw/ HEX /;
 use Crypt::SecretBuffer::INI;
 use Crypt::MultiKey;
 
+=head1 SYNOPSIS
+
+  # Generate a public/private keypair
+  my $key= Crypt::MultiKey::Key->new(type => 'x25519');
+  
+  # encrypt the private half with a password
+  my $pass= Crypt::SecretBuffer->new;
+  $pass->append_console_line(STDIN) or die;
+  $key->encrypt_private($pass);
+  
+  # encrypt some other data with the public half of the key
+  my $enc= $key->encrypt("Example Plaintext");
+  say JSON->new->encode($enc); # It's a hashref that you can serialize
+  
+  # restore the private key, using the password
+  $key->decrypt_private($pass); # croaks on wrong pass
+  
+  # Decrypt the data
+  say $key->decrypt($enc); # "Example Plaintext"
+
 =head1 DESCRIPTION
 
-A Crypt::MultiKey::Key is composed of the public half of a public key cryptography scheme, and
-the means to either decrypt the private half stored locally, or re-combine with the private half
-stored separately.  Once the private half is available, the Key object can be used to unlock
-L<Coffers|Crypt::MultiKey::Coffer>.
+C<Crypt::MultiKey::Key> is a public/private keypair where the public half is always available,
+but the private half can be encrypted or removed.  The Key can always L</encrypt> data, but the
+private half must be avalable to L</decrypt> that data again.
 
-A Key can be paired with an unlocked Coffer (generating a KeySlot on the Coffer) regardless of
-whether the Key's private half is available.
+=attribute path
+
+A disk path from which this key was loaded or to which it will be saved.
 
 =attribute uuid
 
@@ -184,10 +204,28 @@ sub save {
    $self->path($path) if !defined $self->path;
 }
 
+=method encrypt_private
+
+  $key->encrypt_private($password, $kdf_iter=100_000);
+
+Using the supplied password and optional PBKDF2 iteration count, write an encrypted PKCS#8
+DER-format string of bytes into attribute L</private_pkcs8>.    Ideally, C<$password> is a
+C<SecretBuffer> object, but scalars are also accepted.  The password must be bytes, not wide
+characters.
+
 =method clear_private
 
 Delete the private half of the public/private key pair.  You should only call this after
-encrypting it, or saving it by some other means.
+L<encrypting it|/encrypt_private>, or saving it by some other means.
+
+=method decrypt_private
+
+  $key->decrypt_private($password);
+
+Using the supplied password, decrypt attribute C<private_pkcs8> and store it into attribute
+L</private> as a L<SecretBuffer|Crypt::SecretBuffer>.  Ideally, C<$password> is a
+C<SecretBuffer> object, but scalars are also accepted.  The password must be bytes, not wide
+characters.
 
 =cut
 
@@ -198,19 +236,23 @@ sub clear_private {
 
 =method encrypt
 
-  $fields= $key->encrypt_secret($secret);
-  $key->encrypt_secret($secret, \%fields_out);
+  $fields= $key->encrypt($secret);
+  $key->encrypt($secret, \%fields_out);
 
-Encrypt a secret with the public half of this key.  The return value is a hashref containing the
-ciphertext in C<< ->{encrypted} >> and other fields that depend on the type of key used.
+Encrypt a secret using the public half of this key.  The secret is ideally a C<SecretBuffer>
+object, but may also be a scalar.  The return value is a hashref containing the ciphertext
+and other fields that are required to decrypt it, and which depend on the type of key used.
+You may supply a second argument of a pre-existing hashref to be filled.
 
 =method decrypt
 
-  $secret_buffer= $key->decrypt_secret(\%fields);
-  $key->decrypt_secret(\%fields, $secret_buffer_out);
+  $secret_buffer= $key->decrypt(\%fields);
+  $key->decrypt(\%fields, $secret_buffer_out);
 
-Decrypt a secret stored in a hash of fields and store the original secret in a
-L<SecretBuffer object|Crypt::SecretBuffer>.
+Decrypt a secret using the private half of this key.  (and dies if the private half of the key
+is not currently available)  The hash of fields must include everything written by C<encrypt>.
+The original secret is returned as a L<SecretBuffer object|Crypt::SecretBuffer>, and you may
+supply a second argument of a pre-existing buffer to be filled instead of allocating a new one.
 
 =cut
 
