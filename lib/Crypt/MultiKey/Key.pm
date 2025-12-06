@@ -108,6 +108,13 @@ generated.  If you do not specify C<uuid>, a new random UUID will be generated.
 
 =cut
 
+our %type_alias= (
+   rsa1024   => 'RSA:bits=1024',
+   rsa2048   => 'RSA:bits=2048',
+   rsa4096   => 'RSA:bits=4096',
+   secp256k1 => 'EC:group=secp256k1',
+);
+
 sub new {
    my $class= shift;
    return $class->new_from_file(@_) if @_ == 1;
@@ -118,7 +125,8 @@ sub new {
    $self->{uuid} =~ /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/i
       or croak "Invalid UUID: $self->{uuid}";
    # Create new random keypair, or validate existing public/private key vs. type
-   $self->{type}= delete $attrs{type} // 'x25519';
+   my $t= delete $attrs{type} // 'x25519';
+   $self->{type}= $type_alias{lc $t} // $t;
    # consume other known attributes
    for (qw( public private private_pkcs8 )) {
       $self->{$_}= delete $attrs{$_} if defined $attrs{$_};

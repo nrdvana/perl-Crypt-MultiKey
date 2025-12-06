@@ -418,9 +418,9 @@ cmk_key_keygen(SV *objref, const char *type_and_params) {
          } while ((ch= strchr(ch+1, ':')));
       }
       /* create a writable buffer so we can replace ':' with NUL */
-      Newx(parambuf, len, char);
+      Newx(parambuf, len+1, char);
       SAVEFREEPV(parambuf);
-      memcpy(parambuf, type_and_params, len);
+      memcpy(parambuf, type_and_params, len+1);
       Newx(params, param_count, char*);
       SAVEFREEPV(params);
       param_count= 0;
