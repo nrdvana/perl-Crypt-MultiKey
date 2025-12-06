@@ -194,9 +194,41 @@ MODULE = Crypt::MultiKey                PACKAGE = Crypt::MultiKey
 PROTOTYPES: DISABLE
 
 void
-_generate_uuid_v4()
+generate_uuid_v4()
    PPCODE:
       XPUSHs(cmk_generate_uuid_v4(sv_newmortal()));
+
+void
+aes_encrypt(aes_key, secret, enc_out=NULL)
+   secret_buffer *aes_key
+   SV *secret
+   HV *enc_out
+   INIT:
+      STRLEN len;
+      const char *buf= secret_buffer_SvPVbyte(secret, &len);
+   PPCODE:
+      if (!enc_out) {
+         enc_out= newHV();
+         ST(0)= sv_2mortal(newRV_noinc((SV*)enc_out));
+      } else {
+         ST(0)= ST(2);
+      }
+      cmk_aes_encrypt(aes_key, buf, len, enc_out);
+      XSRETURN(1);
+
+void
+aes_decrypt(aes_key, enc, secret_out=NULL)
+   secret_buffer *aes_key
+   HV *enc
+   secret_buffer *secret_out
+   PPCODE:
+      if (!secret_out) {
+         secret_out= secret_buffer_new(0, &(ST(0)));
+      } else {
+         ST(0)= ST(2);
+      }
+      cmk_aes_decrypt(aes_key, enc, secret_out);
+      XSRETURN(1);
 
 MODULE = Crypt::MultiKey                PACKAGE = Crypt::MultiKey::Key
 
@@ -208,8 +240,26 @@ _keygen(key_obj, type)
       cmk_key_keygen(key_obj, type);
       XSRETURN(1);
 
+bool
+_validate_public(key_obj)
+   SV *key_obj
+   CODE:
+      cmk_key_get_pubkey(key_obj);
+      RETVAL= true; /* If it didn't croak, then it was valid */
+   OUTPUT:
+      RETVAL
+
+bool
+_validate_private(key_obj)
+   SV *key_obj
+   CODE:
+      cmk_key_get_privkey(key_obj);
+      RETVAL= true; /* If it didn't croak, then it was valid */
+   OUTPUT:
+      RETVAL
+
 void
-encrypt_secret(key_obj, secret, enc_out=NULL)
+encrypt(key_obj, secret, enc_out=NULL)
    SV *key_obj
    SV *secret
    HV *enc_out
@@ -220,7 +270,7 @@ encrypt_secret(key_obj, secret, enc_out=NULL)
    PPCODE:
       if (!enc_out) {
          enc_out= newHV();
-         ST(0)= sv_2mortal(newRV_inc((SV*)enc_out));
+         ST(0)= sv_2mortal(newRV_noinc((SV*)enc_out));
       } else {
          ST(0)= ST(2);
       }
@@ -228,7 +278,7 @@ encrypt_secret(key_obj, secret, enc_out=NULL)
       XSRETURN(1);
 
 void
-decrypt_secret(key_obj, enc, secret_out=NULL)
+decrypt(key_obj, enc, secret_out=NULL)
    SV *key_obj
    HV *enc
    secret_buffer *secret_out

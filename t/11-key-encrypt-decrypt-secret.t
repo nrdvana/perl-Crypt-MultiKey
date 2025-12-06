@@ -3,16 +3,25 @@ use lib "$FindBin::Bin/lib";
 use Test2AndUtils;
 use Crypt::MultiKey::Key;
 
+sub str_of_len {
+   my $len= shift;
+   return validator(sub{ length $_ == $len; });
+}
+
 subtest x25519 => sub {
    my $key= Crypt::MultiKey::Key->new(type => 'x25519');
-   my $fields= $key->encrypt_secret("Test");
+   my $fields= $key->encrypt("Test");
    is($fields,
       {
-         encrypted => D,
+         cipher           => 'AES-256-GCM',
+         ciphertext       => D,
+         aes_gcm_nonce    => str_of_len(12),
+         aes_gcm_tag      => str_of_len(16),
          ephemeral_pubkey => D,
+         kdf_salt         => str_of_len(32),
       },
       'encrypted fields' );
-   my $secret= $key->decrypt_secret($fields);
+   my $secret= $key->decrypt($fields);
    my $decrypted;
    $secret->span->copy_to($decrypted);
    is($decrypted, 'Test');
@@ -20,13 +29,17 @@ subtest x25519 => sub {
 
 subtest rsa => sub {
    my $key= Crypt::MultiKey::Key->new(type => 'RSA:bits=1024'); # 1024 generates faster than 4096
-   my $fields= $key->encrypt_secret("Test");
+   my $fields= $key->encrypt("Test");
    is($fields,
       {
-         encrypted => D,
+         cipher             => 'AES-256-GCM',
+         ciphertext         => D,
+         aes_gcm_nonce      => str_of_len(12),
+         aes_gcm_tag        => str_of_len(16),
+         rsa_key_ciphertext => D,
       },
       'encrypted fields' );
-   my $secret= $key->decrypt_secret($fields);
+   my $secret= $key->decrypt($fields);
    my $decrypted;
    $secret->span->copy_to($decrypted);
    is($decrypted, 'Test');

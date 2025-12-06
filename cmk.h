@@ -46,13 +46,21 @@ extern void cmk_key_encrypt_private(SV *objref, const U8 *pw, size_t pw_len);
  */
 extern void cmk_key_decrypt_private(SV *objref, const U8 *pw, size_t pw_len);
 
+/* Generate an AES key from the public key and store the public data in enc_out */
+extern secret_buffer *cmk_key_create_aes_key(EVP_PKEY *public_key, HV *enc_out);
+
+/* Produce an AES key from the private key and the parameters in 'enc' */
+extern secret_buffer *cmk_key_recreate_aes_key(EVP_PKEY *private_key, HV *enc);
+
 /* Use the public half of a ::Key object to encrypt arbitrary data (usually an AES key)
  * and store the ciphertext and other details into `enc_out`.
+ * This is a combination of cmk_key_create_aes_key and cmk_aes_encrypt.
  */
 extern void cmk_key_encrypt(EVP_PKEY *public_key, const U8 *secret, size_t secret_len, HV *enc_out);
 
 /* Use the private half of a ::Key object to decrypt the supplied hash of parameters
  * back to the original secret, stored into secret_out.
+ * This is a combination of cmk_key_recreate_aes_key and cmk_aes_decrypt.
  */
 extern void cmk_key_decrypt(EVP_PKEY *private_key, HV *enc_in, secret_buffer *secret_out);
 

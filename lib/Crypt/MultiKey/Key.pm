@@ -31,36 +31,19 @@ the Key object and affects the behavior of the Key object.
 
 =attribute public
 
-The raw bytes of the public key.  (not printable)
+The public key encoded as C<SubjectPublicKeyInfo> format of OpenSSL.
 
 =attribute private
 
-The raw bytes of the private key, stored in a L<Crypt::SecretBuffer> instance.
-This field will normally not be stored anywhere, and needs reconstructed from some mechanism.
+The private key stored in a SecretBuffer object, encoded as a per-algorithm format from OpenSSL's
+C<i2d_PublicKey> function.  This is *not* encrypted, and this field will typically be cleared
+using L</clear_private> after password-encrypting it to the L</private_pkcs8> field with the
+L</encrypt_private> method.
 
-=attribute private_encrypted
+=attribute private_pkcs8
 
-The raw bytes of a ciphertext containing the private key.  This attribute is used by several
-of the mechanisms, but not all.
-
-=attribute private_encrypted_cipher
-
-The cipher that created L</private_encrypted> from L</private>, currently always C<AES-256-ECB>.
-
-=attribute pbkdf2_iter
-
-If this attribute is defined, it is a count of PBKDF2 iterations that were applied to a password
-to create the AES key for the C<private_encrypted_cipher>.
-
-=attribute pbkdf2_salt
-
-If C<privkey_pbkdf2> is nonzero, this attribute holds the bytes of salt that were applied to the
-PBKDF2 algorithm.
-
-=attribute ssh_agent_pubkey
-
-If the C<privkey_ciphertext> was produced in combination with a user's SSH Agent, this is the
-public key of the private key which was used.
+The private key encrypted with a password and encoded in C<PCKS#8> format.
+Call L</decrypt_private> to reconstruct the L</private> field from this field.
 
 =cut
 
@@ -68,11 +51,18 @@ sub uuid { $_[0]{uuid} }
 sub type { $_[0]{type} }
 sub mechanism { die "needs overridden by subclass" }
 sub public { $_[0]{public} }
-sub private { $_[0]{private} }
-sub private_encrypted { $_[0]{private_encrypted} }
-sub private_encrypted_cipher { $_[0]{private_encrypted_cipher} }
-sub pbkdf2_iter { $_[0]{pbkdf2_iter} }
-sub pbkdf2_salt { $_[0]{pbkdf2_salt} }
+sub private {
+   my $self= shift;
+   if (@_ > 1) {
+      {
+         local $self->{private}= $_[0];
+         $self->_validate_private; # if it fails, we avoided setting ->{private}
+      }
+      $self->{private}= $_[0];
+   }
+   $self->{private}
+}
+sub private_pkcs8 { $_[0]{private_pkcs8} }
 
 =constructor new
 
@@ -93,18 +83,22 @@ sub new {
    my %attrs= @_;
    my $self= bless {}, $class;
    # Initialize UUID unless provided
-   $self->{uuid}= uc(delete $attrs{uuid} // Crypt::MultiKey::_generate_uuid_v4());
+   $self->{uuid}= uc(delete $attrs{uuid} // Crypt::MultiKey::generate_uuid_v4());
    $self->{uuid} =~ /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/i
       or croak "Invalid UUID: $self->{uuid}";
    # Create new random keypair, or validate existing public/private key vs. type
    $self->{type}= delete $attrs{type} // 'x25519';
-   $self->{public}= delete $attrs{public};
-   $self->{private}= delete $attrs{private};
-   $self->_keygen($self->{type})
-      unless defined $self->{public} or defined $self->{private};
-   # consume other attributes
-   for (qw( private_encrypted private_encrypted_cipher pbkdf2_iter pbkdf2_salt )) {
+   # consume other known attributes
+   for (qw( public private private_pkcs8 )) {
       $self->{$_}= delete $attrs{$_} if defined $attrs{$_};
+   }
+   if (defined $self->{public}) {
+      $self->_validate_public;
+      $self->_validate_private if defined $self->{private};
+   } else {
+      croak "private key supplied, but 'public' is missing!"
+         if defined $self->{private} or defined $self->{private_pkcs8};
+      $self->_keygen($self->{type})
    }
    # Every remaining attribute must have a writable accessor
    $self->$_($attrs{$_}) for keys %attrs;
@@ -202,7 +196,7 @@ sub clear_private {
    delete $_[0]{private};
 }
 
-=method encrypt_secret
+=method encrypt
 
   $fields= $key->encrypt_secret($secret);
   $key->encrypt_secret($secret, \%fields_out);
@@ -210,7 +204,7 @@ sub clear_private {
 Encrypt a secret with the public half of this key.  The return value is a hashref containing the
 ciphertext in C<< ->{encrypted} >> and other fields that depend on the type of key used.
 
-=method decrypt_secret
+=method decrypt
 
   $secret_buffer= $key->decrypt_secret(\%fields);
   $key->decrypt_secret(\%fields, $secret_buffer_out);
