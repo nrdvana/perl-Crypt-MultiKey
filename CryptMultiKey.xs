@@ -293,6 +293,27 @@ decrypt(key_obj, enc, secret_out=NULL)
       cmk_key_decrypt(privkey, enc, secret_out);
       XSRETURN(1);
 
+void
+encrypt_private(key_obj, pass, kdf_iter=100000)
+   SV *key_obj
+   SV *pass
+   int kdf_iter
+   INIT:
+      STRLEN len;
+      const char *pw_buf= secret_buffer_SvPVbyte(pass, &len);
+   PPCODE:
+      cmk_key_encrypt_private(key_obj, pw_buf, len, kdf_iter);
+
+void
+decrypt_private(key_obj, pass)
+   SV *key_obj
+   SV *pass
+   INIT:
+      STRLEN len;
+      const char *pw_buf= secret_buffer_SvPVbyte(pass, &len);
+   PPCODE:
+      cmk_key_decrypt_private(key_obj, pw_buf, len);
+
 MODULE =  Crypt::MultiKey               PACKAGE = Crypt::MultiKey::Coffer
 
 BOOT:

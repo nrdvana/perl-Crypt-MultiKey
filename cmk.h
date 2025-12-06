@@ -38,7 +38,7 @@ extern EVP_PKEY *  cmk_key_keygen_params(SV *objref, const char *type, const cha
  * The 'private' field is unmodified.
  * Dies on failure.
  */
-extern void cmk_key_encrypt_private(SV *objref, const U8 *pw, size_t pw_len);
+extern void cmk_key_encrypt_private(SV *objref, const U8 *pw, size_t pw_len, int kdf_iter);
 
 /* Create the 'private' field of the Key object from the 'private_encrypted' field
  * using AES with an aes_key reconstructed from the supplied password.
