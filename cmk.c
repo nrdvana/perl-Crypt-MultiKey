@@ -299,7 +299,7 @@ cleanup:
 }
 
 /* MAGIC for storing a EVP_PKEY object on an arbitrary SV
- * Crypt::MultiKey::Key objects hold the public key in MAGIC, and the field
+ * Crypt::MultiKey::PKey objects hold the public key in MAGIC, and the field
  * $key->private is a SecretBuffer object which can hold the decrypted private key.
  */
 #ifdef USE_ITHREADS
@@ -329,7 +329,7 @@ static MGVTBL cmk_EVP_PKEY_magic_vtbl = {
 #endif
 };
 
-/* Crypt::MultiKey::Key stores a EVP_KEY in Magic.  OpenSSL routines can rewrite the pointer,
+/* Crypt::MultiKey::PKey stores a EVP_KEY in Magic.  OpenSSL routines can rewrite the pointer,
  * so instead of load/save API I just return a pointer-to-pointer that can be written.
  * If EVP_PKEY magic doesn't exist, it gets created with a pointer that is initially NULL.
  */
@@ -345,7 +345,7 @@ cmk_EVP_PKEY_p_from_magic(SV *sv, bool autocreate) {
 
 /******************************** Key API ***********************************/
 
-/* Return the public key for the Crypt::MultiKey::Key object.  This will lazily deserialize
+/* Return the public key for the Crypt::MultiKey::PKey object.  This will lazily deserialize
  * the 'pubkey' attribute which is a "ASN.1 SubjectPublicKeyInfo structure defined in RFC5280"
  */
 EVP_PKEY *
@@ -355,7 +355,7 @@ cmk_key_get_pubkey(SV *objref) {
    EVP_PKEY **key_p;
 
    if (!hv)
-      croak("Not a Crypt::MultiKey::Key");
+      croak("Not a Crypt::MultiKey::PKey");
    
    /* Return cached? */
    key_p= cmk_EVP_PKEY_p_from_magic((SV*) hv, true);
@@ -372,7 +372,7 @@ cmk_key_get_pubkey(SV *objref) {
    return *key_p;
 }
 
-/* Return the private key (includes public key) for the Crypt::MultiKey::Key object.
+/* Return the private key (includes public key) for the Crypt::MultiKey::PKey object.
  * This is cached on the SecretBuffer object of attribute 'private', or decoded from it.
  */
 EVP_PKEY *
@@ -382,7 +382,7 @@ cmk_key_get_privkey(SV *objref) {
    EVP_PKEY **key_p;
 
    if (!hv)
-      croak("Not a Crypt::MultiKey::Key");
+      croak("Not a Crypt::MultiKey::PKey");
 
    field= hv_fetchs(hv, "private", 0);
    if (!(field && *field && SvOK(*field)))
@@ -400,7 +400,7 @@ cmk_key_get_privkey(SV *objref) {
    return *key_p;
 }
 
-/* Generate a key, and store the results in the fields (and MAGIC) of Crypt::MultiKey::Key
+/* Generate a key, and store the results in the fields (and MAGIC) of Crypt::MultiKey::PKey
  * This parses out the ":param=value" from the end of the string.
  */
 EVP_PKEY *
@@ -437,7 +437,7 @@ cmk_key_keygen(SV *objref, const char *type_and_params) {
    return cmk_key_keygen_params(objref, type_and_params, NULL, 0);
 }
 
-/* Generate a key, and store the results in the fields (and MAGIC) of Crypt::MultiKey::Key
+/* Generate a key, and store the results in the fields (and MAGIC) of Crypt::MultiKey::PKey
  * This takes a list of string parameters for things like RSA bits or EC group.
  */
 EVP_PKEY *
@@ -452,7 +452,7 @@ cmk_key_keygen_params(SV *objref, const char *type, const char **params, int par
    U8 *buf;
 
    if (!hv)
-      croak("Not a Crypt::MultiKey::Key");
+      croak("Not a Crypt::MultiKey::PKey");
 
    new_key= cmk_EVP_PKEY_keygen(type, params, param_count);
 
@@ -510,7 +510,7 @@ void cmk_key_encrypt_private(SV *objref, const U8 *pass, size_t pass_len, int kd
    int serialized_len;
 
    if (!hv)
-      croak("Not a Crypt::MultiKey::Key");
+      croak("Not a Crypt::MultiKey::PKey");
 
    /* Convert EVP_PKEY to PKCS8_PRIV_KEY_INFO */
    p8inf= EVP_PKEY2PKCS8(pkey);
@@ -572,7 +572,7 @@ void cmk_key_decrypt_private(SV *objref, const U8 *pass, size_t pass_len) {
    int serialized_len;
 
    if (!hv)
-      croak("Not a Crypt::MultiKey::Key");
+      croak("Not a Crypt::MultiKey::PKey");
 
    /* Get the encrypted PKCS8 data */
    field= hv_fetchs(hv, "private_pkcs8", 0);
@@ -676,7 +676,7 @@ cmk_key_create_aes_key(EVP_PKEY *public_key, HV *enc_out) {
       )
          GOTO_CLEANUP_CROAK("Ephemeral key generation failed");
 
-      /* Derive shared secret: ephemeral (private) + MultiKey::Key object (public) */
+      /* Derive shared secret: ephemeral (private) + MultiKey::PKey object (public) */
       ctx= EVP_PKEY_CTX_new(ephemeral, NULL);
       if (!ctx ||
          EVP_PKEY_derive_init(ctx) <= 0 ||

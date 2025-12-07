@@ -1,7 +1,7 @@
 use FindBin;
 use lib "$FindBin::Bin/lib";
 use Test2AndUtils;
-use Crypt::MultiKey::Key;
+use Crypt::MultiKey::PKey;
 
 sub str_of_len {
    my $len= shift;
@@ -10,7 +10,7 @@ sub str_of_len {
 
 for (qw( x25519 RSA:bits=1024 )) {
    subtest $_ => sub {
-      my $key= Crypt::MultiKey::Key->new(type => $_);
+      my $key= Crypt::MultiKey::PKey->new(type => $_);
       ok( $key->_validate_private, 'validate private' );
       $key->encrypt_private("password", 99);
       ok( length $key->private_pkcs8, 'private_pkcs8 defined' );

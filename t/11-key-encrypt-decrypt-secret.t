@@ -1,7 +1,7 @@
 use FindBin;
 use lib "$FindBin::Bin/lib";
 use Test2AndUtils;
-use Crypt::MultiKey::Key;
+use Crypt::MultiKey::PKey;
 
 sub str_of_len {
    my $len= shift;
@@ -9,7 +9,7 @@ sub str_of_len {
 }
 
 subtest x25519 => sub {
-   my $key= Crypt::MultiKey::Key->new(type => 'x25519');
+   my $key= Crypt::MultiKey::PKey->new(type => 'x25519');
    my $fields= $key->encrypt("Test");
    is($fields,
       {
@@ -28,7 +28,7 @@ subtest x25519 => sub {
 };
 
 subtest rsa => sub {
-   my $key= Crypt::MultiKey::Key->new(type => 'RSA:bits=1024'); # 1024 generates faster than 4096
+   my $key= Crypt::MultiKey::PKey->new(type => 'RSA:bits=1024'); # 1024 generates faster than 4096
    my $fields= $key->encrypt("Test");
    is($fields,
       {

@@ -1,4 +1,4 @@
-package Crypt::MultiKey::Key;
+package Crypt::MultiKey::PKey;
 use strict;
 use warnings;
 use Carp;
@@ -9,7 +9,7 @@ use Crypt::MultiKey;
 =head1 SYNOPSIS
 
   # Generate a public/private keypair
-  my $key= Crypt::MultiKey::Key->new(type => 'x25519');
+  my $key= Crypt::MultiKey::PKey->new(type => 'x25519');
   
   # encrypt the private half with a password
   my $pass= Crypt::SecretBuffer->new;
@@ -31,7 +31,7 @@ use Crypt::MultiKey;
 
 =head1 DESCRIPTION
 
-C<Crypt::MultiKey::Key> is a public/private keypair where the public half is always available,
+C<Crypt::MultiKey::PKey> is a public/private keypair where the public half is always available,
 but the private half can be encrypted or removed.  The Key can always L</encrypt> data, but the
 private half must be avalable to L</decrypt> that data again.
 
@@ -97,7 +97,7 @@ sub private_pkcs8 { $_[0]{private_pkcs8} }
 
 =constructor new
 
-  $key= Crypt::MultiKey::Key->new(%attributes);
+  $key= Crypt::MultiKey::PKey->new(%attributes);
 
 This is the constructor for the base class.  It applies and verifies the attributes above, and
 then tries to apply any remaining attribute as an instance method.  Subclasses need to override
@@ -146,18 +146,18 @@ sub new {
 
 =constructor new_from_file
 
-  $key= Crypt::MultiKey::Key->new_from_file($filename);
+  $key= Crypt::MultiKey::PKey->new_from_file($filename);
 
 Load a file into a SecretBuffer and pass it to L</deserialize>.
 
 =constructor deserialize
 
-  $key= Crypt::MultiKey::Key->deserialize($scalar);
-  $key= Crypt::MultiKey::Key->deserialize(\$scalar);
-  $key= Crypt::MultiKey::Key->deserialize($Crypt_SecretBuffer);
+  $key= Crypt::MultiKey::PKey->deserialize($scalar);
+  $key= Crypt::MultiKey::PKey->deserialize(\$scalar);
+  $key= Crypt::MultiKey::PKey->deserialize($Crypt_SecretBuffer);
 
 This returns a key object from a serialized INI-format string or SecretBuffer.  The returned
-object will be a I<subclass> of C<Crypt::MultiKey::Key>.
+object will be a I<subclass> of C<Crypt::MultiKey::PKey>.
 
 =cut
 

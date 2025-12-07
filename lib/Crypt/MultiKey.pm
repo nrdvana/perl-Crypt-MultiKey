@@ -167,7 +167,7 @@ sub new_key {
    $self->{key}{$name} || -e $path
       and croak "Key '$name' already exists";
    my @opts= ( path => $path, name => $name, ref $_[0] eq 'HASH'? %{$_[0]} : @_ );
-   Crypt::MultiKey::Key->load_class_for_type($type)->new(@opts)
+   Crypt::MultiKey::PKey->load_class_for_type($type)->new(@opts)
 }
 
 sub key {
@@ -175,17 +175,17 @@ sub key {
    $self->{key}{$name} //= do {
       my $path= $self->_subpath("key-$name.json");
       return undef unless -f $path;
-      Crypt::MultiKey::Key->new_from_file($path);
+      Crypt::MultiKey::PKey->new_from_file($path);
    };
 }
 
 # For security, only permit loading packages which are known to be installed
 our %_lazy_load_ok= map +($_ => 1), qw(
-   Crypt::MultiKey::Key::Unencrypted
-   Crypt::MultiKey::Key::Manual
-   Crypt::MultiKey::Key::Password
-   Crypt::MultiKey::Key::Yubikey
-   Crypt::MultiKey::Key::SSHAgentSignature
+   Crypt::MultiKey::PKey::Unencrypted
+   Crypt::MultiKey::PKey::Manual
+   Crypt::MultiKey::PKey::Password
+   Crypt::MultiKey::PKey::Yubikey
+   Crypt::MultiKey::PKey::SSHAgentSignature
 );
 
 sub _lazy_load_class {
@@ -197,6 +197,6 @@ sub _lazy_load_class {
    return $class;
 }
 
-require Crypt::MultiKey::Key;
+require Crypt::MultiKey::PKey;
 
 1;

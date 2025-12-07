@@ -230,7 +230,7 @@ aes_decrypt(aes_key, enc, secret_out=NULL)
       cmk_aes_decrypt(aes_key, enc, secret_out);
       XSRETURN(1);
 
-MODULE = Crypt::MultiKey                PACKAGE = Crypt::MultiKey::Key
+MODULE = Crypt::MultiKey                PACKAGE = Crypt::MultiKey::PKey
 
 void
 _keygen(key_obj, type)
