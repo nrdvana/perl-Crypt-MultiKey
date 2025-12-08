@@ -1,25 +1,17 @@
 TYPEMAP
-cmk_key*                   O_CMK_KEY
-const cmk_key*             O_CMK_KEY
-maybe_cmk_key              O_CMK_KEY
-auto_cmk_key               O_CMK_KEY
-cmk_lockbox*               O_CMK_LOCKBOX
-const cmk_lockbox*         O_CMK_LOCKBOX
-maybe_cmk_lockbox          O_CMK_LOCKBOX
-auto_cmk_lockbox           O_CMK_LOCKBOX
-cmk_key_slot*              O_CMK_KEY_SLOT
-const cmk_key_slot*        O_CMK_KEY_SLOT
-maybe_cmk_key_slot         O_CMK_KEY_SLOT
-auto_cmk_key_slot          O_CMK_KEY_SLOT
+cmk_pkey*                  O_CMK_PKEY
+auto_cmk_pkey*             O_CMK_PKEY
+maybe_cmk_pkey*            O_CMK_PKEY
+cmk_pubkey*                O_CMK_PUBKEY
+cmk_privkey*               O_CMK_PRIVKEY
 
 INPUT
-O_CMK_KEY
-   $var= cmk_key_from_magic($arg, @{[ $type =~ /^auto/? q{AUTOCREATE} : $type =~ /^maybe/? 0 : q{OR_DIE} ]});
+O_CMK_PKEY
+   if (!sv_isobject($arg)) croak(\"Not a ::PKey object\");
+   $var= cmk_pkey_from_magic(SvRV($arg), @{[ $type =~ /^auto/? q{CMK_MAGIC_AUTOCREATE} : $type =~ /^maybe/? 0 : q{CMK_MAGIC_OR_DIE} ]});
 
-INPUT
-O_CMK_LOCKBOX
-   $var= cmk_lockbox_from_magic($arg, @{[ $type =~ /^auto/? q{AUTOCREATE} : $type =~ /^maybe/? 0 : q{OR_DIE} ]});
+O_CMK_PUBKEY
+   $var= cmk_get_pubkey($arg);
 
-INPUT
-O_CMK_KEY_SLOT
-   $var= cmk_key_slot_from_magic($arg, @{[ $type =~ /^auto/? q{AUTOCREATE} : $type =~ /^maybe/? 0 : q{OR_DIE} ]});
+O_CMK_PRIVKEY
+   $var= cmk_get_privkey($arg);

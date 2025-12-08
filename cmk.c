@@ -86,27 +86,29 @@ SV* cmk_generate_uuid_v4(SV *buf_sv) {
    return buf_sv;
 }
 
-/**********************************************************************************************
- * OpenSSL Utilities
- */
-
 static void
-cmk_croak_with_ssl_error(const char *err) {
+cmk_croak_with_ssl_error(const char *context, const char *err) {
    unsigned long ssl_err = ERR_get_error();
    char ssl_err_str[256] = {0};
    if (ssl_err) {
       ERR_error_string_n(ssl_err, ssl_err_str, sizeof ssl_err_str);
-      croak("%s: %s", err, ssl_err_str);
+      if (context)
+         croak("%s %s: %s", context, err, ssl_err_str);
+      else
+         croak("%s: %s", err, ssl_err_str);
    } else {
-      croak("%s", err);
+      if (context)
+         croak("%s", err);
+      else
+         croak("%s %s", context, err);
    }
 }
 
 // The goal here is to detect whether EVP_PKEY exists in the lowest-overhead manner.
 // Falls back to i2d_PrivateKey which will fail if private half isn't present.
-static int
-cmk_EVP_PKEY_has_private(const EVP_PKEY *pkey) {
-   switch (EVP_PKEY_base_id(pkey)) {
+bool
+cmk_pkey_has_private(cmk_pkey *pkey) {
+   switch (EVP_PKEY_base_id(*pkey)) {
 #if 0
    case EVP_PKEY_RSA: {
       const BIGNUM *n, *e, *d;
@@ -127,54 +129,54 @@ cmk_EVP_PKEY_has_private(const EVP_PKEY *pkey) {
    case EVP_PKEY_ED448:
    case EVP_PKEY_X448: {
       size_t len = 0;
-      return EVP_PKEY_get_raw_private_key(pkey, NULL, &len) == 1 && len > 0;
+      return EVP_PKEY_get_raw_private_key(*pkey, NULL, &len) == 1 && len > 0;
    }
 
    default:
      /* Unknown type: fallback to i2d_PrivateKey probe */
-     return i2d_PrivateKey((EVP_PKEY*)pkey, NULL) > 0;
+     return i2d_PrivateKey(*pkey, NULL) > 0;
    }
 }
 
 // Clone a EVP_PKEY.  Oddly there doesn't seem to be an API for it, so just serialize and
 // immediately deserialize.
-static EVP_PKEY *
-cmk_EVP_PKEY_dup(EVP_PKEY *pkey) {
+void
+cmk_pkey_dup(cmk_pkey *dest, cmk_pkey *src) {
    const char *err = NULL;
    EVP_PKEY *clone = NULL;
    int len;
    U8 *buf = NULL;
 
    /* First, see if there is a private key encoding */
-   len = i2d_PrivateKey(pkey, NULL);
+   len = i2d_PrivateKey(*src, NULL);
    if (len > 0) {
       /* Full private+public key available: clone via private key only */
       if (!(buf = (U8*) safemalloc((Size_t)len)))
-         GOTO_CLEANUP_CROAK("malloc failed in magic_dup (priv)");
+         GOTO_CLEANUP_CROAK("malloc failed");
 
       unsigned char *p = buf;
-      if (i2d_PrivateKey(pkey, &p) != len)
-         GOTO_CLEANUP_CROAK("i2d_PrivateKey failed in magic_dup");
+      if (i2d_PrivateKey(*src, &p) != len)
+         GOTO_CLEANUP_CROAK("i2d_PrivateKey failed");
 
       const unsigned char *cp = buf;
-      if (!d2i_PrivateKey(EVP_PKEY_base_id(pkey), &clone, &cp, (long)len))
-         GOTO_CLEANUP_CROAK("d2i_PrivateKey failed in magic_dup");
+      if (!d2i_PrivateKey(EVP_PKEY_base_id(*src), &clone, &cp, (long)len))
+         GOTO_CLEANUP_CROAK("d2i_PrivateKey failed");
    } else {
       /* No private key (or encoding failed): fall back to public-only */
-      len = i2d_PUBKEY(pkey, NULL);
+      len = i2d_PUBKEY(*src, NULL);
       if (len <= 0)
-         GOTO_CLEANUP_CROAK("i2d_PUBKEY failed in magic_dup");
+         GOTO_CLEANUP_CROAK("i2d_PUBKEY failed");
 
       if (!(buf = (U8*) safemalloc((Size_t)len)))
-         GOTO_CLEANUP_CROAK("malloc failed in magic_dup (pub)");
+         GOTO_CLEANUP_CROAK("malloc failed");
 
       unsigned char *p = buf;
-      if (i2d_PUBKEY(pkey, &p) != len)
-         GOTO_CLEANUP_CROAK("i2d_PUBKEY failed in magic_dup");
+      if (i2d_PUBKEY(*src, &p) != len)
+         GOTO_CLEANUP_CROAK("i2d_PUBKEY failed");
 
       const unsigned char *cp = buf;
       if (!d2i_PUBKEY(&clone, &cp, (long)len))
-         GOTO_CLEANUP_CROAK("d2i_PUBKEY failed in magic_dup");
+         GOTO_CLEANUP_CROAK("d2i_PUBKEY failed");
    }
 cleanup:
    if (buf) {
@@ -186,16 +188,18 @@ cleanup:
    if (err) {
       if (clone)
          EVP_PKEY_free(clone);
-      cmk_croak_with_ssl_error(err);
+      cmk_croak_with_ssl_error("EVP_PKEY_dup", err);
    }
 
-   return clone;
+   if (*dest) EVP_PKEY_free(*dest);
+   *dest= clone;
 }
 
 /* Key generation based on string parameters.  I'm attempting to use the same names as OpenSSL3
  * but implement it in 1.1 compatible code.
  */
-EVP_PKEY *cmk_EVP_PKEY_keygen(const char *type, const char **params, int param_count) {
+void
+cmk_pkey_keygen_params(cmk_pkey *pk, const char *type, const char **params, int param_count) {
    const char *err= NULL;
    EVP_PKEY_CTX *ctx= NULL;
    EVP_PKEY *pkey= NULL;
@@ -294,122 +298,21 @@ cleanup:
    if (bignum)
       BN_free(bignum);
    if (err)
-      cmk_croak_with_ssl_error(err);
-   return pkey;
+      cmk_croak_with_ssl_error("keygen:", err);
+   if (*pk) EVP_PKEY_free(*pk);
+   *pk= pkey;
 }
 
-/* MAGIC for storing a EVP_PKEY object on an arbitrary SV
- * Crypt::MultiKey::PKey objects hold the public key in MAGIC, and the field
- * $key->private is a SecretBuffer object which can hold the decrypted private key.
+/* Like cmk_pkey_keygen_params, but parse params out of ":param=value" suffix of the type.
  */
-#ifdef USE_ITHREADS
-static int cmk_EVP_PKEY_magic_dup(pTHX_ MAGIC *mg, CLONE_PARAMS *param) {
-   if (mg->mg_ptr)
-      mg->mg_ptr= (char*) cmk_EVP_PKEY_dup((EVP_PKEY*) mg->mg_ptr);
-   PERL_UNUSED_VAR(param);
-   return 0;
-};
-#define SET_MGf_DUP_FLAG(mg) do { magic->mg_flags |= MGf_DUP; } while (0)
-#else
-#define cmk_EVP_PKEY_magic_dup 0
-#define SET_MGf_DUP_FLAG(mg) ((void)0)
-#endif
-
-static int cmk_EVP_PKEY_magic_free(pTHX_ SV *sv, MAGIC *mg) {
-   if (mg->mg_ptr) EVP_PKEY_free((EVP_PKEY*) mg->mg_ptr);
-}
-
-static MGVTBL cmk_EVP_PKEY_magic_vtbl = {
-   NULL, NULL, NULL, NULL,
-   cmk_EVP_PKEY_magic_free,
-   NULL,
-   cmk_EVP_PKEY_magic_dup
-#ifdef MGf_LOCAL
-   ,NULL
-#endif
-};
-
-/* Crypt::MultiKey::PKey stores a EVP_KEY in Magic.  OpenSSL routines can rewrite the pointer,
- * so instead of load/save API I just return a pointer-to-pointer that can be written.
- * If EVP_PKEY magic doesn't exist, it gets created with a pointer that is initially NULL.
- */
-EVP_PKEY **
-cmk_EVP_PKEY_p_from_magic(SV *sv, bool autocreate) {
-   MAGIC *magic= SvMAGICAL(sv)? mg_findext(sv, PERL_MAGIC_ext, &cmk_EVP_PKEY_magic_vtbl) : NULL;
-   if (!magic && autocreate) {
-      magic= sv_magicext(sv, NULL, PERL_MAGIC_ext, &cmk_EVP_PKEY_magic_vtbl, NULL, 0);
-      SET_MGf_DUP_FLAG(magic);
-   }
-   return !magic? NULL : (EVP_PKEY**) &magic->mg_ptr;
-}
-
-/******************************** Key API ***********************************/
-
-/* Return the public key for the Crypt::MultiKey::PKey object.  This will lazily deserialize
- * the 'pubkey' attribute which is a "ASN.1 SubjectPublicKeyInfo structure defined in RFC5280"
- */
-EVP_PKEY *
-cmk_key_get_pubkey(SV *objref) {
-   HV *hv= (objref && SvROK(objref) && SvTYPE(SvRV(objref)) == SVt_PVHV)? (HV*) SvRV(objref) : NULL;
-   STRLEN len;
-   EVP_PKEY **key_p;
-
-   if (!hv)
-      croak("Not a Crypt::MultiKey::PKey");
-   
-   /* Return cached? */
-   key_p= cmk_EVP_PKEY_p_from_magic((SV*) hv, true);
-   if (!*key_p) { /* locate and parse key 'public' */
-      STRLEN len;
-      const U8 *buf;
-      SV **field= hv_fetchs(hv, "public", 0);
-      if (!(field && *field && SvOK(*field)))
-         croak("Missing 'public' attribute");
-      buf= (U8*) secret_buffer_SvPVbyte(*field, &len);
-      if (!len || !d2i_PUBKEY(key_p, &buf, len) || !*key_p)
-         croak("Decoding 'public' attribute failed");
-   }
-   return *key_p;
-}
-
-/* Return the private key (includes public key) for the Crypt::MultiKey::PKey object.
- * This is cached on the SecretBuffer object of attribute 'private', or decoded from it.
- */
-EVP_PKEY *
-cmk_key_get_privkey(SV *objref) {
-   HV *hv= (objref && SvROK(objref) && SvTYPE(SvRV(objref)) == SVt_PVHV)? (HV*) SvRV(objref) : NULL;
-   SV **field;
-   EVP_PKEY **key_p;
-
-   if (!hv)
-      croak("Not a Crypt::MultiKey::PKey");
-
-   field= hv_fetchs(hv, "private", 0);
-   if (!(field && *field && SvOK(*field)))
-      croak("Missing 'private' attribute");
-
-   /* is it cached? */
-   key_p= cmk_EVP_PKEY_p_from_magic(SvROK(*field)? SvRV(*field) : *field, true);
-   if (!*key_p) {
-      STRLEN len;
-      const U8 *buf= (U8*) secret_buffer_SvPVbyte(*field, &len);
-      EVP_PKEY *pubkey= cmk_key_get_pubkey(objref);
-      if (!len || !d2i_PrivateKey(EVP_PKEY_base_id(pubkey), key_p, &buf, len) || !*key_p)
-         croak("Decoding 'private' attribute failed");
-   }
-   return *key_p;
-}
-
-/* Generate a key, and store the results in the fields (and MAGIC) of Crypt::MultiKey::PKey
- * This parses out the ":param=value" from the end of the string.
- */
-EVP_PKEY *
-cmk_key_keygen(SV *objref, const char *type_and_params) {
-   const char *param_start= strchr(type_and_params, ':');
+void
+cmk_pkey_keygen(cmk_pkey *pk, const char *type_and_params) {
+   const char *type, *param_start= strchr(type_and_params, ':');
+   int param_count= 0;
+   char **params= NULL;
    if (param_start) {
-      char *parambuf, *ch, **params;
-      int param_count= 0;
       STRLEN len= strlen(type_and_params);
+      char *parambuf;
       /* count params */
       { const char *ch= param_start;
          do {
@@ -432,202 +335,251 @@ cmk_key_keygen(SV *objref, const char *type_and_params) {
                params[param_count++]= ch+1;
          } while ((ch= strchr(ch+1, ':')));
       }
-      return cmk_key_keygen_params(objref, parambuf, (const char **) params, param_count);
-   }
-   return cmk_key_keygen_params(objref, type_and_params, NULL, 0);
+      type= parambuf;
+   } else
+      type= type_and_params;
+   cmk_pkey_keygen_params(pk, type, (const char **) params, param_count);
 }
 
-/* Generate a key, and store the results in the fields (and MAGIC) of Crypt::MultiKey::PKey
- * This takes a list of string parameters for things like RSA bits or EC group.
+/* MAGIC for storing a EVP_PKEY object on an arbitrary SV
+ * Crypt::MultiKey::PKey objects hold the public key in MAGIC, and the field
+ * $key->private is a SecretBuffer object which can hold the decrypted private key.
  */
-EVP_PKEY *
-cmk_key_keygen_params(SV *objref, const char *type, const char **params, int param_count) {
-   const char *err;
-   HV *hv= (objref && SvROK(objref) && SvTYPE(SvRV(objref)) == SVt_PVHV)? (HV*) SvRV(objref) : NULL;
-   SV *public_buf= sv_newmortal(), *private_ref;
-   secret_buffer *sb= secret_buffer_new(0, &private_ref);
-   EVP_PKEY **key_p, *new_key= NULL;
-   STRLEN len;
-   int serialized_len;
+#ifdef USE_ITHREADS
+static int cmk_pkey_magic_dup(pTHX_ MAGIC *mg, CLONE_PARAMS *param) {
+   if (mg->mg_ptr) {
+      cmk_pkey pkey= (EVP_PKEY*) mg->mg_ptr;
+      cmk_pkey_dup((cmk_pkey*) &mg->mg_ptr, &pkey);
+   }
+   PERL_UNUSED_VAR(param);
+   return 0;
+};
+#define SET_MGf_DUP_FLAG(mg) do { magic->mg_flags |= MGf_DUP; } while (0)
+#else
+#define cmk_pkey_magic_dup 0
+#define SET_MGf_DUP_FLAG(mg) ((void)0)
+#endif
+
+static int cmk_pkey_magic_free(pTHX_ SV *sv, MAGIC *mg) {
+   if (mg->mg_ptr) EVP_PKEY_free((EVP_PKEY*) mg->mg_ptr);
+}
+
+static MGVTBL cmk_pkey_magic_vtbl = {
+   NULL, NULL, NULL, NULL,
+   cmk_pkey_magic_free,
+   NULL,
+   cmk_pkey_magic_dup
+#ifdef MGf_LOCAL
+   ,NULL
+#endif
+};
+
+/* Crypt::MultiKey::PKey stores a EVP_KEY in Magic.  OpenSSL routines can rewrite the pointer,
+ * so instead of load/save API I just return a pointer-to-pointer that can be written.
+ * If EVP_PKEY magic doesn't exist, it gets created with a pointer that is initially NULL.
+ */
+cmk_pkey*
+cmk_pkey_from_magic(SV *sv, int flags) {
+#define CMK_MAGIC_AUTOCREATE 1
+#define CMK_MAGIC_OR_DIE     2
+#define CMK_MAGIC_UNDEF_OK   4
+extern cmk_pkey* cmk_pkey_from_magic(SV *sv, int flags);
+   if (!sv) {
+      if (flags & (CMK_MAGIC_OR_DIE|CMK_MAGIC_AUTOCREATE) && !(flags & CMK_MAGIC_UNDEF_OK))
+         croak("Invalid object");
+      return NULL;
+   }
+   MAGIC *magic= SvMAGICAL(sv)? mg_findext(sv, PERL_MAGIC_ext, &cmk_pkey_magic_vtbl) : NULL;
+   if (!magic && (flags & CMK_MAGIC_AUTOCREATE)) {
+      magic= sv_magicext(sv, NULL, PERL_MAGIC_ext, &cmk_pkey_magic_vtbl, NULL, 0);
+      SET_MGf_DUP_FLAG(magic);
+   }
+   if (!magic) {
+      if (flags & CMK_MAGIC_OR_DIE)
+         croak("Object lacks PKey MAGIC");
+      return NULL;
+   }
+   /* currently the cmk_pkey is an alias for EVP_PKEY*, so the address of magic pointer itself
+    * becomes the return value */
+   return (cmk_pkey*) &magic->mg_ptr;
+}
+
+/* Handy accessors for public and private key which check the type of key actually
+ * present in MAGIC and croak with useful error messages. */
+
+cmk_pkey*
+cmk_get_pubkey(SV *objref) {
+   cmk_pkey *pk;
+   if (!sv_isobject(objref))
+      croak("Not an object");
+   pk= cmk_pkey_from_magic(SvRV(objref), false);
+   if (!pk || !*pk)
+      croak("No public/private key loaded");
+   return pk;
+}
+
+cmk_pkey*
+cmk_get_privkey(SV *objref) {
+   cmk_pkey *pk;
+   SV **field;
+   if (!sv_isobject(objref))
+      croak("Not an object");
+   pk= cmk_pkey_from_magic(SvRV(objref), false);
+   if (!pk || !*pk)
+      croak("No public/private key loaded");
+   if (!cmk_pkey_has_private(pk))
+      croak("Private half of key is not loaded/decrypted");
+   return pk;
+}
+
+void
+cmk_pkey_import_pubkey(cmk_pkey *pk, const U8 *buf, STRLEN buf_len) {
+   EVP_PKEY *key= NULL;
+   if (!d2i_PUBKEY(&key, &buf, buf_len) || !key)
+      cmk_croak_with_ssl_error("import_pubkey", "Decoding SubjectPublicKeyInfo failed");
+   if (*pk) EVP_PKEY_free(*pk);
+   *pk= key;
+}
+
+void
+cmk_pkey_export_pubkey(cmk_pkey *pk, SV *buf_out) {
+   secret_buffer *sb;
    U8 *buf;
-
-   if (!hv)
-      croak("Not a Crypt::MultiKey::PKey");
-
-   new_key= cmk_EVP_PKEY_keygen(type, params, param_count);
-
    /* encode the public key into a scalar */
-   serialized_len= i2d_PUBKEY(new_key, NULL);
+   int serialized_len= i2d_PUBKEY(*pk, NULL);
    if (serialized_len <= 0)
-      GOTO_CLEANUP_CROAK("Can't serialize public key");
-   buf= (U8*) cmk_prepare_sv_buffer(public_buf, serialized_len);
-   if (i2d_PUBKEY(new_key, &buf) != serialized_len)
-      GOTO_CLEANUP_CROAK("Can't serialize public key");
-
-   /* encode the private key into a SecretBuffer */
-   serialized_len= i2d_PrivateKey(new_key, NULL);
-   if (serialized_len <= 0)
-      GOTO_CLEANUP_CROAK("Can't serialize private key");
-   secret_buffer_set_len(sb, serialized_len);
-   buf= sb->data;
-   if (i2d_PrivateKey(new_key, &buf) != serialized_len)
-      GOTO_CLEANUP_CROAK("Can't serialize private key");
-
-   /* Attach the full key to the HV of the secret_buffer, which becomes the 'private' field */
-   *cmk_EVP_PKEY_p_from_magic(sb->wrapper, 1)= new_key;
-   new_key= NULL; /* prevent cleanup below */
-
-   /* store the hash fields */
-   if (!hv_stores(hv, "private", private_ref))
-      GOTO_CLEANUP_CROAK("can't set ->{private}");
-   SvREFCNT_inc(private_ref); /* was mortal */
-
-   if (!hv_stores(hv, "public", public_buf))
-      GOTO_CLEANUP_CROAK("can't set ->{public}");
-   SvREFCNT_inc(public_buf); /* was mortal */
-
-cleanup:
-   if (err) {
-      if (new_key)
-         EVP_PKEY_free(new_key);
-      cmk_croak_with_ssl_error(err);
+      cmk_croak_with_ssl_error("export_pubkey", "i2d_PUBKEY failed");
+   /* buffer maight be a secret_buffer reference */
+   if ((sb= secret_buffer_from_magic(buf_out, 0))) {
+      secret_buffer_set_len(sb, serialized_len);
+      buf= sb->data;
    }
-   return new_key;
+   else {
+      buf= (U8*) cmk_prepare_sv_buffer(buf_out, serialized_len);
+   }
+   if (i2d_PUBKEY(*pk, &buf) != serialized_len)
+      cmk_croak_with_ssl_error("export_pubkey", "i2d_PUBKEY");
 }
 
-/* Create the 'private_pkcs8' field of the Key object from the 'private' field.
- * The 'private' field is unmodified.
- * Dies on failure.
+/* Load the private key from the buffer and store it into MAGIC on the ::PKey object.
+ * The buffer should contain ASN.1 DER bytes of PKCS#8 which may be storing an encrypted private
+ * key that requires a password to decrypt.  PKCS#8 also stores the PDK iterations and other
+ * encryption parameters, so only the original password is required.
  */
-void cmk_key_encrypt_private(SV *objref, const U8 *pass, size_t pass_len, int kdf_iters) {
+void
+cmk_pkey_import_pkcs8(cmk_pkey *pk, const U8 *buf, STRLEN buf_len, const char *pw, STRLEN pw_len) {
    const char *err= NULL;
-   HV *hv= (objref && SvROK(objref) && SvTYPE(SvRV(objref)) == SVt_PVHV)? (HV*) SvRV(objref) : NULL;
-   EVP_PKEY *pkey= cmk_key_get_privkey(objref);
    PKCS8_PRIV_KEY_INFO *p8inf= NULL;
-   X509_SIG *p8= NULL;
-   SV *pkcs8_buf= NULL;
-   U8 *buf;
-   int serialized_len;
+   EVP_PKEY *pkey= NULL;
+   const U8 *buf_copy = buf;
 
-   if (!hv)
-      croak("Not a Crypt::MultiKey::PKey");
+   /* Try to decode as encrypted PKCS8 (X509_SIG) first */
+   X509_SIG *p8 = d2i_X509_SIG(NULL, &buf_copy, buf_len);
 
-   /* Convert EVP_PKEY to PKCS8_PRIV_KEY_INFO */
-   p8inf= EVP_PKEY2PKCS8(pkey);
-   if (!p8inf)
-      GOTO_CLEANUP_CROAK("Failed to convert key to PKCS8 format");
+   if (p8) {
+      /* Successfully decoded as X509_SIG - this means it's encrypted */
+      if (!pw_len)
+         GOTO_CLEANUP_CROAK("PKCS8 private key is encrypted but no password was provided");
 
-   /* Encrypt with specified iteration count */
-   p8= PKCS8_encrypt(
-      -1,                          /* use default PKCS#12 PBE algorithm */
-      EVP_aes_256_cbc(),           /* cipher */
-      (const char *)pass, pass_len,
-      NULL, 0,                     /* salt (NULL = auto-generate) */
-      kdf_iters,                   /* iteration count */
-      p8inf
-   );
-   if (!p8)
-      GOTO_CLEANUP_CROAK("PKCS8 encryption failed");
-
-   /* Serialize to DER format */
-   serialized_len= i2d_X509_SIG(p8, NULL);
-   if (serialized_len <= 0)
-      GOTO_CLEANUP_CROAK("Can't determine PKCS8 serialized length");
-
-   pkcs8_buf= newSVpvs("");
-   buf= (U8*) cmk_prepare_sv_buffer(pkcs8_buf, serialized_len);
-   if (i2d_X509_SIG(p8, &buf) != serialized_len)
-      GOTO_CLEANUP_CROAK("Can't serialize PKCS8");
-
-   /* Store in the hash field */
-   if (!hv_stores(hv, "private_pkcs8", pkcs8_buf))
-      GOTO_CLEANUP_CROAK("can't set ->{private_pkcs8}");
-
-cleanup:
-   if (p8)
-      X509_SIG_free(p8);
-   if (p8inf)
-      PKCS8_PRIV_KEY_INFO_free(p8inf);
-   if (err) {
-      if (pkcs8_buf) SvREFCNT_dec(pkcs8_buf);
-      cmk_croak_with_ssl_error(err);
+      /* Decrypt to get PKCS8_PRIV_KEY_INFO */
+      p8inf = PKCS8_decrypt(p8, pw, pw_len);
+      if (!p8inf)
+         GOTO_CLEANUP_CROAK("PKCS8 decryption failed (wrong password?)");
    }
-}
+   else {
+      /* Failed to decode as X509_SIG, try as unencrypted PKCS8_PRIV_KEY_INFO */
+      buf_copy = buf;
+      p8inf = d2i_PKCS8_PRIV_KEY_INFO(NULL, &buf_copy, buf_len);
 
-/* Create the 'private' field of the Key object from the 'private_pkcs8' field
- * using the supplied password.
- * Dies on failure.
- */
-void cmk_key_decrypt_private(SV *objref, const U8 *pass, size_t pass_len) {
-   const char *err= NULL;
-   HV *hv= (objref && SvROK(objref) && SvTYPE(SvRV(objref)) == SVt_PVHV)? (HV*) SvRV(objref) : NULL;
-   SV **field, *private_ref= NULL;
-   secret_buffer *sb= NULL;
-   X509_SIG *p8= NULL;
-   PKCS8_PRIV_KEY_INFO *p8inf= NULL;
-   EVP_PKEY *pkey= NULL, **key_p;
-   const U8 *buf;
-   U8 *out_buf;
-   STRLEN pkcs8_len;
-   int serialized_len;
+      if (!p8inf)
+         GOTO_CLEANUP_CROAK("Failed to decode PKCS8 structure (not valid PKCS8 format)");
 
-   if (!hv)
-      croak("Not a Crypt::MultiKey::PKey");
-
-   /* Get the encrypted PKCS8 data */
-   field= hv_fetchs(hv, "private_pkcs8", 0);
-   if (!(field && *field && SvOK(*field)))
-      croak("Missing 'private_pkcs8' attribute");
-
-   buf= (const U8*) SvPVbyte(*field, pkcs8_len);
-   if (!pkcs8_len)
-      croak("Empty 'private_pkcs8' attribute");
-
-   /* Decode the X509_SIG (encrypted PKCS8) structure */
-   if (!d2i_X509_SIG(&p8, &buf, pkcs8_len) || !p8)
-      GOTO_CLEANUP_CROAK("Failed to decode PKCS8 structure");
-
-   /* Decrypt to get PKCS8_PRIV_KEY_INFO */
-   p8inf= PKCS8_decrypt(p8, (const char *)pass, pass_len);
-   if (!p8inf)
-      GOTO_CLEANUP_CROAK("PKCS8 decryption failed (wrong password?)");
+      if (pw_len)
+         /* Warn that password was provided but key is not encrypted */
+         warn("Password provided but PKCS8 private key is not encrypted");
+   }
 
    /* Convert PKCS8_PRIV_KEY_INFO to EVP_PKEY */
-   pkey= EVP_PKCS82PKEY(p8inf);
+   pkey = EVP_PKCS82PKEY(p8inf);
    if (!pkey)
       GOTO_CLEANUP_CROAK("Failed to convert PKCS8 to EVP_PKEY");
 
-   /* Serialize the private key */
-   serialized_len= i2d_PrivateKey(pkey, NULL);
-   if (serialized_len <= 0)
-      GOTO_CLEANUP_CROAK("Can't serialize private key");
-
-   /* Create SecretBuffer for the private key */
-   sb= secret_buffer_new(0, &private_ref);
-   secret_buffer_set_len(sb, serialized_len);
-   out_buf= sb->data;
-   if (i2d_PrivateKey(pkey, &out_buf) != serialized_len)
-      GOTO_CLEANUP_CROAK("Can't serialize private key");
-
-   /* Attach the EVP_PKEY to the secret_buffer's wrapper for caching */
-   key_p= cmk_EVP_PKEY_p_from_magic(sb->wrapper, 1);
-   *key_p= pkey;
-   pkey= NULL; /* prevent cleanup below */
-
-   /* Store in the hash field */
-   if (!hv_stores(hv, "private", private_ref))
-      GOTO_CLEANUP_CROAK("can't set ->{private}");
-   SvREFCNT_inc(private_ref); /* was mortal */
-
 cleanup:
-   if (pkey)
-      EVP_PKEY_free(pkey);
    if (p8inf)
       PKCS8_PRIV_KEY_INFO_free(p8inf);
    if (p8)
       X509_SIG_free(p8);
    if (err)
-      cmk_croak_with_ssl_error(err);
+      cmk_croak_with_ssl_error("import_pkcs8", err);
+   if (*pk) EVP_PKEY_free(*pk);
+   *pk= pkey;
+}
+
+/* Save the private key from ::PKey MAGIC into the supplied buffer.
+ * The pasword parameter is optional, and if supplied, results in an encrypted private key.
+ */
+void
+cmk_pkey_export_pkcs8(cmk_pkey *pk, const char *pw, STRLEN pw_len, int kdf_iters, SV *buf_out) {
+   const char *err= NULL;
+   PKCS8_PRIV_KEY_INFO *p8inf= NULL;
+   X509_SIG *p8= NULL;
+   U8 *buf;
+   secret_buffer *sb;
+   int serialized_len;
+
+   /* Convert EVP_PKEY to PKCS8_PRIV_KEY_INFO */
+   p8inf= EVP_PKEY2PKCS8(*pk);
+   if (!p8inf)
+      GOTO_CLEANUP_CROAK("Failed to convert key to PKCS8 format");
+
+   /* Encrypt with specified iteration count */
+   if (pw_len) {
+      /* Validate iteration count for encrypted keys */
+      if (kdf_iters < 1)
+         GOTO_CLEANUP_CROAK("KDF iteration count must be positive");
+
+      p8= PKCS8_encrypt(
+         -1,                          /* use default PKCS#12 PBE algorithm */
+         EVP_aes_256_cbc(),           /* cipher */
+         (const char *)pw, pw_len,
+         NULL, 0,                     /* salt (NULL = auto-generate) */
+         kdf_iters,                   /* iteration count */
+         p8inf
+      );
+      if (!p8)
+         GOTO_CLEANUP_CROAK("PKCS8 encryption failed");
+
+      /* Serialize to DER format */
+      serialized_len= i2d_X509_SIG(p8, NULL);
+   }
+   else {
+      serialized_len = i2d_PKCS8_PRIV_KEY_INFO(p8inf, NULL);
+   }
+
+   if (serialized_len <= 0)
+      GOTO_CLEANUP_CROAK("Can't determine PKCS8 serialized length");
+   if ((sb= secret_buffer_from_magic(buf_out, 0))) {
+      secret_buffer_set_len(sb, serialized_len);
+      buf= sb->data;
+   } else {
+      buf= (U8*) cmk_prepare_sv_buffer(buf_out, serialized_len);
+   }
+   
+   if (pw_len) {
+      if (i2d_X509_SIG(p8, &buf) != serialized_len)
+         GOTO_CLEANUP_CROAK("Can't serialize PKCS8");
+   }
+   else {
+      if (i2d_PKCS8_PRIV_KEY_INFO(p8inf, &buf) != serialized_len)
+         GOTO_CLEANUP_CROAK("Can't serialize PKCS8");
+   }
+cleanup:
+   if (p8)
+      X509_SIG_free(p8);
+   if (p8inf)
+      PKCS8_PRIV_KEY_INFO_free(p8inf);
+   if (err)
+      cmk_croak_with_ssl_error("export_pkcs8", err);
 }
 
 /* This function encrypts a secret using a public key.  It stores the ciphertext and all
@@ -638,14 +590,15 @@ cleanup:
  * uses the shared secret to encrypt the secret, then stores the public half of the ephemeral
  * key along side the other fields.
  */
-void cmk_key_encrypt(EVP_PKEY *public_key, const U8 *secret, size_t secret_len, HV *enc_out) {
-   secret_buffer *aes_key= cmk_key_create_aes_key(public_key, enc_out);
+void
+cmk_pkey_encrypt(cmk_pkey *pubkey, const U8 *secret, size_t secret_len, HV *enc_out) {
+   secret_buffer *aes_key= cmk_pkey_create_aes_key(pubkey, enc_out);
    cmk_aes_encrypt(aes_key, secret, secret_len, enc_out);
    /* aes_key is mortal */
 }
 
 secret_buffer *
-cmk_key_create_aes_key(EVP_PKEY *public_key, HV *enc_out) {
+cmk_pkey_create_aes_key(cmk_pkey *pk, HV *enc_out) {
    const char *err = NULL;
    EVP_PKEY *ephemeral = NULL;
    EVP_PKEY_CTX *pctx = NULL;
@@ -656,7 +609,7 @@ cmk_key_create_aes_key(EVP_PKEY *public_key, HV *enc_out) {
    size_t shared_len = 0;
    SV *sv= NULL;
    secret_buffer *aes_key= secret_buffer_new(0, NULL);
-   int type= EVP_PKEY_base_id(public_key);
+   int type= EVP_PKEY_base_id(*pk);
 
    /* RSA keys encrypt/decrypt directly, but DSA-style keys need to create an ephermeral
     * key to perform a handshake with, to produce a shared secret.
@@ -669,7 +622,7 @@ cmk_key_create_aes_key(EVP_PKEY *public_key, HV *enc_out) {
       int ephemeral_pub_len;
 
       /* Generate ephemeral keypair of same type */
-      pctx = EVP_PKEY_CTX_new_id(type, NULL);
+      pctx = EVP_PKEY_CTX_new(*pk, NULL);
       if (!pctx ||
          EVP_PKEY_keygen_init(pctx) <= 0 ||
          EVP_PKEY_keygen(pctx, &ephemeral) <= 0
@@ -680,7 +633,7 @@ cmk_key_create_aes_key(EVP_PKEY *public_key, HV *enc_out) {
       ctx= EVP_PKEY_CTX_new(ephemeral, NULL);
       if (!ctx ||
          EVP_PKEY_derive_init(ctx) <= 0 ||
-         EVP_PKEY_derive_set_peer(ctx, public_key) <= 0
+         EVP_PKEY_derive_set_peer(ctx, *pk) <= 0
       )
          GOTO_CLEANUP_CROAK("Derive init failed");
 
@@ -734,7 +687,7 @@ cmk_key_create_aes_key(EVP_PKEY *public_key, HV *enc_out) {
          GOTO_CLEANUP_CROAK("RAND_bytes for wrap key failed");
 
       /* 2. RSA-OAEP encrypt wrap key with public_key */
-      rsa_ctx = EVP_PKEY_CTX_new(public_key, NULL);
+      rsa_ctx = EVP_PKEY_CTX_new(*pk, NULL);
       if (!rsa_ctx
          || EVP_PKEY_encrypt_init(rsa_ctx) <= 0
          || EVP_PKEY_CTX_set_rsa_padding(rsa_ctx, RSA_PKCS1_OAEP_PADDING) <= 0
@@ -770,7 +723,7 @@ cleanup:
    if (ephemeral) EVP_PKEY_free(ephemeral);
    if (sv) /* if hv_stores fails, the thing we tried to store needs freed */
       SvREFCNT_dec(sv);
-   if (err) cmk_croak_with_ssl_error(err);
+   if (err) cmk_croak_with_ssl_error("create_aes_key", err);
    return aes_key;
 }
 
@@ -780,14 +733,15 @@ cleanup:
  * - For DSA-like keys: deriving the shared secret from the ephemeral public key,
  *   then using it to decrypt the secret
  */
-void cmk_key_decrypt(EVP_PKEY *private_key, HV *enc_in, secret_buffer *secret_out) {
-   secret_buffer *aes_key= cmk_key_recreate_aes_key(private_key, enc_in);
+void
+cmk_pkey_decrypt(cmk_pkey *pk, HV *enc_in, secret_buffer *secret_out) {
+   secret_buffer *aes_key= cmk_pkey_recreate_aes_key(pk, enc_in);
    cmk_aes_decrypt(aes_key, enc_in, secret_out);
    /* aes_key is mortal */
 }
 
 secret_buffer *
-cmk_key_recreate_aes_key(EVP_PKEY *private_key, HV *enc) {
+cmk_pkey_recreate_aes_key(cmk_pkey *pk, HV *enc) {
    const char *err = NULL;
    EVP_PKEY *ephemeral_pub = NULL;
    EVP_PKEY_CTX *ctx = NULL;
@@ -797,7 +751,7 @@ cmk_key_recreate_aes_key(EVP_PKEY *private_key, HV *enc) {
    size_t shared_len;
    SV **svp;
    secret_buffer *aes_key= secret_buffer_new(0, NULL);
-   int type = EVP_PKEY_base_id(private_key);
+   int type = EVP_PKEY_base_id(*pk);
 
    /* Determine key type and decrypt accordingly */
    if (type == EVP_PKEY_X25519 || type == EVP_PKEY_X448
@@ -828,7 +782,7 @@ cmk_key_recreate_aes_key(EVP_PKEY *private_key, HV *enc) {
          GOTO_CLEANUP_CROAK("Failed to decode ephemeral public key");
 
       /* Derive shared secret: private_key + ephemeral_pub */
-      ctx = EVP_PKEY_CTX_new(private_key, NULL);
+      ctx = EVP_PKEY_CTX_new(*pk, NULL);
       if (!ctx ||
          EVP_PKEY_derive_init(ctx) <= 0 ||
          EVP_PKEY_derive_set_peer(ctx, ephemeral_pub) <= 0
@@ -872,7 +826,7 @@ cmk_key_recreate_aes_key(EVP_PKEY *private_key, HV *enc) {
       rsa_ct = (U8*)secret_buffer_SvPVbyte(*svp, &rsa_ct_len);
 
       /* RSA-OAEP decrypt to get wrap key */
-      rsa_ctx = EVP_PKEY_CTX_new(private_key, NULL);
+      rsa_ctx = EVP_PKEY_CTX_new(*pk, NULL);
       if (!rsa_ctx
          || EVP_PKEY_decrypt_init(rsa_ctx) <= 0
          || EVP_PKEY_CTX_set_rsa_padding(rsa_ctx, RSA_PKCS1_OAEP_PADDING) <= 0
@@ -904,7 +858,7 @@ cleanup:
    if (kdf) EVP_PKEY_CTX_free(kdf);
    if (rsa_ctx) EVP_PKEY_CTX_free(rsa_ctx);
    if (ephemeral_pub) EVP_PKEY_free(ephemeral_pub);
-   if (err) cmk_croak_with_ssl_error(err);
+   if (err) cmk_croak_with_ssl_error("create_aes_key", err);
    return aes_key;
 }
 
@@ -956,7 +910,7 @@ void cmk_aes_encrypt(secret_buffer *aes_key, const U8 *secret, size_t secret_len
 cleanup:
    if (sv) SvREFCNT_dec(sv);
    if (aes_ctx) EVP_CIPHER_CTX_free(aes_ctx);
-   if (err) cmk_croak_with_ssl_error(err);
+   if (err) cmk_croak_with_ssl_error("aes_encrypt", err);
 }
 
 /* Perform symmetric decryption using the supplied AES key and ciphertext and parameters in enc_in,
@@ -1029,5 +983,5 @@ void cmk_aes_decrypt(secret_buffer *aes_key, HV *enc_in, secret_buffer *secret_o
 
 cleanup:
    if (aes_ctx) EVP_CIPHER_CTX_free(aes_ctx);
-   if (err) cmk_croak_with_ssl_error(err);
+   if (err) cmk_croak_with_ssl_error("aes_decrypt", err);
 }
