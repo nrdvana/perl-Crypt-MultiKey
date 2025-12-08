@@ -32,20 +32,20 @@ use Crypt::MultiKey;
 =head1 DESCRIPTION
 
 C<Crypt::MultiKey::PKey> is a public/private keypair where the public half is always available,
-but the private half can be encrypted or removed.  The Key can always L</encrypt> data, but the
+but the private half can be encrypted or removed.  The PKey can always L</encrypt> data, but the
 private half must be avalable to L</decrypt> that data again.
-
-=attribute path
-
-A disk path from which this key was loaded or to which it will be saved.
-
-=attribute uuid
-
-All keys have a UUID, used to quickly identify which Keys go to which KeySlots on Coffers.
 
 =attribute type
 
 The type of public-key cryptography used.  The default is C<'x25519'>.
+
+=attribute fingerprint
+
+SSH-style C<< "sha256:base64..." >> used to help identify the key.
+
+=attribute path
+
+A disk path from which this key was loaded or to which it will be saved.
 
 =attribute mechanism
 
@@ -59,41 +59,20 @@ for whether the required SSH key is available.
 
 =attribute public
 
-The public key encoded as C<SubjectPublicKeyInfo> format of OpenSSL.  (raw bytes, not PEM)
-
-=attribute private
-
-The private key stored in a SecretBuffer object, encoded as a per-algorithm format from OpenSSL's
-C<i2d_PublicKey> function.  This is I<not> encrypted, and this field will typically be cleared
-using L</clear_private> after password-encrypting it to the L</private_pkcs8> field with the
-L</encrypt_private> method.  But, you also have the option to serialize this field if you have
-a secure storage medium available.
-
-=attribute private_pkcs8
-
-The private key encrypted with a password and encoded in C<PCKS#8> format, which embodies all the
-details like numbr of KDF iterations and the salt value that was used.  PKCS#8 is the underlying
-binary format that gets encoded as Base64 in a PEM file.  This field holds the raw bytes, not PEM.
-Call L</decrypt_private> to reconstruct the L</private> field from this field.
+Export the public key in ASN.1 SubjectPublicKeyInfo structure defined in RFC5280, then encode
+as Hex.
 
 =cut
 
-sub uuid { $_[0]{uuid} }
 sub type { $_[0]{type} }
+sub fingerprint { $_[0]{fingerprint} }
+sub path { $_[0]{path} }
+sub private_encrypted { $_[0]{private_encrypted} }
 sub mechanism { undef; }
-sub public { $_[0]{public} }
-sub private {
-   my $self= shift;
-   if (@_ > 1) {
-      {
-         local $self->{private}= $_[0];
-         $self->_validate_private; # if it fails, we avoided setting ->{private}
-      }
-      $self->{private}= $_[0];
-   }
-   $self->{private}
+sub public {
+   shift->_export_pubkey(my $buf);
+   return unpack 'H*', $buf;
 }
-sub private_pkcs8 { $_[0]{private_pkcs8} }
 
 =constructor new
 
@@ -120,25 +99,25 @@ sub new {
    return $class->new_from_file(@_) if @_ == 1;
    my %attrs= @_;
    my $self= bless {}, $class;
-   # Initialize UUID unless provided
-   $self->{uuid}= uc(delete $attrs{uuid} // Crypt::MultiKey::generate_uuid_v4());
-   $self->{uuid} =~ /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/i
-      or croak "Invalid UUID: $self->{uuid}";
-   # Create new random keypair, or validate existing public/private key vs. type
-   my $t= delete $attrs{type} // 'x25519';
-   $self->{type}= $type_alias{lc $t} // $t;
-   # consume other known attributes
-   for (qw( public private private_pkcs8 )) {
-      $self->{$_}= delete $attrs{$_} if defined $attrs{$_};
-   }
-   if (defined $self->{public}) {
-      $self->_validate_public;
-      $self->_validate_private if defined $self->{private};
+   my ($type, $public, $private)= delete @attrs{'type','public','private'};
+   # If 'private' is present, it contains the whole unencrypted key.
+   # 'public' may also be present but we ignore it.
+   if (defined $private) {
+      $self->_import_pkcs8(pack '(H2)*', $private);
+   # If 'public' is present, it may be paired with 'private_encrypted' so that the user
+   # can decrypt it later.
+   } elsif (defined $public) {
+      $self->_import_pubkey(pack '(H2)*', $public);
+      $self->{private_encrypted}= delete $attrs{private_encrypted};
+   # else generate a new key of the specified type, defaulting to x25519
    } else {
-      croak "private key supplied, but 'public' is missing!"
-         if defined $self->{private} or defined $self->{private_pkcs8};
-      $self->_keygen($self->{type})
+      $type= $type && $type_alias{lc $type} || $type || 'x25519';
+      $self->_keygen($type);
    }
+   # save the type regardless of how we loaded it.  It could become inconsistent with the actual
+   # key type if someone tampered with private attributes or edited the file, but it would be a
+   # lot of work to verify it or reconstruct it from the key.
+   $self->{type}= $type;
    # Every remaining attribute must have a writable accessor
    $self->$_($attrs{$_}) for keys %attrs;
    return $self;
@@ -170,10 +149,9 @@ sub deserialize {
    my ($class, $text)= @_;
    my $ini= Crypt::SecretBuffer::INI->new(
       field_config => [
-         pubkey              => { encoding => HEX },
-         privkey             => { encoding => HEX, secret => 1 },
-         privkey_ciphertext  => { encoding => HEX },
-         privkey_pbkdf2_salt => { encoding => HEX },
+         public              => { encoding => HEX },
+         private             => { encoding => HEX, secret => 1 },
+         private_encrypted   => { encoding => HEX },
       ]
    );
    my $sections= $ini->parse($text);
@@ -207,9 +185,13 @@ sub serialize {
    $buf ||= Crypt::SecretBuffer->new;
    $buf->append(join "\n",
       '['.ref($self).']',
-      'uuid='.$self->uuid,
       'type='.$self->type,
-      'public='.unpack('H*',$self->public),
+      '# ASN.1 SubjectPublicKeyInfo structure defined in RFC5280',
+      'public='.$self->public,
+      (defined $self->{private_encrypted}? (
+         '# PKCS#8 Encrypted Private Key',
+         'private_encrypted='.$self->{private_encrypted},
+      ):()),
    );
    return $buf;
    # subclass needs to append additional attributes
@@ -227,30 +209,55 @@ sub save {
 
   $key->encrypt_private($password, $kdf_iter=100_000);
 
-Using the supplied password and optional PBKDF2 iteration count, write an encrypted PKCS#8
-DER-format string of bytes into attribute L</private_pkcs8>.    Ideally, C<$password> is a
-C<SecretBuffer> object, but scalars are also accepted.  The password must be bytes, not wide
-characters.
+Export the (private) key in PKCS#8 format, encrypted with a password, and stored into attribute
+C<private_encrypted> to be saved out by a subsequent L</save> call.
+You may customize the number of iterations for the key-derivation-function to resist brute-force
+attempts.  If the password is known to be a string of hashed data with uniformly-distributed
+bits, you may reduce the kdf_iterations to 1.  (but it cannot be zero, due to OpenSSL API).
+Ideally, C<$password> is a C<SecretBuffer> object, but scalars are also accepted.
+The password must be bytes, not wide characters.
+
+=cut
+
+sub encrypt_private {
+   my $self= shift;
+   defined $_[0] or die "Missing password";
+   my $buf= '';
+   $self->_export_pkcs8($buf, $_[0], $_[1] || 100_000);
+   $self->{private_encrypted}= unpack 'H*', $buf;
+   $self;
+}
 
 =method clear_private
 
 Delete the private half of the public/private key pair.  You should only call this after
 L<encrypting it|/encrypt_private>, or saving it by some other means.
 
+=cut
+
+sub clear_private {
+   my $self= shift;
+   $self->_export_pubkey(my $buf);
+   $self->_import_pubkey($buf);
+   $self;
+}
+
 =method decrypt_private
 
   $key->decrypt_private($password);
 
-Using the supplied password, decrypt attribute C<private_pkcs8> and store it into attribute
-L</private> as a L<SecretBuffer|Crypt::SecretBuffer>.  Ideally, C<$password> is a
-C<SecretBuffer> object, but scalars are also accepted.  The password must be bytes, not wide
-characters.
+Using the supplied password, decrypt attribute C<private_encrypted> and import it.
+Ideally, C<$password> is a C<SecretBuffer> object, but scalars are also accepted.
+The password must be bytes, not wide characters.
 
 =cut
 
-sub clear_private {
-   # SecretBuffer destructor takes care of wiping the secret
-   delete $_[0]{private};
+sub decrypt_private {
+   my $self= shift;
+   defined $_[0] or die "Missing password";
+   my $raw= pack 'H*', $self->{private_encrypted};
+   $self->_import_pkcs8($raw, $_[0]);
+   $self;
 }
 
 =method encrypt

@@ -8,18 +8,18 @@ sub str_of_len {
    return validator(sub{ length $_ == $len; });
 }
 
-for (qw( x25519 RSA:bits=1024 )) {
+for (qw( x25519 RSA:bits=1024 secp256k1 )) {
    subtest $_ => sub {
       my $key= Crypt::MultiKey::PKey->new(type => $_);
-      ok( $key->_validate_private, 'validate private' );
       $key->encrypt_private("password", 99);
-      ok( length $key->private_pkcs8, 'private_pkcs8 defined' );
+      like( $key->{private_encrypted}, qr{^[a-zA-Z0-9./=]+\z}, 'private_encrypted created' );
+      ok( $key->has_private_loaded, 'has_private_loaded is true' );
       $key->clear_private;
-      ok( !eval { $key->_validate_private; 1 }, 'missing private' );
+      ok( !$key->has_private_loaded, 'has_private_loaded is false' );
       my $enc= $key->encrypt("Example Secret");
       ok( !eval { $key->decrypt($enc); 1 }, "can't decrypt secret" );
       $key->decrypt_private("password");
-      ok( $key->_validate_private, 'private key restored' );
+      ok( $key->has_private_loaded, 'has_private_loaded is true' );
       my $secret= $key->decrypt($enc);
       my $decrypted;
       $secret->span->copy_to($decrypted);

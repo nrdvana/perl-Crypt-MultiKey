@@ -30,116 +30,6 @@ static SV * new_enum_dualvar(pTHX_ IV ival, SV *name) {
 }
 
 #if 0
-/**********************************************************************************************\
-* Typemap code that converts from Perl objects to C structs and back
-\**********************************************************************************************/
-
-#ifdef USE_ITHREADS
-/* currently it is safe to clone all cmk_ structs */
-static int cmk_key_magic_dup(pTHX_ MAGIC *mg, CLONE_PARAMS *param) {
-   cmk_key *clone;
-   PERL_UNUSED_VAR(param);
-   Newxz(clone, 1, cmk_key);
-   memcpy(clone, mg->mg_ptr, sizeof(cmk_key));
-   mg->mg_ptr= (char*) clone;
-   return 0;
-};
-static int cmk_key_slot_magic_dup(pTHX_ MAGIC *mg, CLONE_PARAMS *param) {
-   cmk_key_slot *clone;
-   PERL_UNUSED_VAR(param);
-   Newxz(clone, 1, cmk_key_slot);
-   memcpy(clone, mg->mg_ptr, sizeof(cmk_key_slot));
-   mg->mg_ptr= (char*) clone;
-   return 0;
-};
-static int cmk_vault_magic_dup(pTHX_ MAGIC *mg, CLONE_PARAMS *param) {
-   cmk_vault *clone;
-   PERL_UNUSED_VAR(param);
-   Newxz(clone, 1, cmk_vault);
-   memcpy(clone, mg->mg_ptr, sizeof(cmk_vault));
-   mg->mg_ptr= (char*) clone;
-   return 0;
-};
-#define SET_MGf_DUP_FLAG(mg) do { magic->mg_flags |= MGf_DUP; } while (0)
-#else
-#define cmk_key_magic_dup 0
-#define cmk_key_slot_magic_dup 0
-#define cmk_vault_magic_dup 0
-#define SET_MGf_DUP_FLAG(mg) ((void)0)
-#endif
-
-static int cmk_key_magic_free(pTHX_ SV *sv, MAGIC *mg);
-static MGVTBL cmk_key_magic_vtbl = {
-   NULL, NULL, NULL, NULL,
-   cmk_key_magic_free,
-   NULL,
-   cmk_key_magic_dup
-#ifdef MGf_LOCAL
-   ,NULL
-#endif
-};
-
-static int cmk_key_slot_magic_free(pTHX_ SV *sv, MAGIC *mg);
-static MGVTBL cmk_key_slot_magic_vtbl = {
-   NULL, NULL, NULL, NULL,
-   cmk_key_slot_magic_free,
-   NULL,
-   cmk_key_slot_magic_dup
-#ifdef MGf_LOCAL
-   ,NULL
-#endif
-};
-
-static int cmk_vault_magic_free(pTHX_ SV *sv, MAGIC *mg);
-static MGVTBL cmk_vault_magic_vtbl = {
-   NULL, NULL, NULL, NULL,
-   cmk_vault_magic_free,
-   NULL,
-   cmk_vault_magic_dup
-#ifdef MGf_LOCAL
-   ,NULL
-#endif
-};
-
-/* destructor for cmk_key magic */
-static int cmk_key_magic_free(pTHX_ SV* sv, MAGIC* mg) {
-   if (mg->mg_ptr) {
-      cmk_key_destroy((cmk_key*) mg->mg_ptr);
-      Safefree(mg->mg_ptr);
-      mg->mg_ptr= NULL;
-   }
-   return 0; /* ignored anyway */
-}
-
-/* destructor for cmk_key_slot magic */
-static int cmk_key_slot_magic_free(pTHX_ SV* sv, MAGIC* mg) {
-   if (mg->mg_ptr) {
-      cmk_key_slot_destroy((cmk_key_slot*) mg->mg_ptr);
-      Safefree(mg->mg_ptr);
-      mg->mg_ptr= NULL;
-   }
-   return 0; /* ignored anyway */
-}
-
-/* destructor for cmk_vault magic */
-static int cmk_vault_magic_free(pTHX_ SV* sv, MAGIC* mg) {
-   if (mg->mg_ptr) {
-      cmk_vault_destroy((cmk_vault*) mg->mg_ptr);
-      Safefree(mg->mg_ptr);
-      mg->mg_ptr= NULL;
-   }
-   return 0; /* ignored anyway */
-}
-
-/* Given a SV which you expect to be a reference to a blessed object with cmk_key magic,
- * return the secret_buffer struct pointer.
- * With no flags, this returns NULL is any of the above assumption is not correct.
- * Specify AUTOCREATE to create a new secret_buffer (and attach with magic) if it is a blessed
- * object and doesn't have the magic yet.
- * Specify OR_DIE if you want an exception instead of NULL return value.
- * Specify UNDEF_OK if you want input C<undef> to translate to C<NULL> even when OR_DIE is
- * requested.
- */
 #define AUTOCREATE CMK_MAGIC_AUTOCREATE
 #define OR_DIE     CMK_MAGIC_OR_DIE
 #define UNDEF_OK   CMK_MAGIC_UNDEF_OK
@@ -170,25 +60,10 @@ static void * X_from_magic(SV *obj, int flags, MGVTBL *vtbl, const char * struct
       croak("Object lacks '%s' magic", struct_name);
    return NULL;
 }
-
-cmk_key * cmk_key_from_magic(SV *obj, int flags) {
-   return (cmk_key*) X_from_magic(obj, flags, &cmk_key_magic_vtbl, "Crypt::MultiKey::Key", sizeof(cmk_key));
-}
-cmk_key_slot * cmk_key_slot_from_magic(SV *obj, int flags) {
-   return (cmk_key_slot*) X_from_magic(obj, flags, &cmk_key_slot_magic_vtbl, "Crypt::MultiKey::KeySlot", sizeof(cmk_key_slot));
-}
-cmk_vault * cmk_vault_from_magic(SV *obj, int flags) {
-   return (cmk_vault*) X_from_magic(obj, flags, &cmk_vault_magic_vtbl, "Crypt::MultiKey::vault", sizeof(cmk_vault));
-}
-
-typedef cmk_key_pubkey *       maybe_cmk_key;
-typedef cmk_key *       auto_cmk_key;
-typedef cmk_key_slot *  maybe_cmk_key_slot;
-typedef cmk_key_slot *  auto_cmk_key_slot;
-typedef cmk_vault *   maybe_cmk_vault;
-typedef cmk_vault *   auto_cmk_vault;
-
 #endif
+
+/* Aliases for typemap, to give useful errors when key state is wrong */
+typedef cmk_pkey cmk_pubkey, cmk_privkey, maybe_cmk_pkey, auto_cmk_pkey;
 
 MODULE = Crypt::MultiKey                PACKAGE = Crypt::MultiKey
 PROTOTYPES: DISABLE
@@ -233,38 +108,69 @@ aes_decrypt(aes_key, enc, secret_out=NULL)
 MODULE = Crypt::MultiKey                PACKAGE = Crypt::MultiKey::PKey
 
 void
-_keygen(key_obj, type)
-   SV *key_obj
+_keygen(pkey, type)
+   auto_cmk_pkey *pkey
    const char *type
    PPCODE:
-      cmk_key_keygen(key_obj, type);
-      XSRETURN(1);
+      cmk_pkey_keygen(pkey, type);
 
 bool
-_validate_public(key_obj)
-   SV *key_obj
+has_private_loaded(pkey)
+   maybe_cmk_pkey *pkey
    CODE:
-      cmk_key_get_pubkey(key_obj);
-      RETVAL= true; /* If it didn't croak, then it was valid */
-   OUTPUT:
-      RETVAL
-
-bool
-_validate_private(key_obj)
-   SV *key_obj
-   CODE:
-      cmk_key_get_privkey(key_obj);
-      RETVAL= true; /* If it didn't croak, then it was valid */
+      RETVAL= pkey && cmk_pkey_has_private(pkey);
    OUTPUT:
       RETVAL
 
 void
-encrypt(key_obj, secret, enc_out=NULL)
-   SV *key_obj
+_import_pubkey(pkey, buffer)
+   auto_cmk_pkey *pkey
+   SV *buffer
+   INIT:
+      STRLEN len;
+      const char *buf= secret_buffer_SvPVbyte(buffer, &len);
+   PPCODE:
+      cmk_pkey_import_pubkey(pkey, buf, len);
+
+void
+_import_pkcs8(pkey, buffer, pass_sv=&PL_sv_undef)
+   auto_cmk_pkey *pkey
+   SV *buffer
+   SV *pass_sv
+   INIT:
+      STRLEN len, pass_len= 0;
+      const char *buf= secret_buffer_SvPVbyte(buffer, &len);
+      const char *pass= SvOK(pass_sv)? secret_buffer_SvPVbyte(pass_sv, &pass_len) : NULL;
+   PPCODE:
+      cmk_pkey_import_pkcs8(pkey, buf, len, pass, pass_len);
+
+void
+_export_pubkey(pkey, buf)
+   cmk_pubkey *pkey
+   SV *buf
+   PPCODE:
+      cmk_pkey_export_pubkey(pkey, buf);
+
+void
+_export_pkcs8(pkey, buf, pass_sv=&PL_sv_undef, kdf_iter=100000)
+   cmk_privkey *pkey
+   SV *buf
+   SV *pass_sv
+   int kdf_iter
+   INIT:
+      STRLEN pass_len= 0;
+      const char *pass= SvOK(pass_sv)? secret_buffer_SvPVbyte(pass_sv, &pass_len) : NULL;
+      if (SvOK(pass_sv) && !pass_len)
+         croak("Empty password supplied; pass undef to skip encryption");
+   PPCODE:
+      cmk_pkey_export_pkcs8(pkey, pass, pass_len, kdf_iter, buf);
+
+void
+encrypt(pkey, secret, enc_out=NULL)
+   cmk_pubkey *pkey
    SV *secret
    HV *enc_out
    INIT:
-      EVP_PKEY *pubkey= cmk_key_get_pubkey(key_obj);
       STRLEN len;
       const char *buf= secret_buffer_SvPVbyte(secret, &len);
    PPCODE:
@@ -274,45 +180,22 @@ encrypt(key_obj, secret, enc_out=NULL)
       } else {
          ST(0)= ST(2);
       }
-      cmk_key_encrypt(pubkey, buf, len, enc_out);
+      cmk_pkey_encrypt(pkey, buf, len, enc_out);
       XSRETURN(1);
 
 void
-decrypt(key_obj, enc, secret_out=NULL)
-   SV *key_obj
+decrypt(pkey, enc, secret_out=NULL)
+   cmk_privkey *pkey
    HV *enc
    secret_buffer *secret_out
-   INIT:
-      EVP_PKEY *privkey= cmk_key_get_privkey(key_obj);
    PPCODE:
       if (!secret_out) {
          secret_out= secret_buffer_new(0, &(ST(0)));
       } else {
          ST(0)= ST(2);
       }
-      cmk_key_decrypt(privkey, enc, secret_out);
+      cmk_pkey_decrypt(pkey, enc, secret_out);
       XSRETURN(1);
-
-void
-encrypt_private(key_obj, pass, kdf_iter=100000)
-   SV *key_obj
-   SV *pass
-   int kdf_iter
-   INIT:
-      STRLEN len;
-      const char *pw_buf= secret_buffer_SvPVbyte(pass, &len);
-   PPCODE:
-      cmk_key_encrypt_private(key_obj, pw_buf, len, kdf_iter);
-
-void
-decrypt_private(key_obj, pass)
-   SV *key_obj
-   SV *pass
-   INIT:
-      STRLEN len;
-      const char *pw_buf= secret_buffer_SvPVbyte(pass, &len);
-   PPCODE:
-      cmk_key_decrypt_private(key_obj, pw_buf, len);
 
 MODULE =  Crypt::MultiKey               PACKAGE = Crypt::MultiKey::Coffer
 
