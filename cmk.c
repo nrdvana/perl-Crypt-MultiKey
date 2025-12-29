@@ -13,6 +13,9 @@
 #include <openssl/err.h>
 #include <openssl/crypto.h>
 #include <openssl/kdf.h>
+#include <openssl/bio.h>
+#include <openssl/buffer.h>
+
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
@@ -581,6 +584,51 @@ cleanup:
       PKCS8_PRIV_KEY_INFO_free(p8inf);
    if (err)
       cmk_croak_with_ssl_error("export_pkcs8", err);
+}
+
+/* Password callback for PEM_read_bio_PrivateKey */
+struct cmk_pem_password {
+   const char *data;
+   STRLEN len;
+};
+static int cmk_pem_password_cb(char *buf, int size, int rwflag, void *userdata) {
+   const struct cmk_pem_password *pw= (const struct cmk_pem_password *) userdata;
+   STRLEN len= (pw->len > size)? size : pw->len;
+   memcpy(buf, pw->data, len);
+   return len;
+}
+
+/* Import a single PEM block (possibly encrypted) */
+void cmk_pkey_import_pem(cmk_pkey *pk, const U8 *buf, STRLEN buf_len, const char *pw, STRLEN pw_len) {
+   const char *err= NULL;
+   EVP_PKEY *pkey= NULL;
+   BIO *bio= NULL;
+
+   bio= BIO_new_mem_buf(buf, buf_len);
+   if (!bio)
+      GOTO_CLEANUP_CROAK("Failed to create BIO");
+
+   if (memmem(buf, buf_len, " PUBLIC ", 8)) {
+      /* Try to read as private key with OpenSSL's auto-detection */
+      pkey= PEM_read_bio_PUBKEY(bio, NULL, NULL, NULL);
+      if (!pkey)
+         GOTO_CLEANUP_CROAK("Failed to parse PEM public key");
+   } else {
+      struct cmk_pem_password pw_rec= { pw, pw_len };
+      /* Try to read as private key with OpenSSL's auto-detection */
+      pkey= pw? PEM_read_bio_PrivateKey(bio, NULL, cmk_pem_password_cb, (void*)&pw_rec)
+              : PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
+      if (!pkey)
+         GOTO_CLEANUP_CROAK("Failed to parse PEM private key");
+   }
+
+cleanup:
+   if (bio)
+      BIO_free(bio);
+   if (err)
+      cmk_croak_with_ssl_error("import_pem", err);
+   if (*pk) EVP_PKEY_free(*pk);
+   *pk= pkey;
 }
 
 /* This function encrypts a secret using a public key.  It stores the ciphertext and all

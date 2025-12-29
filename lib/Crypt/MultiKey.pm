@@ -140,6 +140,8 @@ use strict;
 use warnings;
 use Carp;
 use parent qw( DynaLoader );
+use Crypt::SecretBuffer 0.016;
+use Crypt::SecretBuffer qw( BASE64 );
 sub dl_load_flags {0x01} # Share extern symbols with other modules
 __PACKAGE__->bootstrap;
 

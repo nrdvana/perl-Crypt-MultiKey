@@ -153,6 +153,18 @@ _import_pkcs8(pkey, buffer, pass_sv=&PL_sv_undef)
       cmk_pkey_import_pkcs8(pkey, buf, len, pass, pass_len);
 
 void
+_import_pem(pkey, buffer, pass_sv=&PL_sv_undef)
+   auto_cmk_pkey *pkey
+   SV *buffer
+   SV *pass_sv
+   INIT:
+      STRLEN len, pass_len= 0;
+      const char *buf= secret_buffer_SvPVbyte(buffer, &len);
+      const char *pass= SvOK(pass_sv)? secret_buffer_SvPVbyte(pass_sv, &pass_len) : NULL;
+   PPCODE:
+      cmk_pkey_import_pem(pkey, buf, len, pass, pass_len);
+
+void
 _export_pubkey(pkey, buf)
    cmk_pubkey *pkey
    SV *buf

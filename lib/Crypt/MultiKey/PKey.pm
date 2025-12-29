@@ -2,8 +2,10 @@ package Crypt::MultiKey::PKey;
 use strict;
 use warnings;
 use Carp;
-use Crypt::SecretBuffer qw/ HEX /;
+use Scalar::Util qw/ blessed /;
+use Crypt::SecretBuffer qw/ secret HEX BASE64 ISO8859_1 /;
 use Crypt::SecretBuffer::INI;
+use Crypt::SecretBuffer::PEM;
 use Crypt::MultiKey;
 
 =head1 SYNOPSIS
@@ -94,9 +96,13 @@ generated.  If you do not specify C<uuid>, a new random UUID will be generated.
 
 sub new {
    my $class= shift;
-   my %attrs= @_ == 1? ( path => $_[0] ) : @_;
+   my %attrs= @_ != 1? @_
+            : blessed($_[0]) && $_[0]->can('scan')? ( data => $_[0] )
+            : ref $_[0] eq 'SCALAR'? ( data => $_[0] )
+            : ( path => $_[0] );
    my $self= bless {}, $class;
    my $path= $self->{path}= delete $attrs{path};
+   my $data= delete $attrs{data};
    my ($pw, $generate, $public, $private, $private_encrypted)
       = delete @attrs{qw( password generate public private private_encrypted )};
    # If keygen is requested, that takes priority, and if path is also specified
@@ -119,10 +125,10 @@ sub new {
       $self->decrypt_private($pw) if length $pw;
    }
    # else if 'path' is specified, it must exist and be parsable.
-   elsif (length $path) {
-      my $content= ref $path eq 'SCALAR'? $$path
-                 : Crypt::SecretBuffer->new(load_file => $path);
-      $self->import_autodetect($content, password => $pw);
+   elsif (length $path || defined $data) {
+      $data= Crypt::SecretBuffer->new(load_file => $path)
+         unless defined $data;
+      $self->import_autodetect($data, password => $pw);
    }
    # else this will just be an empty key until the user calls ->keygen or ->import_x
 
@@ -162,8 +168,8 @@ sub import_autodetect {
    my ($self, undef, %options)= @_;
    # Upgrade buffer to a SecretBuffer::Span.  This makes parsing harder, but some
    # files are secrets, so might as well use the same parsing for everything.
-   my $span= ref $_[1] && $_[1]->can('subspan')? $_[1]
-           : ref $_[1] && $_[1]->can('span')? $_[1]->span
+   my $span= blessed($_[1]) && $_[1]->can('subspan')? $_[1]
+           : blessed($_[1]) && $_[1]->can('span')? $_[1]->span
            : Crypt::SecretBuffer->new($_[1])->span;
    my @attempts;
    # There may be some UTF-8 in various formats, but the starting headers are always ascii
@@ -178,6 +184,11 @@ sub import_autodetect {
             return if eval { $self->import_ini($span, %options); 1 };
             push @attempts, [ 'INI', $@ ];
          }
+      }
+      # Does it contain PEM blocks?
+      if ($span->scan("-----BEGIN ")) {
+         return if eval { $self->import_pem($span, %options); 1 };
+         push @attempts, [ 'PEM', $@ ];
       }
    }
    # Maybe raw bytes of PKCS#8?
@@ -208,6 +219,59 @@ sub import_autodetect {
    croak join "\n", 
       "Failed to autodetect Key format:",
       map "  $_->[0]: $_->[1]", @attempts;
+}
+
+sub import_pem {
+   my ($self, $span, %options)= @_;
+   my $orig_span= $span->clone;
+   my $password= $options{password};
+   
+   my (@private, @encrypted, @public);
+   
+   # Extract all PEM blocks
+   for my $pem (Crypt::SecretBuffer::PEM->parse_all($span)) {
+      if ($pem->label eq 'ENCRYPTED PRIVATE KEY') {
+         push @encrypted, $pem;
+      }
+      elsif ($pem->label =~ /PRIVATE KEY$/) {
+         # PRIVATE KEY, RSA PRIVATE KEY, EC PRIVATE KEY, etc.
+         if ($pem->headers->{'Proc-Type'} && $pem->headers->{'Proc-Type'}->scan('ENCRYPTED')) {
+            push @encrypted, $pem;
+         } else {
+            push @private, $pem;
+         }
+      }
+      elsif ($pem->label eq 'PUBLIC KEY') {
+         push @public, $pem;
+      }
+      elsif ($pem->label eq 'OPENSSH PRIVATE KEY') {
+         push @private, $pem;  # May be encrypted
+      }
+   }
+   
+   # Try to load private keys first
+   for my $pem (@private, @encrypted) {
+      return 1
+         if eval { $self->_import_pem($pem->buffer, $password); 1 };
+   }
+   
+   # If we have encrypted blocks and no password, save them for later
+   if (@encrypted && !defined $password) {
+      # Store the first encrypted block for decrypt_private to use later
+      $self->private_encrypted($encrypted[0]->buffer);
+      # Fall through to try public keys
+   }
+
+   # Try public keys as fallback
+   for my $pem (@public) {
+      return 1
+         if eval { $self->_import_pem($pem->buffer); 1 };
+   }
+
+   # If we stored an encrypted key, that's partial success
+   return 1 if $self->private_encrypted;
+
+   die "No valid PEM blocks found or all failed to parse";
 }
 
 =method generate
