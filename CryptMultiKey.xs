@@ -115,7 +115,15 @@ _keygen(pkey, type)
       cmk_pkey_keygen(pkey, type);
 
 bool
-has_private_loaded(pkey)
+has_public(pkey)
+   maybe_cmk_pkey *pkey
+   CODE:
+      RETVAL= pkey && cmk_pkey_has_public(pkey);
+   OUTPUT:
+      RETVAL
+
+bool
+has_private(pkey)
    maybe_cmk_pkey *pkey
    CODE:
       RETVAL= pkey && cmk_pkey_has_private(pkey);

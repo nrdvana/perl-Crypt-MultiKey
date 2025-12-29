@@ -34,6 +34,7 @@ extern cmk_pkey* cmk_get_privkey(SV *objref);
 extern void cmk_pkey_keygen(cmk_pkey *pk, const char *type_and_params);
 extern void cmk_pkey_keygen_params(cmk_pkey *pk, const char *type, const char **params, int param_count);
 
+extern bool cmk_pkey_has_public(cmk_pkey *pkey);
 extern bool cmk_pkey_has_private(cmk_pkey *pkey);
 
 extern void cmk_pkey_dup(cmk_pkey *pk, cmk_pkey *orig);

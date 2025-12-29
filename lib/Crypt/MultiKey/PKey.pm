@@ -9,7 +9,7 @@ use Crypt::MultiKey;
 =head1 SYNOPSIS
 
   # Generate a public/private keypair
-  my $key= Crypt::MultiKey::PKey->new(type => 'x25519');
+  my $key= Crypt::MultiKey::PKey->generate('x25519');
   
   # encrypt the private half with a password
   my $pass= Crypt::SecretBuffer->new;
@@ -62,6 +62,11 @@ for whether the required SSH key is available.
 Export the public key in ASN.1 SubjectPublicKeyInfo structure defined in RFC5280, then encode
 as Hex.
 
+=attribute has_private
+
+Boolean; whether this key currently has the private half loaded.  See L</clear_private> and
+L</decrypt_private>.
+
 =cut
 
 sub type { $_[0]{type} }
@@ -87,83 +92,162 @@ generated.  If you do not specify C<uuid>, a new random UUID will be generated.
 
 =cut
 
+sub new {
+   my $class= shift;
+   my %attrs= @_ == 1? ( path => $_[0] ) : @_;
+   my $self= bless {}, $class;
+   my $path= $self->{path}= delete $attrs{path};
+   my ($pw, $generate, $public, $private, $private_encrypted)
+      = delete @attrs{qw( password generate public private private_encrypted )};
+   # If keygen is requested, that takes priority, and if path is also specified
+   # it will just be the default for ->save.
+   if ($generate) {
+      $self->generate($generate);
+      $self->encrypt_private($pw) if defined $pw;
+   }
+   # else if 'private' is specified, try to parse that
+   elsif (length $private) {
+      $self->import_autodetect($private, password => $pw);
+      $self->encrypt_private($pw) if defined $pw && !defined $self->{encrypted_private};
+   }
+   # else if 'private_encrypted' is specified, save it for later unless the
+   # password was also supplied.
+   elsif (length $private_encrypted) {
+      # no password, save for later, and (below) look for pubkey
+      $self->{private_encrypted}= $private_encrypted;
+      # decrypt immediately if password provided
+      $self->decrypt_private($pw) if length $pw;
+   }
+   # else if 'path' is specified, it must exist and be parsable.
+   elsif (length $path) {
+      my $content= ref $path eq 'SCALAR'? $$path
+                 : Crypt::SecretBuffer->new(load_file => $path);
+      $self->import_autodetect($content, password => $pw);
+   }
+   # else this will just be an empty key until the user calls ->keygen or ->import_x
+
+   # If we have an encrypted private key and no public key, try loading the
+   # public key either from the ->{public} param or from a paired public key file.
+   if (!$self->has_public) {
+      if ($public) {
+         $self->import_autodetect($public);
+      } elsif (length $path && -f "$path.pub") {
+         my $buf= Crypt::SecretBuffer->new(load_file => "$path.pub");
+         $self->import_autodetect($buf);
+      }
+   }
+   # If 'save' is requested, do that after everything else
+   my $save= delete $attrs{save};
+   # Hook for subclasses to process attributes
+   $self->_init(\%attrs) if $self->can('_init');
+   # Every remaining attribute must have a writable accessor
+   $self->$_($attrs{$_}) for keys %attrs;
+   # Now apply the 'save'
+   $self->save($save) if length $save;
+   return $self;
+}
+
+=method import_autodetect
+
+  $key->import_autodetect($buffer, %options);
+
+This attempts to parse a variety of key formats and load either a private key,
+public key, or encrypted private key.  If the key format is encrypted and the
+C<%options> do not include C<'password'>, the encrypted key will be stored in
+the L</private_encrypted> attribute to be used by L</decrypt_private>.
+
+=cut
+
+sub import_autodetect {
+   my ($self, undef, %options)= @_;
+   # Upgrade buffer to a SecretBuffer::Span.  This makes parsing harder, but some
+   # files are secrets, so might as well use the same parsing for everything.
+   my $span= ref $_[1] && $_[1]->can('subspan')? $_[1]
+           : ref $_[1] && $_[1]->can('span')? $_[1]->span
+           : Crypt::SecretBuffer->new($_[1])->span;
+   my @attempts;
+   # There may be some UTF-8 in various formats, but the starting headers are always ascii
+   # Check if there is at least one text line of ASCII
+   my $ascii= $span->clone->parse(qr/[\t\r\n\x20-\x7E]+/);
+   if ($ascii && $ascii->len > 1 && $ascii->scan("\n")) {
+      # Does it look like the Crypt::Multikey INI serialization format?
+      if (my $ini_header= ($ascii->starts_with('[') || $ascii->scan("\n["))) {
+         $ini_header->lim($ascii->lim);
+         # class name must be 'A-Za-z0-9:'
+         if ($ini_header->parse(qr/[A-Za-z0-9:]+/) && $ini_header->parse("]")) {
+            return if eval { $self->import_ini($span, %options); 1 };
+            push @attempts, [ 'INI', $@ ];
+         }
+      }
+   }
+   # Maybe raw bytes of PKCS#8?
+   if ($span->starts_with("\x30")) {
+      return if eval { $self->import_pkcs8($span, \%options); 1 };
+      push @attempts, [ 'PKCS#8', $@ ];
+   }
+   # If the whole thing looks like base64, try that
+   if ($ascii->len == $span->len && !$span->scan(qr{[^A-Za-z0-9+/=\r\n\t ]})) {
+      my $b64= $span->clone(encoding => BASE64);
+      if ($b64->starts_with("\x30")) { # First byte of ASN.1 DER
+         # decode the base64 into a buffer
+         my $bytes= $b64->copy(encoding => ISO8859_1);
+         return if eval { $self->import_pkcs8($bytes, %options); 1 };
+         push @attempts, [ 'PKCS#8-base64', $@ ];
+      }
+   }
+   # If the whole thing is hex, try that
+   if ($ascii->len == $span->len && !$span->scan(qr{[^A-Fa-f0-9\r\n\t ]})) {
+      my $hex= $span->clone(encoding => HEX);
+      if ($hex->starts_with("\x30")) { # First byte of ASN.1 DER
+         # decode the hex into a buffer
+         my $bytes= $hex->copy(encoding => ISO8859_1);
+         return if eval { $self->import_pkcs8($bytes, \%options); 1 };
+         push @attempts, [ 'PKCS#8-base16', $@ ];
+      }
+   }
+   croak join "\n", 
+      "Failed to autodetect Key format:",
+      map "  $_->[0]: $_->[1]", @attempts;
+}
+
+=method generate
+
+Replace any current key with a newly generated key of 'type'.  The attribute
+private_encrypted is deleted, if present, since it no longer matches the public
+key.
+
+Supported types and aliases:
+
+  EC:group=X
+  secp256k1   => EC:group=secp256k1
+  
+  ed25519
+  x25519
+  
+  RSA:bits=N
+  RSA         => RSA:bits=4096
+  rsa4096     => RSA:bits=4096
+  rsa2048     => RSA:bits=2048
+  rsa1024     => RSA:bits=1024
+
+=cut
+
 our %type_alias= (
    rsa1024   => 'RSA:bits=1024',
    rsa2048   => 'RSA:bits=2048',
    rsa4096   => 'RSA:bits=4096',
    secp256k1 => 'EC:group=secp256k1',
 );
-
-sub new {
-   my $class= shift;
-   return $class->new_from_file(@_) if @_ == 1;
-   my %attrs= @_;
-   my $self= bless {}, $class;
-   my ($type, $public, $private)= delete @attrs{'type','public','private'};
-   # If 'private' is present, it contains the whole unencrypted key.
-   # 'public' may also be present but we ignore it.
-   if (defined $private) {
-      $self->_import_pkcs8(pack '(H2)*', $private);
-   # If 'public' is present, it may be paired with 'private_encrypted' so that the user
-   # can decrypt it later.
-   } elsif (defined $public) {
-      $self->_import_pubkey(pack '(H2)*', $public);
-      $self->{private_encrypted}= delete $attrs{private_encrypted};
-   # else generate a new key of the specified type, defaulting to x25519
-   } else {
-      $type= $type && $type_alias{lc $type} || $type || 'x25519';
-      $self->_keygen($type);
-   }
-   # save the type regardless of how we loaded it.  It could become inconsistent with the actual
-   # key type if someone tampered with private attributes or edited the file, but it would be a
-   # lot of work to verify it or reconstruct it from the key.
+sub generate {
+   my ($self, $type)= @_;
+   $self= $self->new unless ref $self; # permit usage as a class method
+   $type ||= 'x25519';
+   $type= $type_alias{lc $type} || $type;
+   $self->_keygen($type);
    $self->{type}= $type;
-   # Every remaining attribute must have a writable accessor
-   $self->$_($attrs{$_}) for keys %attrs;
-   return $self;
-}
-
-=constructor new_from_file
-
-  $key= Crypt::MultiKey::PKey->new_from_file($filename);
-
-Load a file into a SecretBuffer and pass it to L</deserialize>.
-
-=constructor deserialize
-
-  $key= Crypt::MultiKey::PKey->deserialize($scalar);
-  $key= Crypt::MultiKey::PKey->deserialize(\$scalar);
-  $key= Crypt::MultiKey::PKey->deserialize($Crypt_SecretBuffer);
-
-This returns a key object from a serialized INI-format string or SecretBuffer.  The returned
-object will be a I<subclass> of C<Crypt::MultiKey::PKey>.
-
-=cut
-
-sub new_from_file {
-   my ($class, $fname)= @_;
-   $class->deserialize(Crypt::SecretBuffer->new(load_file => $fname));
-}
-
-sub deserialize {
-   my ($class, $text)= @_;
-   my $ini= Crypt::SecretBuffer::INI->new(
-      field_config => [
-         public              => { encoding => HEX },
-         private             => { encoding => HEX, secret => 1 },
-         private_encrypted   => { encoding => HEX },
-      ]
-   );
-   my $sections= $ini->parse($text);
-   ref $sections eq 'ARRAY' && @$sections == 2
-      or croak "Expected one INI-style header followed by attributes in Key file";
-   my $subclass= $sections->[0];
-   # Security check - class must already be loaded, or in the list of autoloads
-   Crypt::MultiKey::_lazy_load_class($subclass)
-      unless $subclass->can('new');
-   $subclass->isa($class)
-      or croak "Expected subclass of '$class' but got '$subclass'";
-   $subclass->new(%{ $sections->[1] });
+   delete $self->{fingerprint};
+   delete $self->{private_encrypted};
+   $self;
 }
 
 =method serialize

@@ -104,10 +104,17 @@ cmk_croak_with_ssl_error(const char *context, const char *err) {
    }
 }
 
+bool
+cmk_pkey_has_public(cmk_pkey *pkey) {
+   /* any non-null EVP_PKEY will have a public half */
+   return !!*pkey;
+}
+
 // The goal here is to detect whether EVP_PKEY exists in the lowest-overhead manner.
 // Falls back to i2d_PrivateKey which will fail if private half isn't present.
 bool
 cmk_pkey_has_private(cmk_pkey *pkey) {
+   if (!*pkey) return false;
    switch (EVP_PKEY_base_id(*pkey)) {
 #if 0
    case EVP_PKEY_RSA: {
@@ -341,10 +348,8 @@ cmk_pkey_keygen(cmk_pkey *pk, const char *type_and_params) {
    cmk_pkey_keygen_params(pk, type, (const char **) params, param_count);
 }
 
-/* MAGIC for storing a EVP_PKEY object on an arbitrary SV
- * Crypt::MultiKey::PKey objects hold the public key in MAGIC, and the field
- * $key->private is a SecretBuffer object which can hold the decrypted private key.
- */
+/* MAGIC for storing an OpenSSL EVP_PKEY object on an arbitrary SV */
+
 #ifdef USE_ITHREADS
 static int cmk_pkey_magic_dup(pTHX_ MAGIC *mg, CLONE_PARAMS *param) {
    if (mg->mg_ptr) {
@@ -380,10 +385,6 @@ static MGVTBL cmk_pkey_magic_vtbl = {
  */
 cmk_pkey*
 cmk_pkey_from_magic(SV *sv, int flags) {
-#define CMK_MAGIC_AUTOCREATE 1
-#define CMK_MAGIC_OR_DIE     2
-#define CMK_MAGIC_UNDEF_OK   4
-extern cmk_pkey* cmk_pkey_from_magic(SV *sv, int flags);
    if (!sv) {
       if (flags & (CMK_MAGIC_OR_DIE|CMK_MAGIC_AUTOCREATE) && !(flags & CMK_MAGIC_UNDEF_OK))
          croak("Invalid object");

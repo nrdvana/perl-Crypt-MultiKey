@@ -9,7 +9,7 @@ sub str_of_len {
 }
 
 subtest x25519 => sub {
-   my $key= Crypt::MultiKey::PKey->new(type => 'x25519');
+   my $key= Crypt::MultiKey::PKey->generate('x25519');
    my $fields= $key->encrypt("Test");
    is($fields,
       {
@@ -28,7 +28,7 @@ subtest x25519 => sub {
 };
 
 subtest rsa => sub {
-   my $key= Crypt::MultiKey::PKey->new(type => 'RSA:bits=1024'); # 1024 generates faster than 4096
+   my $key= Crypt::MultiKey::PKey->generate('RSA:bits=1024'); # 1024 for speed
    my $fields= $key->encrypt("Test");
    is($fields,
       {
