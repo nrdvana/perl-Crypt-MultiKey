@@ -3,6 +3,7 @@ use strict;
 use warnings;
 use Carp;
 use Scalar::Util qw/ blessed /;
+use MIME::Base64;
 use Crypt::SecretBuffer qw/ secret HEX BASE64 ISO8859_1 /;
 use Crypt::SecretBuffer::INI;
 use Crypt::SecretBuffer::PEM;
@@ -248,7 +249,7 @@ sub import_pem {
          push @private, $pem;  # May be encrypted
       }
    }
-   
+
    # Try to load private keys first
    for my $pem (@private, @encrypted) {
       return 1
@@ -257,8 +258,9 @@ sub import_pem {
    
    # If we have encrypted blocks and no password, save them for later
    if (@encrypted && !defined $password) {
-      # Store the first encrypted block for decrypt_private to use later
-      $self->private_encrypted($encrypted[0]->buffer);
+      # Store the first encrypted block for decrypt_private to use later.
+      # Extract it into a non-secret buffer.
+      $encrypted[0]->buffer->unmask_to(sub{ $self->{private_encrypted}= shift });
       # Fall through to try public keys
    }
 
@@ -361,7 +363,7 @@ Export the (private) key in PKCS#8 format, encrypted with a password, and stored
 C<private_encrypted> to be saved out by a subsequent L</save> call.
 You may customize the number of iterations for the key-derivation-function to resist brute-force
 attempts.  If the password is known to be a string of hashed data with uniformly-distributed
-bits, you may reduce the kdf_iterations to 1.  (but it cannot be zero, due to OpenSSL API).
+bits, you may reduce the KDF iterations to 1.  (but it cannot be zero, due to OpenSSL API).
 Ideally, C<$password> is a C<SecretBuffer> object, but scalars are also accepted.
 The password must be bytes, not wide characters.
 
@@ -372,7 +374,7 @@ sub encrypt_private {
    defined $_[0] or die "Missing password";
    my $buf= '';
    $self->_export_pkcs8($buf, $_[0], $_[1] || 100_000);
-   $self->{private_encrypted}= unpack 'H*', $buf;
+   $self->{private_encrypted}= encode_base64($buf);
    $self;
 }
 
@@ -403,8 +405,17 @@ The password must be bytes, not wide characters.
 sub decrypt_private {
    my $self= shift;
    defined $_[0] or die "Missing password";
-   my $raw= pack 'H*', $self->{private_encrypted};
-   $self->_import_pkcs8($raw, $_[0]);
+   defined $self->{private_encrypted} or die "Can't decrypt an empty private_encrypted attribute";
+   # private_encrypted can either be pure base64 which is pkcs8, or it can be a
+   # PEM block that needs format-detection.
+   if ($self->{private_encrypted} =~ m|^[A-Za-z0-9+/]+=*\z|) {
+      my $raw= decode_base64($self->{private_encrypted});
+      $self->_import_pkcs8($raw, $_[0]);
+   } elsif ($self->{private_encrypted} =~ m|^-----BEGIN |) {
+      $self->_import_pem($self->{private_encrypted}, $_[0]);
+   } else {
+      croak "Unknown format in attribute 'private_encrypted'";
+   }
    $self;
 }
 

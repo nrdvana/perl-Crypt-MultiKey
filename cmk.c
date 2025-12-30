@@ -616,8 +616,7 @@ void cmk_pkey_import_pem(cmk_pkey *pk, const U8 *buf, STRLEN buf_len, const char
    } else {
       struct cmk_pem_password pw_rec= { pw, pw_len };
       /* Try to read as private key with OpenSSL's auto-detection */
-      pkey= pw? PEM_read_bio_PrivateKey(bio, NULL, cmk_pem_password_cb, (void*)&pw_rec)
-              : PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
+      pkey= PEM_read_bio_PrivateKey(bio, NULL, cmk_pem_password_cb, (void*)&pw_rec);
       if (!pkey)
          GOTO_CLEANUP_CROAK("Failed to parse PEM private key");
    }
