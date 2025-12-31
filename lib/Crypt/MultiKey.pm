@@ -145,6 +145,14 @@ use Crypt::SecretBuffer qw( BASE64 );
 sub dl_load_flags {0x01} # Share extern symbols with other modules
 __PACKAGE__->bootstrap;
 
+our $openssl_version;
+sub _openssl_version {
+   $openssl_version ||= do {
+      require version;
+      version->parse('v'.join('.', Crypt::MultiKey::_openssl_version_components()));
+   }
+}
+
 sub new_vault {
    my ($self, $name)= splice @_, 0, 2;
    my $path= $self->_subpath("vault-$name.json");

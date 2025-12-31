@@ -69,6 +69,17 @@ MODULE = Crypt::MultiKey                PACKAGE = Crypt::MultiKey
 PROTOTYPES: DISABLE
 
 void
+_openssl_version_components()
+   INIT:
+      int major = (OPENSSL_VERSION_NUMBER >> 28) & 0x0F;
+      int minor = (OPENSSL_VERSION_NUMBER >> 20) & 0xFF;
+      int patch = (OPENSSL_VERSION_NUMBER >> 12) & 0xFF;
+   PPCODE:
+      XPUSHs(sv_2mortal(newSViv(major)));
+      XPUSHs(sv_2mortal(newSViv(minor)));
+      XPUSHs(sv_2mortal(newSViv(patch)));
+
+void
 generate_uuid_v4()
    PPCODE:
       XPUSHs(cmk_generate_uuid_v4(sv_newmortal()));

@@ -53,34 +53,45 @@ A disk path from which this key was loaded or to which it will be saved.
 =attribute mechanism
 
 The mechanism for decrypting/restoring the C<privkey>.  This is used as a class name suffix for
-the Key object and affects the behavior of the Key object.  Any key with the L<private_pkcs8>
+the Key object and affects the behavior of the Key object.  Any key with the L</private_encrypted>
 attribute can be decrypted using L</decrypt_private>, but this attribute indicates the I<source>
 of the password, such as whether it is a human-typed text password, or a password generated from
 a YubiKey's hash function, etc.  Keys with the mechanism 'Password' will interactively prompt the
 user on the console, where keys with the mechanism 'SSHAgent' will silently query the SSH agent
 for whether the required SSH key is available.
 
-=attribute public
+=attribute has_public
 
-Export the public key in ASN.1 SubjectPublicKeyInfo structure defined in RFC5280, then encode
-as Hex.
+Boolean; whether this key currently has the public half loaded.  This will be true except when
+loaded from a PEM file which only contained an encrypted private key, and the password hasn't yet
+been supplied.
 
 =attribute has_private
 
 Boolean; whether this key currently has the private half loaded.  See L</clear_private> and
 L</decrypt_private>.
 
+=attribute public
+
+Export the public key in ASN.1 SubjectPublicKeyInfo structure defined in RFC5280, then encode
+as Base64.
+
+=attribute private_encrypted
+
+This attribute holds an encrypted PKCS#8 (in base64) or encrypted OpenSSL PEM format for later
+when you call L</decrypt_private>.
+
 =cut
 
 sub type { $_[0]{type} }
 sub fingerprint { $_[0]{fingerprint} }
 sub path { $_[0]{path} }
-sub private_encrypted { $_[0]{private_encrypted} }
 sub mechanism { undef; }
 sub public {
    shift->_export_pubkey(my $buf);
-   return unpack 'H*', $buf;
+   return encode_base64($buf, '');
 }
+sub private_encrypted { $_[0]{private_encrypted} }
 
 =constructor new
 
@@ -221,6 +232,12 @@ sub import_autodetect {
       "Failed to autodetect Key format:",
       map "  $_->[0]: $_->[1]", @attempts;
 }
+
+=method import_pem
+
+Import a key which is known to be in PEM format.
+
+=cut
 
 sub import_pem {
    my ($self, $span, %options)= @_;
@@ -374,7 +391,7 @@ sub encrypt_private {
    defined $_[0] or die "Missing password";
    my $buf= '';
    $self->_export_pkcs8($buf, $_[0], $_[1] || 100_000);
-   $self->{private_encrypted}= encode_base64($buf);
+   $self->{private_encrypted}= encode_base64($buf, '');
    $self;
 }
 

@@ -15,6 +15,9 @@
 #include <openssl/kdf.h>
 #include <openssl/bio.h>
 #include <openssl/buffer.h>
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+#include <openssl/decoder.h>
+#endif
 
 #include <string.h>
 #include <stdlib.h>
@@ -603,22 +606,59 @@ void cmk_pkey_import_pem(cmk_pkey *pk, const U8 *buf, STRLEN buf_len, const char
    const char *err= NULL;
    EVP_PKEY *pkey= NULL;
    BIO *bio= NULL;
+   const U8 *pem_type;
+   STRLEN pem_type_len;
+   struct cmk_pem_password pw_rec= { pw, pw_len };
 
-   bio= BIO_new_mem_buf(buf, buf_len);
-   if (!bio)
-      GOTO_CLEANUP_CROAK("Failed to create BIO");
+   /* parse   -----BEGIN X-----\r?\n */
+   if (buf_len < 11 || memcmp(buf, "-----BEGIN ", 11) != 0)
+      croak("Not PEM format");
+   pem_type= buf + 11;
+   for (pem_type_len= 0; 11 + pem_type_len + 6 < buf_len; pem_type_len++) {
+      if (pem_type[pem_type_len] == '\n')
+         croak("Invalid PEM format");
+      if (pem_type[pem_type_len] == '-')
+         break;
+   }
+   /* could do more validation, but don't need to.  Just need the pem_type */
 
-   if (memmem(buf, buf_len, " PUBLIC ", 8)) {
+   if (memmem(pem_type, pem_type_len, "PUBLIC ", 7)) {
+      bio= BIO_new_mem_buf(buf, buf_len);
+      if (!bio)
+         GOTO_CLEANUP_CROAK("Failed to create BIO");
+
       /* Try to read as private key with OpenSSL's auto-detection */
       pkey= PEM_read_bio_PUBKEY(bio, NULL, NULL, NULL);
       if (!pkey)
          GOTO_CLEANUP_CROAK("Failed to parse PEM public key");
-   } else {
-      struct cmk_pem_password pw_rec= { pw, pw_len };
+   }
+   #define IS_PEM_TYPE(x) (pem_type_len == strlen(x) && memcmp(pem_type, x, pem_type_len) == 0)
+   else if (IS_PEM_TYPE("PRIVATE KEY") || IS_PEM_TYPE("ENCRYPTED PRIVATE KEY")) {
+      bio= BIO_new_mem_buf(buf, buf_len);
+      if (!bio)
+         GOTO_CLEANUP_CROAK("Failed to create BIO");
+
       /* Try to read as private key with OpenSSL's auto-detection */
       pkey= PEM_read_bio_PrivateKey(bio, NULL, cmk_pem_password_cb, (void*)&pw_rec);
       if (!pkey)
          GOTO_CLEANUP_CROAK("Failed to parse PEM private key");
+   }
+   else {
+      /* OpenSSH format can be parsed by OpenSSL 3.0+ */
+      #if 0 && OPENSSL_VERSION_NUMBER >= 0x30000000L
+      OSSL_DECODER_CTX *dctx = OSSL_DECODER_CTX_new_for_pkey(
+                &pkey, "PEM", NULL, NULL,
+                OSSL_KEYMGMT_SELECT_KEYPAIR, NULL, NULL);
+      if (!dctx)
+         GOTO_CLEANUP_CROAK("OSSL_DECODER_CTX_new_for_pkey failed");
+      //OSSL_DECODER_CTX_set_pem_password_cb(dctx, cmk_pem_password_cb, &pw_rec);
+      OSSL_DECODER_from_bio(dctx, bio);
+      OSSL_DECODER_CTX_free(dctx);
+      if (!pkey)
+         GOTO_CLEANUP_CROAK("Failed to parse key");
+      #else
+      croak("Can't parse %.*s", (int)pem_type_len, pem_type);
+      #endif
    }
 
 cleanup:

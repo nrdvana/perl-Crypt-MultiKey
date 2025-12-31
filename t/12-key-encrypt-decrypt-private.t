@@ -12,7 +12,7 @@ for (qw( x25519 RSA:bits=1024 secp256k1 )) {
    subtest $_ => sub {
       my $key= Crypt::MultiKey::PKey->generate($_);
       $key->encrypt_private("password", 99);
-      like( $key->{private_encrypted}, qr{^[a-zA-Z0-9./=]+\z}, 'private_encrypted created' );
+      like( $key->{private_encrypted}, qr{^[a-zA-Z0-9+/=\n]+\z}, 'private_encrypted created' );
       ok( $key->has_private, 'has_private_loaded is true' );
       $key->clear_private;
       ok( !$key->has_private, 'has_private_loaded is false' );
