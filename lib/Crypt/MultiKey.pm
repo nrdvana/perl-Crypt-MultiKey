@@ -12,9 +12,9 @@ package Crypt::MultiKey;
   say $_->name for $repo->key_list;
 
   # Create a password-based key
-  print "Enter your password: ";
   my $pw= secret;
-  $pw->append_console_line(STDIN) or die "aborted";
+  $pw->append_console_line(STDIN, prompt => 'Enter password: ')
+    or die "aborted";
   $repo->new_key('master_pw', Password => { password => $pw });
   
   # Create a key that can be activated by your SSH agent

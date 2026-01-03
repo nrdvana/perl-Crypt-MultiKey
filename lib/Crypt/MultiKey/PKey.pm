@@ -95,6 +95,8 @@ sub private_encrypted { $_[0]{private_encrypted} }
 
 =constructor new
 
+  $key= Crypt::MultiKey::PKey->new($filename);
+  $key= Crypt::MultiKey::PKey->new($secretbuffer);
   $key= Crypt::MultiKey::PKey->new(%attributes);
 
 This is the constructor for the base class.  It applies and verifies the attributes above, and
