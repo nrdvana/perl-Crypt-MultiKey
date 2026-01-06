@@ -66,32 +66,33 @@ extern void cmk_pkey_export_pkcs8(cmk_pkey *pk, const char *pass, STRLEN pw_len,
  */
 extern void cmk_pkey_import_pem(cmk_pkey *pk, const U8 *buf, STRLEN buf_len, const char *pw, STRLEN pw_len);
 
-/* Generate an AES key from the public key and store the public data in enc_out */
-extern secret_buffer * cmk_pkey_create_aes_key(cmk_pkey *pubkey, HV *enc_out);
-
-/* Produce an AES key from the private key and the parameters in 'enc' */
-extern secret_buffer * cmk_pkey_recreate_aes_key(cmk_pkey *privkey, HV *enc);
-
-/* Use the public half of a ::Key object to encrypt arbitrary data (usually an AES key)
- * and store the ciphertext and other details into `enc_out`.
- * This is a combination of cmk_key_create_aes_key and cmk_aes_encrypt.
+/* Generate symmetric key material from the public key and store the public data in tumbler_out.
+ * This appends bytes to skey_buf, so multiple keys can concatenate to the same buffer
+ * before running it through HKDF.
  */
-extern void cmk_pkey_encrypt(cmk_pkey *pubkey, const U8 *secret, size_t secret_len, HV *enc_out);
+extern void cmk_pkey_generate_key_material(cmk_pkey *pubkey, HV *tumbler_out, secret_buffer *skey_buf);
 
-/* Use the private half of a ::Key object to decrypt the supplied hash of parameters
- * back to the original secret, stored into secret_out.
- * This is a combination of cmk_key_recreate_aes_key and cmk_aes_decrypt.
+/* Re-create the symmetric key material from the parameters in 'tumbler' using the private key.
+ * This appends bytes to skey_buf, so multiple keys can concatenate to the same buffer
+ * before running it through HKDF.
  */
-extern void cmk_pkey_decrypt(cmk_pkey *privkey, HV *enc_in, secret_buffer *secret_out);
+extern void cmk_pkey_recreate_key_material(cmk_pkey *privkey, HV *tumbler, secret_buffer *skey_buf);
+
+/* This runs HKDF on the key material to generate an AES key.
+ * It reads the cipher from the encryption parameters to know how large to make the key.
+ * It also creates a random salt and stores that into the encryption parameters.
+ * It uses a default HKDF "info" that can be overridden in the encryption params.
+ */
+secret_buffer *cmk_hkdf(HV *params, secret_buffer *key_material);
 
 /* Perform symmetric encryption using the supplied AES key, storing the ciphertext and parameters
  * into the hash `enc_out`.
  */
-extern void cmk_aes_encrypt(secret_buffer *aes_key, const U8 *secret, size_t secret_len, HV *enc_out);
+extern void cmk_aes_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret, size_t secret_len);
 
 /* Perform symmetric decryption using the supplied AES key and ciphertext and parameters in enc_in,
  * storing the original secret into secret_out.
  */
-extern void cmk_aes_decrypt(secret_buffer *aes_key, HV *enc_in, secret_buffer *secret_out);
+extern void cmk_aes_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *secret_out);
 
 #endif /* define CMK_H */

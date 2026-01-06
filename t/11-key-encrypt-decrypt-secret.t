@@ -37,6 +37,7 @@ subtest rsa => sub {
          aes_gcm_nonce      => str_of_len(12),
          aes_gcm_tag        => str_of_len(16),
          rsa_key_ciphertext => D,
+         kdf_salt           => str_of_len(32),
       },
       'encrypted fields' );
    my $secret= $key->decrypt($fields);

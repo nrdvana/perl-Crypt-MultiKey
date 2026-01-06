@@ -85,27 +85,28 @@ generate_uuid_v4()
       XPUSHs(cmk_generate_uuid_v4(sv_newmortal()));
 
 void
-aes_encrypt(aes_key, secret, enc_out=NULL)
+hkdf(params, key_material)
+   HV *params
+   secret_buffer *key_material
+   PPCODE:
+      PUSHs(sv_2mortal(newRV_inc(cmk_hkdf(params, key_material)->wrapper)));
+
+void
+aes_encrypt(params, aes_key, secret)
+   HV *params
    secret_buffer *aes_key
    SV *secret
-   HV *enc_out
    INIT:
       STRLEN len;
       const char *buf= secret_buffer_SvPVbyte(secret, &len);
    PPCODE:
-      if (!enc_out) {
-         enc_out= newHV();
-         ST(0)= sv_2mortal(newRV_noinc((SV*)enc_out));
-      } else {
-         ST(0)= ST(2);
-      }
-      cmk_aes_encrypt(aes_key, buf, len, enc_out);
-      XSRETURN(1);
+      cmk_aes_encrypt(params, aes_key, buf, len);
+      XSRETURN(1); /* return params hashref */
 
 void
-aes_decrypt(aes_key, enc, secret_out=NULL)
+aes_decrypt(params, aes_key, secret_out=NULL)
+   HV *params
    secret_buffer *aes_key
-   HV *enc
    secret_buffer *secret_out
    PPCODE:
       if (!secret_out) {
@@ -113,8 +114,8 @@ aes_decrypt(aes_key, enc, secret_out=NULL)
       } else {
          ST(0)= ST(2);
       }
-      cmk_aes_decrypt(aes_key, enc, secret_out);
-      XSRETURN(1);
+      cmk_aes_decrypt(params, aes_key, secret_out);
+      XSRETURN(1); /* return buffer of secret */
 
 MODULE = Crypt::MultiKey                PACKAGE = Crypt::MultiKey::PKey
 
@@ -197,36 +198,48 @@ _export_pkcs8(pkey, buf, pass_sv=&PL_sv_undef, kdf_iter=100000)
       cmk_pkey_export_pkcs8(pkey, pass, pass_len, kdf_iter, buf);
 
 void
-encrypt(pkey, secret, enc_out=NULL)
+generate_key_material(pkey, tumbler, skey_buf)
    cmk_pubkey *pkey
-   SV *secret
-   HV *enc_out
-   INIT:
-      STRLEN len;
-      const char *buf= secret_buffer_SvPVbyte(secret, &len);
+   HV *tumbler
+   secret_buffer *skey_buf
    PPCODE:
-      if (!enc_out) {
-         enc_out= newHV();
-         ST(0)= sv_2mortal(newRV_noinc((SV*)enc_out));
-      } else {
-         ST(0)= ST(2);
-      }
-      cmk_pkey_encrypt(pkey, buf, len, enc_out);
-      XSRETURN(1);
+      cmk_pkey_generate_key_material(pkey, tumbler, skey_buf);
 
 void
-decrypt(pkey, enc, secret_out=NULL)
-   cmk_privkey *pkey
-   HV *enc
-   secret_buffer *secret_out
+recreate_key_material(pkey, tumbler, skey_buf)
+   cmk_pubkey *pkey
+   HV *tumbler
+   secret_buffer *skey_buf
    PPCODE:
-      if (!secret_out) {
-         secret_out= secret_buffer_new(0, &(ST(0)));
-      } else {
-         ST(0)= ST(2);
-      }
-      cmk_pkey_decrypt(pkey, enc, secret_out);
-      XSRETURN(1);
+      cmk_pkey_recreate_key_material(pkey, tumbler, skey_buf);
+
+void
+encrypt(pkey, secret_sv)
+   cmk_pubkey *pkey
+   SV *secret_sv
+   INIT:
+      STRLEN secret_len= 0;
+      const U8 *secret= secret_buffer_SvPVbyte(secret_sv, &secret_len);
+      secret_buffer *skey_buf= secret_buffer_new(0, NULL);
+      HV *enc= newHV();
+      SV *enc_ref= sv_2mortal(newRV_noinc((SV*) enc)); /* ensure HV gets cleaned up on error */
+   PPCODE:
+      cmk_pkey_generate_key_material(pkey, enc, skey_buf);
+      cmk_aes_encrypt(enc, cmk_hkdf(enc, skey_buf), secret, secret_len);
+      PUSHs(enc_ref);
+
+void
+decrypt(pkey, enc)
+   cmk_pubkey *pkey
+   HV *enc
+   INIT:
+      SV *secret_ref= NULL;
+      secret_buffer *secret= secret_buffer_new(0, &secret_ref);
+      secret_buffer *skey_buf= secret_buffer_new(0, NULL);
+   PPCODE:
+      cmk_pkey_recreate_key_material(pkey, enc, skey_buf);
+      cmk_aes_decrypt(enc, cmk_hkdf(enc, skey_buf), secret);
+      PUSHs(secret_ref);
 
 MODULE =  Crypt::MultiKey               PACKAGE = Crypt::MultiKey::Coffer
 
