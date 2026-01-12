@@ -15,8 +15,6 @@ subtest x25519 => sub {
       {
          cipher           => 'AES-256-GCM',
          ciphertext       => D,
-         aes_gcm_nonce    => str_of_len(12),
-         aes_gcm_tag      => str_of_len(16),
          ephemeral_pubkey => D,
          kdf_salt         => str_of_len(32),
       },
@@ -34,8 +32,6 @@ subtest rsa => sub {
       {
          cipher             => 'AES-256-GCM',
          ciphertext         => D,
-         aes_gcm_nonce      => str_of_len(12),
-         aes_gcm_tag        => str_of_len(16),
          rsa_key_ciphertext => D,
          kdf_salt           => str_of_len(32),
       },

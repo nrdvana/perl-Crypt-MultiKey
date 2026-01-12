@@ -111,9 +111,9 @@ cmk_croak_with_ssl_error(const char *context, const char *err) {
          croak("%s: %s", err, ssl_err_str);
    } else {
       if (context)
-         croak("%s", err);
-      else
          croak("%s %s", context, err);
+      else
+         croak("%s", err);
    }
 }
 
@@ -1007,7 +1007,6 @@ void cmk_aes_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret, size_
          GOTO_CLEANUP_CROAK("hv_store");
       sv= NULL;
    }
-   ciphertext= cmk_prepare_sv_buffer((sv= newSVpvs("")), secret_len);
 
    if (cipher == EVP_aes_256_xts()) {
       size_t block_size = 512;  /* default to 512-byte sectors for dm-crypt compatibility */
@@ -1033,6 +1032,8 @@ void cmk_aes_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret, size_
 
       if (!(aes_ctx = EVP_CIPHER_CTX_new()))
          GOTO_CLEANUP_CROAK("AES-XTS context creation failed");
+
+      ciphertext= cmk_prepare_sv_buffer((sv= newSVpvs("")), secret_len);
 
       offset= 0;
       for (block = 0; block < num_blocks; offset += block_size, block++) {
@@ -1062,18 +1063,22 @@ void cmk_aes_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret, size_
       sv= NULL; /* owned by hash now */
    }
    else { /* this block assumes GCM cipher */
-      U8 nonce[CMK_AES_256_GCM_NONCE_LEN];
-      U8 gcm_tag[CMK_AES_256_GCM_TAG_LEN];
+      U8 *nonce, *gcm_tag;
 
       if (aes_key->len != CMK_AES_256_GCM_KEY_LEN)
          GOTO_CLEANUP_CROAK("Wrong key length for cipher");
 
-      if (RAND_bytes(nonce, sizeof nonce) != 1)
+      nonce= cmk_prepare_sv_buffer((sv= newSVpvs("")),
+         CMK_AES_256_GCM_NONCE_LEN + secret_len + CMK_AES_256_GCM_TAG_LEN);
+      ciphertext= nonce + CMK_AES_256_GCM_NONCE_LEN;
+      gcm_tag= ciphertext + secret_len;
+
+      if (RAND_bytes(nonce, CMK_AES_256_GCM_NONCE_LEN) != 1)
          GOTO_CLEANUP_CROAK("Failed to generate GCM nonce");
 
       if (!(aes_ctx = EVP_CIPHER_CTX_new())
          || EVP_EncryptInit_ex(aes_ctx, cipher, NULL, NULL, NULL) != 1
-         || EVP_CIPHER_CTX_ctrl(aes_ctx, EVP_CTRL_GCM_SET_IVLEN, (int)sizeof(nonce), NULL) != 1
+         || EVP_CIPHER_CTX_ctrl(aes_ctx, EVP_CTRL_GCM_SET_IVLEN, CMK_AES_256_GCM_NONCE_LEN, NULL) != 1
          || EVP_EncryptInit_ex(aes_ctx, NULL, NULL, aes_key->data, nonce) != 1
       )
          GOTO_CLEANUP_CROAK("AES-GCM init failed");
@@ -1085,12 +1090,10 @@ void cmk_aes_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret, size_
       if (EVP_EncryptFinal_ex(aes_ctx, NULL, &outlen) != 1)
          GOTO_CLEANUP_CROAK("AES-GCM final failed");
 
-      if (EVP_CIPHER_CTX_ctrl(aes_ctx, EVP_CTRL_GCM_GET_TAG, (int)sizeof(gcm_tag), gcm_tag) != 1)
+      if (EVP_CIPHER_CTX_ctrl(aes_ctx, EVP_CTRL_GCM_GET_TAG, CMK_AES_256_GCM_TAG_LEN, gcm_tag) != 1)
          GOTO_CLEANUP_CROAK("AES-GCM get tag failed");
       /* Save results into fields of params */
-      if (  !hv_stores(params, "ciphertext",    sv)
-         || !hv_stores(params, "aes_gcm_nonce", sv= newSVpvn((char*)nonce, sizeof nonce))
-         || !hv_stores(params, "aes_gcm_tag",   sv= newSVpvn((char*)gcm_tag, sizeof gcm_tag)))
+      if (!hv_stores(params, "ciphertext", sv))
          GOTO_CLEANUP_CROAK("failed to write output hash keys");
       sv= NULL; /* owned by hash now */
    }
@@ -1129,7 +1132,6 @@ void cmk_aes_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *secret_o
    if (!svp || !*svp || !SvOK(*svp))
       croak("Missing 'ciphertext'");
    ciphertext= (U8*) secret_buffer_SvPVbyte(*svp, &ciphertext_len);
-   secret_buffer_set_len(secret_out, ciphertext_len);
 
    if (cipher == EVP_aes_256_xts()) {
       size_t block_size = 512;  /* default to 512-byte sectors for dm-crypt compatibility */
@@ -1152,6 +1154,7 @@ void cmk_aes_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *secret_o
       if (!(aes_ctx = EVP_CIPHER_CTX_new()))
          GOTO_CLEANUP_CROAK("AES-XTS context creation failed");
 
+      secret_buffer_set_len(secret_out, ciphertext_len);
       offset= 0;
       for (block = 0; block < num_blocks; offset += block_size, block++) {
          U8 tweak[16] = {0};
@@ -1174,31 +1177,22 @@ void cmk_aes_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *secret_o
       }
    }
    else { /* GCM cipher */
-      U8 nonce[CMK_AES_256_GCM_NONCE_LEN];
-      U8 gcm_tag[CMK_AES_256_GCM_TAG_LEN];
+      U8 *nonce, *gcm_tag;
 
       if (aes_key->len != CMK_AES_256_GCM_KEY_LEN)
          croak("Wrong key length for AES-256-GCM");
 
-      svp= hv_fetchs(params, "aes_gcm_nonce", 0);
-      if (!svp || !*svp || !SvOK(*svp))
-         croak("Missing 'aes_gcm_nonce'");
-      buf= (U8*) secret_buffer_SvPVbyte(*svp, &len);
-      if (len != sizeof(nonce))
-         croak("'aes_gcm_nonce' must be " STRINGIFY_MACRO(CMK_AES_256_GCM_NONCE_LEN) " bytes");
-      memcpy(nonce, buf, sizeof(nonce));
-
-      svp= hv_fetchs(params, "aes_gcm_tag", 0);
-      if (!svp || !*svp || !SvOK(*svp))
-         croak("Missing 'aes_gcm_tag'");
-      buf= (U8*) secret_buffer_SvPVbyte(*svp, &len);
-      if (len != sizeof(gcm_tag))
-         croak("'aes_gcm_tag' must be " STRINGIFY_MACRO(CMK_AES_256_GCM_TAG_LEN) " bytes");
-      memcpy(gcm_tag, buf, sizeof(gcm_tag));
+      if (ciphertext_len < CMK_AES_256_GCM_NONCE_LEN + CMK_AES_256_GCM_TAG_LEN)
+         croak("ciphertext smaller than minimum length (GCM nonce+tag)");
+      nonce= ciphertext;
+      ciphertext_len -= CMK_AES_256_GCM_NONCE_LEN + CMK_AES_256_GCM_TAG_LEN;
+      ciphertext += CMK_AES_256_GCM_NONCE_LEN;
+      gcm_tag= ciphertext + ciphertext_len;
+      secret_buffer_set_len(secret_out, ciphertext_len);
 
       if (!(aes_ctx = EVP_CIPHER_CTX_new())
          || EVP_DecryptInit_ex(aes_ctx, cipher, NULL, NULL, NULL) != 1
-         || EVP_CIPHER_CTX_ctrl(aes_ctx, EVP_CTRL_GCM_SET_IVLEN, (int)sizeof(nonce), NULL) != 1
+         || EVP_CIPHER_CTX_ctrl(aes_ctx, EVP_CTRL_GCM_SET_IVLEN, CMK_AES_256_GCM_NONCE_LEN, NULL) != 1
          || EVP_DecryptInit_ex(aes_ctx, NULL, NULL, aes_key->data, nonce) != 1
       )
          GOTO_CLEANUP_CROAK("AES-GCM decrypt init failed");
@@ -1207,7 +1201,7 @@ void cmk_aes_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *secret_o
          GOTO_CLEANUP_CROAK("AES-GCM decrypt failed");
 
       /* Set expected tag */
-      if (EVP_CIPHER_CTX_ctrl(aes_ctx, EVP_CTRL_GCM_SET_TAG, (int)sizeof(gcm_tag), gcm_tag) != 1)
+      if (EVP_CIPHER_CTX_ctrl(aes_ctx, EVP_CTRL_GCM_SET_TAG, CMK_AES_256_GCM_TAG_LEN, gcm_tag) != 1)
          GOTO_CLEANUP_CROAK("AES-GCM set tag failed");
 
       /* Finalize and verify tag */
