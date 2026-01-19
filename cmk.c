@@ -22,6 +22,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <endian.h>
 
 #ifndef HAVE_BOOL
    #define bool int
@@ -64,6 +65,102 @@ char* cmk_prepare_sv_buffer(SV *sv, size_t size) {
    }
    return p;
 }
+
+static size_t round_up_to_pow2(size_t n) {
+   --n;
+   n |= n >> 1;
+   n |= n >> 2;
+   n |= n >> 4;
+   n |= n >> 8;
+   n |= n >> 16;
+   n |= n >> 32;
+   return n+1;
+}
+
+#define VARSIZE_1BYTE_LIM 0x80
+#define VARSIZE_2BYTE_LIM 0x4080
+#define VARSIZE_4BYTE_LIM 0x20004080
+#define VARSIZE_8BYTE_LIM 0x1000000020004080
+
+/* Encode a size_t up to 10**18 into 1..8 bytes of data, and return the number
+ * of bytes written.
+ * Returns 0 on failure (if the size exceeds max, or buffer is too small)
+ */
+static size_t encode_var_size(U8 *buf, size_t buf_len, size_t val) {
+   if (val < VARSIZE_1BYTE_LIM && buf_len >= 1) {
+      buf[0]= (uint8_t) ((val << 1) | 1);
+      return 1;
+   }
+   else if (val < VARSIZE_2BYTE_LIM && buf_len >= 2) {
+      uint16_t bytes= htole16(((val - VARSIZE_1BYTE_LIM) << 2) | 2);
+      memcpy(buf, &bytes, sizeof(bytes));
+      return 2;
+   } else if (val < VARSIZE_4BYTE_LIM && buf_len >= 4) {
+      uint32_t bytes= htole32(((val - VARSIZE_2BYTE_LIM) << 3) | 4);
+      memcpy(buf, &bytes, sizeof(bytes));
+      return 4;
+   } else if (buf_len >= 8
+# if SIZE_MAX > 0xFFFFFFFF
+   && val < VARSIZE_8BYTE_LIM
+#endif
+   ) {
+      uint64_t bytes= htole64(((uint64_t)(val - VARSIZE_4BYTE_LIM) << 4) | 8);
+      memcpy(buf, &bytes, sizeof(bytes));
+      return 8;
+   }
+   return 0; /* exceeds maximum encoding size */
+}
+
+/* Decode between 1 and 8 bytes of variable-length integer into a size_t,
+ * and return the number of bytes consumed.
+ * Returns 0 on failure. (if the buffer was truncated, or the value would overflow size_t)
+ */
+static size_t decode_var_size(U8 *buf, size_t buf_len, size_t *size_out) {
+   if (buf_len >= 1 && (buf[0] & 1)) {
+      *size_out= buf[0] >> 1;
+      return 1;
+   }
+   else if (buf_len >= 2 && (buf[0] & 2)) {
+      *size_out= VARSIZE_1BYTE_LIM + ((((size_t)buf[1]) << 6) | (buf[0] >> 2));
+      return 2;
+   }
+   else if (buf_len >= 4 && (buf[0] & 4)) {
+      uint32_t val;
+      memcpy(&val, buf, sizeof(val));
+      *size_out= VARSIZE_2BYTE_LIM + (le32toh(val) >> 3);
+      return 4;
+   }
+   else if (buf_len >= 8 && (buf[0] & 8)) {
+      uint64_t val;
+      memcpy(&val, buf, sizeof(val));
+      val= VARSIZE_4BYTE_LIM + (le64toh(val) >> 4);
+      if (val > SIZE_MAX)
+         return 0;
+      *size_out= val;
+      return 8;
+   }
+   return 0; /* either buffer overrun, or integer > min(SIZE_MAX, 2**60) */
+}
+
+/* This is a test routine to ensure that every conceivable size gets encoded and decoded
+ * correctly, since a mistake here could render some encrypted data unreadable!
+ */
+#ifdef TEST_CRYPT_MULTIKEY_EXHAUSTIVE
+void cmk_test_all_var_size_encodings() {
+   dTHX;
+   U8 buf[8];
+   size_t x, y;
+   for (x= 0; x <= VARSIZE_4BYTE_LIM+1; x++) {
+      size_t enc_len= encode_var_size(buf, sizeof(buf), x);
+      size_t dec_len= decode_var_size(buf, sizeof(buf), &y);
+      if (!enc_len || enc_len > sizeof(buf) || enc_len != dec_len || x != y)
+         croak("Failed cmk_test_all_var_size_encodings x=%ld y=%ld enc_len=%d dec_len=%d",
+            (long)x, (long)y, (int)enc_len, (int)dec_len);
+      if (!(x & 0xFFFFFF))
+         warn("# x=%ld\n", (long) x);
+   }
+}
+#endif
 
 /* Generate a version 4 (random) UUID into the provided SV.
  * UUID v4 format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
@@ -982,96 +1079,62 @@ cleanup:
 /* Perform symmetric encryption using the supplied key, storing the ciphertext and
  * parameters into the hash `params`.
  */
-void cmk_aes_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret, size_t secret_len) {
+void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret, size_t secret_len) {
    const char *err= NULL;
    const EVP_CIPHER *cipher= NULL;
    EVP_CIPHER_CTX *aes_ctx = NULL;
-   SV **el, *sv= NULL;
-   U8 *buf, *ciphertext;
-   int outlen;
+   SV **svp, *sv= NULL;
+   U8 *buf;
+   int outlen, need_key_len;
    STRLEN len;
 
    /* determine cipher */
-   el= hv_fetchs(params, "cipher", 0);
-   if (el && *el && SvOK(*el)) {
-      buf= (U8*) secret_buffer_SvPVbyte(*el, &len);
-      if (len == 11 && memcmp(buf, "AES-256-GCM", 11) == 0)
+   svp= hv_fetchs(params, "cipher", 0);
+   if (svp && *svp && SvOK(*svp)) {
+      buf= (U8*) secret_buffer_SvPVbyte(*svp, &len);
+      if (len == 11 && memcmp(buf, "AES-256-GCM", 11) == 0) {
+         need_key_len= CMK_AES_256_GCM_KEY_LEN;
          cipher= EVP_aes_256_gcm();
-      else if (len == 11 && memcmp(buf, "AES-256-XTS", 11) == 0)
+      }
+      else if (len == 11 && memcmp(buf, "AES-256-XTS", 11) == 0) {
+         need_key_len= CMK_AES_256_XTS_KEY_LEN;
          cipher= EVP_aes_256_xts();
+      }
       else
          GOTO_CLEANUP_CROAK("Unsupported cipher");
    } else {
-      cipher= EVP_aes_256_gcm();
       if (!hv_stores(params, "cipher", (sv= newSVpvs("AES-256-GCM"))))
          GOTO_CLEANUP_CROAK("hv_store");
       sv= NULL;
+      cipher= EVP_aes_256_gcm();
+      need_key_len= CMK_AES_256_GCM_KEY_LEN;
    }
 
-   if (cipher == EVP_aes_256_xts()) {
-      size_t block_size = 512;  /* default to 512-byte sectors for dm-crypt compatibility */
-      size_t num_blocks, block, offset;
+   if (aes_key->len != (size_t) need_key_len)
+      croak("Wrong key length for cipher (%d, need %d)", (int)aes_key->len, need_key_len);
 
-      if (aes_key->len != CMK_AES_256_XTS_KEY_LEN)
-         GOTO_CLEANUP_CROAK("Wrong key length for cipher");
+   /* branch for stream ciphers */
+   if (cipher == EVP_aes_256_gcm()) {
+      U8 *ciphertext_pos, *ciphertext_lim, *nonce, *gcm_tag;
+      U8 varsize_buf[8];
+      size_t varsize_len= 0, padded_len= secret_len;
 
-      /* Get XTS block size if specified */
-      el= hv_fetchs(params, "aes_xts_block_size", 0);
-      if (el && *el && SvOK(*el)) {
-         IV block_size_iv = SvIV(*el);
-         if (block_size_iv < 16 || block_size_iv > 1048576)  /* sanity check: 16 bytes to 1MB */
-            GOTO_CLEANUP_CROAK("aes_xts_block_size must be between 16 and 1048576");
-         block_size = (size_t)block_size_iv;
-      } else {
-         /* Store default block size */
-         if (!hv_stores(params, "aes_xts_block_size", (sv= newSViv(block_size))))
-            GOTO_CLEANUP_CROAK("hv_store");
-         sv= NULL;
+      /* check if length-hiding requested */
+      svp= hv_fetchs(params, "pad_to", 0);
+      if (svp && *svp && SvTRUE(*svp)) {
+         IV pad_to= SvIV(*svp);
+         if (pad_to < 0 || (size_t)pad_to < secret_len + 8)
+            GOTO_CLEANUP_CROAK("pad_to must be greater than secret_len + 8");
+         varsize_len= encode_var_size(varsize_buf, sizeof(varsize_buf), secret_len);
+         if (!varsize_len || varsize_len > 8)
+            GOTO_CLEANUP_CROAK("BUG: can't encode length of secret");
+         padded_len= (size_t) pad_to;
       }
-      num_blocks = (secret_len + block_size - 1) / block_size;
-
-      if (!(aes_ctx = EVP_CIPHER_CTX_new()))
-         GOTO_CLEANUP_CROAK("AES-XTS context creation failed");
-
-      ciphertext= cmk_prepare_sv_buffer((sv= newSVpvs("")), secret_len);
-
-      offset= 0;
-      for (block = 0; block < num_blocks; offset += block_size, block++) {
-         /* XTS uses the block number as the 'tweak' value */
-         U8 tweak[16] = {0};
-         size_t block_len = (offset + block_size <= secret_len) 
-                           ? block_size 
-                           : (secret_len - offset);
-         
-         *(uint64_t*)tweak = (uint64_t)block;  /* tweak = block number */
-         
-         if (EVP_EncryptInit_ex(aes_ctx, cipher, NULL, aes_key->data, tweak) != 1)
-            GOTO_CLEANUP_CROAK("AES-XTS init failed");
-
-         if (EVP_EncryptUpdate(aes_ctx, ciphertext + offset, &outlen, 
-                               secret + offset, (int)block_len) != 1
-            || (size_t)outlen != block_len)
-            GOTO_CLEANUP_CROAK("AES-XTS encrypt failed");
-
-         if (EVP_EncryptFinal_ex(aes_ctx, NULL, &outlen) != 1)
-            GOTO_CLEANUP_CROAK("AES-XTS final failed");
-      }
-
-      /* Save results into fields of params */
-      if (!hv_stores(params, "ciphertext", sv))
-         GOTO_CLEANUP_CROAK("failed to write output hash keys");
-      sv= NULL; /* owned by hash now */
-   }
-   else { /* this block assumes GCM cipher */
-      U8 *nonce, *gcm_tag;
-
-      if (aes_key->len != CMK_AES_256_GCM_KEY_LEN)
-         GOTO_CLEANUP_CROAK("Wrong key length for cipher");
 
       nonce= cmk_prepare_sv_buffer((sv= newSVpvs("")),
-         CMK_AES_256_GCM_NONCE_LEN + secret_len + CMK_AES_256_GCM_TAG_LEN);
-      ciphertext= nonce + CMK_AES_256_GCM_NONCE_LEN;
-      gcm_tag= ciphertext + secret_len;
+         CMK_AES_256_GCM_NONCE_LEN + padded_len + CMK_AES_256_GCM_TAG_LEN);
+      ciphertext_pos= nonce + CMK_AES_256_GCM_NONCE_LEN;
+      gcm_tag= ciphertext_lim= ciphertext_pos + padded_len;
 
       if (RAND_bytes(nonce, CMK_AES_256_GCM_NONCE_LEN) != 1)
          GOTO_CLEANUP_CROAK("Failed to generate GCM nonce");
@@ -1083,9 +1146,38 @@ void cmk_aes_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret, size_
       )
          GOTO_CLEANUP_CROAK("AES-GCM init failed");
 
-      if (EVP_EncryptUpdate(aes_ctx, ciphertext, &outlen, secret, (int)secret_len) != 1
-         || (size_t)outlen != secret_len)
-         GOTO_CLEANUP_CROAK("AES-GCM encrypt failed");
+      if (varsize_len) {
+         if (EVP_EncryptUpdate(aes_ctx, ciphertext_pos, &outlen, varsize_buf, (int)varsize_len) != 1
+            || outlen != (int)varsize_len)
+            GOTO_CLEANUP_CROAK("AES-GCM encrypt (secret_len) failed");
+         ciphertext_pos += varsize_len;
+      }
+
+      while (secret_len) {
+         /* handle unlikely edge case where secret is larger than INT_MAX */
+         int n= secret_len > INT_MAX? INT_MAX : secret_len;
+         if (EVP_EncryptUpdate(aes_ctx, ciphertext_pos, &outlen, secret, n) != 1
+            || outlen != n)
+            GOTO_CLEANUP_CROAK("AES-GCM encrypt (secret) failed");
+         secret += n;
+         secret_len -= n;
+         ciphertext_pos += n;
+      }
+
+      /* Encrypt empty bytes up to requested length */
+      if (varsize_len) {
+         U8 tmp[1024];
+         memset(tmp, 0, sizeof(tmp));
+         while (ciphertext_pos < ciphertext_lim) {
+            int chunk= ciphertext_lim - ciphertext_pos;
+            if (chunk > sizeof(tmp))
+               chunk= sizeof(tmp);
+            if (EVP_EncryptUpdate(aes_ctx, ciphertext_pos, &outlen, tmp, chunk) != 1
+               || outlen != chunk)
+               GOTO_CLEANUP_CROAK("AES-GCM encrypt (padding) failed");
+            ciphertext_pos += chunk;
+         }
+      }
 
       if (EVP_EncryptFinal_ex(aes_ctx, NULL, &outlen) != 1)
          GOTO_CLEANUP_CROAK("AES-GCM final failed");
@@ -1097,7 +1189,90 @@ void cmk_aes_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret, size_
          GOTO_CLEANUP_CROAK("failed to write output hash keys");
       sv= NULL; /* owned by hash now */
    }
+   else { /* branch for block ciphers */
+      /* Need more work on API for specifying blocks and maybe streaming them to a file */
+      croak("unimplemented");
+#if 0
+      size_t block_size = 512;  /* default to 512-byte sectors for dm-crypt compatibility */
+      size_t num_blocks, pad_blocks= 0, block, offset;
+      secret_buffer *block_buffer_sb= NULL;
+      U8 block_buffer_st[4096];
 
+      if (aes_key->len != CMK_AES_256_XTS_KEY_LEN)
+         GOTO_CLEANUP_CROAK("Wrong key length for cipher");
+
+      /* Get XTS block size if specified */
+      el= hv_fetchs(params, "block_size", 0);
+      if (el && *el && SvOK(*el)) {
+         IV block_size_iv = SvIV(*el);
+         if (block_size_iv < 16 || block_size_iv > 1024*1024
+            || round_up_to_pow2((size_t)block_size_iv) != (size_t)block_size_iv)
+            GOTO_CLEANUP_CROAK("block_size must be a power of 2 between 16 and 1MiB");
+         block_size = (size_t)block_size_iv;
+      } else {
+         /* Store default block size */
+         if (!hv_stores(params, "block_size", (sv= newSViv(block_size))))
+            GOTO_CLEANUP_CROAK("hv_store");
+         sv= NULL;
+      }
+      num_blocks= (secret_len + block_size - 1) / block_size;
+      if (pad_to_length > block_size) {
+         size_t mult= pad_to_length / block_size; /* powers of 2, will be an integer >= 2 */
+         num_blocks= (num_blocks + mult - 1) & ~(mult-1);
+      }
+
+      if (!(aes_ctx = EVP_CIPHER_CTX_new()))
+         GOTO_CLEANUP_CROAK("AES-XTS context creation failed");
+
+      ciphertext= cmk_prepare_sv_buffer((sv= newSVpvs("")), num_blocks * block_size);
+
+      offset= 0;
+      for (block = 0; block < num_blocks; offset += block_size, block++) {
+         /* XTS uses the block number as the 'tweak' value */
+         uint64_t tweak[2]= { htole64(block), 0 };
+         U8 *block_buffer;
+
+         if (EVP_EncryptInit_ex(aes_ctx, cipher, NULL, aes_key->data, (U8*)tweak) != 1)
+            GOTO_CLEANUP_CROAK("AES-XTS init failed");
+
+         if (offset + block_size <= secret_len) {
+            block_buffer= secret + offset;
+         }
+         else {
+            /* either use stack buffer or allocate one via secret_buffer */
+            if (block_size <= sizeof(block_buffer_st))
+               block_buffer= block_buffer_st;
+            else {
+               if (!block_buffer_sb) {
+                  block_buffer_sb= secret_buffer_new(0, NULL);
+                  secret_buffer_set_len(block_buffer_sb, block_size);
+               }
+               block_buffer= block_buffer_sb->data;
+            }
+            /* Final partial block of secret */
+            if (offset < secret_len) {
+               size_t tail= secret_len - offset;
+               memcpy(block_buffer, secret + offset, tail);
+               memset(block_buffer + tail, 0, block_size - tail);
+            } else {
+               memset(block_buffer, 0, block_size);
+            }
+         }
+         if (EVP_EncryptUpdate(aes_ctx, ciphertext + offset, &outlen, 
+                               block_buffer, (int)block_size) != 1
+            || (size_t)outlen != block_size)
+            GOTO_CLEANUP_CROAK("AES-XTS encrypt failed");
+
+         if (EVP_EncryptFinal_ex(aes_ctx, NULL, &outlen) != 1)
+            GOTO_CLEANUP_CROAK("AES-XTS final failed");
+      }
+
+      /* Save results into fields of params */
+      if (!hv_stores(params, "ciphertext", sv))
+         GOTO_CLEANUP_CROAK("failed to write output hash keys");
+      sv= NULL; /* owned by hash now */
+#endif
+   }
 cleanup:
    if (sv) SvREFCNT_dec(sv);
    if (aes_ctx) EVP_CIPHER_CTX_free(aes_ctx);
@@ -1107,13 +1282,12 @@ cleanup:
 /* Perform symmetric decryption using the supplied AES key and ciphertext and parameters,
  * storing the original secret into secret_out.
  */
-void cmk_aes_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *secret_out) {
+void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *secret_out) {
    const char *err= NULL;
    const EVP_CIPHER *cipher= NULL;
    EVP_CIPHER_CTX *aes_ctx = NULL;
-   U8 *buf, *ciphertext;
-   int outlen, final_len;
-   STRLEN len, ciphertext_len;
+   U8 *buf;
+   STRLEN len;
    SV **svp;
 
    /* Determine cipher */
@@ -1121,25 +1295,112 @@ void cmk_aes_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *secret_o
    if (!svp || !*svp || !SvOK(*svp))
       croak("Missing 'cipher'");
    buf= (U8*) secret_buffer_SvPVbyte(*svp, &len);
-   if (len == 11 && memcmp(buf, "AES-256-GCM", 11) == 0)
+   if (len == 11 && memcmp(buf, "AES-256-GCM", 11) == 0) {
+      if (aes_key->len != CMK_AES_256_GCM_KEY_LEN)
+         croak("Wrong key length for AES-256-GCM");
       cipher= EVP_aes_256_gcm();
-   else if (len == 11 && memcmp(buf, "AES-256-XTS", 11) == 0)
+   }
+   else if (len == 11 && memcmp(buf, "AES-256-XTS", 11) == 0) {
+      if (aes_key->len != CMK_AES_256_XTS_KEY_LEN)
+         croak("Wrong key length for AES-256-XTS");
       cipher= EVP_aes_256_xts();
+   }
    else
       croak("Unsupported cipher");
 
-   svp= hv_fetchs(params, "ciphertext", 0);
-   if (!svp || !*svp || !SvOK(*svp))
-      croak("Missing 'ciphertext'");
-   ciphertext= (U8*) secret_buffer_SvPVbyte(*svp, &ciphertext_len);
+   /* branch for stream ciphers, curently only AES-256-GCM */
+   if (cipher == EVP_aes_256_gcm()) {
+      U8 *ciphertext_pos, *ciphertext_lim, *nonce, *gcm_tag, *secret_pos, *secret_lim;
+      size_t ciphertext_len, secret_len;
+      int outlen, final_len;
 
-   if (cipher == EVP_aes_256_xts()) {
+      svp= hv_fetchs(params, "ciphertext", 0);
+      if (!svp || !*svp || !SvOK(*svp))
+         croak("Missing 'ciphertext'");
+      nonce= (U8*) secret_buffer_SvPVbyte(*svp, &len);
+
+      if (len < CMK_AES_256_GCM_NONCE_LEN + CMK_AES_256_GCM_TAG_LEN)
+         croak("ciphertext smaller than minimum length (GCM nonce+tag)");
+      ciphertext_len= len - CMK_AES_256_GCM_NONCE_LEN - CMK_AES_256_GCM_TAG_LEN;
+      ciphertext_pos= nonce + CMK_AES_256_GCM_NONCE_LEN;
+      ciphertext_lim= gcm_tag= ciphertext_pos + ciphertext_len;
+      secret_len= ciphertext_len; /* AES GCM decodes N cyphertext bytes into N secret bytes */
+      
+      if (!(aes_ctx = EVP_CIPHER_CTX_new())
+         || EVP_DecryptInit_ex(aes_ctx, cipher, NULL, NULL, NULL) != 1
+         || EVP_CIPHER_CTX_ctrl(aes_ctx, EVP_CTRL_GCM_SET_IVLEN, CMK_AES_256_GCM_NONCE_LEN, NULL) != 1
+         || EVP_DecryptInit_ex(aes_ctx, NULL, NULL, aes_key->data, nonce) != 1
+         || EVP_CIPHER_CTX_ctrl(aes_ctx, EVP_CTRL_GCM_SET_TAG, CMK_AES_256_GCM_TAG_LEN, gcm_tag) != 1
+      )
+         GOTO_CLEANUP_CROAK("AES-GCM decrypt init failed");
+
+      /* check if length obfuscation was used */
+      svp= hv_fetchs(params, "pad_to", 0);
+      if (svp && *svp && SvTRUE(*svp)) {
+         U8 buffer[8];
+         size_t varsize_len; /* number of bytes used by variable-length int at start of secret */
+
+         /* variable-length size can be up to 8 bytes */
+         len= ciphertext_len < sizeof(buffer)? ciphertext_len : sizeof(buffer);
+         if (EVP_DecryptUpdate(aes_ctx, buffer, &outlen, ciphertext_pos, (int)len) != 1)
+            GOTO_CLEANUP_CROAK("AES-GCM decrypt failed");
+         varsize_len= decode_var_size(buffer, outlen, &secret_len);
+         if (!varsize_len || secret_len > ciphertext_len - varsize_len)
+            GOTO_CLEANUP_CROAK("Failed to decode variable-length size from start of secret");
+         secret_buffer_set_len(secret_out, secret_len);
+         secret_pos= secret_out->data;
+         secret_lim= secret_pos + secret_len;
+         /* copy across any bytes that were already decrypted and not part of the length */
+         if (outlen > varsize_len) {
+            size_t n= outlen - varsize_len;
+            if (n > secret_len)
+               n= secret_len;
+            memcpy(secret_pos, buffer+varsize_len, n);
+            secret_pos += n;
+         }
+         ciphertext_pos += outlen;
+      } else {
+         secret_buffer_set_len(secret_out, secret_len);
+         secret_pos= secret_out->data;
+         secret_lim= secret_pos + secret_len;
+      }
+      while (ciphertext_pos < ciphertext_lim) {
+         if (secret_pos < secret_lim) {
+            /* handle unlikely edge case that buffer size could exceed INT_MAX */
+            int n= secret_lim - secret_pos > INT_MAX? INT_MAX : (int)(secret_lim - secret_pos);
+            if (EVP_DecryptUpdate(aes_ctx, secret_pos, &outlen, ciphertext_pos, n) != 1
+               || outlen != n)
+               GOTO_CLEANUP_CROAK("AES-GCM decrypt failed");
+            secret_pos += n;
+            ciphertext_pos += n;
+         }
+         else { /* Decrypt the remainder of padding which should all be NUL bytes */
+            char buffer[1024];
+            int n= (ciphertext_lim - ciphertext_pos) > sizeof(buffer)? sizeof(buffer) : (int)(ciphertext_lim - ciphertext_pos);
+            if (EVP_DecryptUpdate(aes_ctx, buffer, &outlen, ciphertext_pos, n) != 1
+               || outlen != n)
+               GOTO_CLEANUP_CROAK("AES-GCM decrypt failed");
+            ciphertext_pos += n;
+         }
+      }
+      ASSUME(secret_pos == secret_lim);
+
+      /* Finalize and verify tag */
+      final_len = 0;
+      if (EVP_DecryptFinal_ex(aes_ctx, NULL, &final_len) != 1
+         || final_len != 0)
+         GOTO_CLEANUP_CROAK("AES-GCM decrypt failed, gcm_tag mismatch");
+   }
+   /* branch for block ciphers */
+   else {
+      /* TODO: this needs more thought about API for specifying which blocks to encrypt
+       * and maybe streaming them to a file.
+       */
+      croak("unimplemented");
+#if 0
       size_t block_size = 512;  /* default to 512-byte sectors for dm-crypt compatibility */
       size_t num_blocks, block, offset;
       IV block_size_iv;
-
-      if (aes_key->len != CMK_AES_256_XTS_KEY_LEN)
-         GOTO_CLEANUP_CROAK("Wrong key length for AES-256-XTS");
 
       /* Get XTS block size if specified */
       svp= hv_fetchs(params, "aes_xts_block_size", 0);
@@ -1175,45 +1436,8 @@ void cmk_aes_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *secret_o
          if (EVP_DecryptFinal_ex(aes_ctx, NULL, &final_len) != 1)
             GOTO_CLEANUP_CROAK("AES-XTS decrypt final failed");
       }
+#endif
    }
-   else { /* GCM cipher */
-      U8 *nonce, *gcm_tag;
-
-      if (aes_key->len != CMK_AES_256_GCM_KEY_LEN)
-         croak("Wrong key length for AES-256-GCM");
-
-      if (ciphertext_len < CMK_AES_256_GCM_NONCE_LEN + CMK_AES_256_GCM_TAG_LEN)
-         croak("ciphertext smaller than minimum length (GCM nonce+tag)");
-      nonce= ciphertext;
-      ciphertext_len -= CMK_AES_256_GCM_NONCE_LEN + CMK_AES_256_GCM_TAG_LEN;
-      ciphertext += CMK_AES_256_GCM_NONCE_LEN;
-      gcm_tag= ciphertext + ciphertext_len;
-      secret_buffer_set_len(secret_out, ciphertext_len);
-
-      if (!(aes_ctx = EVP_CIPHER_CTX_new())
-         || EVP_DecryptInit_ex(aes_ctx, cipher, NULL, NULL, NULL) != 1
-         || EVP_CIPHER_CTX_ctrl(aes_ctx, EVP_CTRL_GCM_SET_IVLEN, CMK_AES_256_GCM_NONCE_LEN, NULL) != 1
-         || EVP_DecryptInit_ex(aes_ctx, NULL, NULL, aes_key->data, nonce) != 1
-      )
-         GOTO_CLEANUP_CROAK("AES-GCM decrypt init failed");
-
-      if (EVP_DecryptUpdate(aes_ctx, secret_out->data, &outlen, ciphertext, (int)ciphertext_len) != 1)
-         GOTO_CLEANUP_CROAK("AES-GCM decrypt failed");
-
-      /* Set expected tag */
-      if (EVP_CIPHER_CTX_ctrl(aes_ctx, EVP_CTRL_GCM_SET_TAG, CMK_AES_256_GCM_TAG_LEN, gcm_tag) != 1)
-         GOTO_CLEANUP_CROAK("AES-GCM set tag failed");
-
-      /* Finalize and verify tag */
-      final_len = 0;
-      if (EVP_DecryptFinal_ex(aes_ctx, secret_out->data + outlen, &final_len) != 1)
-         GOTO_CLEANUP_CROAK("AES-GCM decrypt failed, gcm_tag mismatch");
-      outlen += final_len;
-
-      if (outlen != secret_out->len)
-         GOTO_CLEANUP_CROAK("Decrypt produced incorrect secret length");
-   }
-
 cleanup:
    if (aes_ctx) EVP_CIPHER_CTX_free(aes_ctx);
    if (err) cmk_croak_with_ssl_error("aes_decrypt", err);

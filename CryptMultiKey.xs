@@ -14,6 +14,9 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include "cmk.h"
+#ifdef TEST_CRYPT_MULTIKEY_EXHAUSTIVE
+extern void cmk_test_all_var_size_encodings();
+#endif
 
 /**********************************************************************************************\
 * XS Utils
@@ -79,6 +82,14 @@ _openssl_version_components()
       XPUSHs(sv_2mortal(newSViv(minor)));
       XPUSHs(sv_2mortal(newSViv(patch)));
 
+#ifdef TEST_CRYPT_MULTIKEY_EXHAUSTIVE
+void
+_test_all_var_size_encodings()
+   PPCODE:
+      cmk_test_all_var_size_encodings();
+      XSRETURN_YES;
+#endif
+
 void
 generate_uuid_v4()
    PPCODE:
@@ -92,7 +103,7 @@ hkdf(params, key_material)
       PUSHs(sv_2mortal(newRV_inc(cmk_hkdf(params, key_material)->wrapper)));
 
 void
-aes_encrypt(params, aes_key, secret)
+symmetric_encrypt(params, aes_key, secret)
    HV *params
    secret_buffer *aes_key
    SV *secret
@@ -100,11 +111,11 @@ aes_encrypt(params, aes_key, secret)
       STRLEN len;
       const char *buf= secret_buffer_SvPVbyte(secret, &len);
    PPCODE:
-      cmk_aes_encrypt(params, aes_key, buf, len);
+      cmk_symmetric_encrypt(params, aes_key, buf, len);
       XSRETURN(1); /* return params hashref */
 
 void
-aes_decrypt(params, aes_key, secret_out=NULL)
+symmetric_decrypt(params, aes_key, secret_out=NULL)
    HV *params
    secret_buffer *aes_key
    secret_buffer *secret_out
@@ -114,7 +125,7 @@ aes_decrypt(params, aes_key, secret_out=NULL)
       } else {
          ST(0)= ST(2);
       }
-      cmk_aes_decrypt(params, aes_key, secret_out);
+      cmk_symmetric_decrypt(params, aes_key, secret_out);
       XSRETURN(1); /* return buffer of secret */
 
 MODULE = Crypt::MultiKey                PACKAGE = Crypt::MultiKey::PKey
@@ -225,7 +236,7 @@ encrypt(pkey, secret_sv)
       SV *enc_ref= sv_2mortal(newRV_noinc((SV*) enc)); /* ensure HV gets cleaned up on error */
    PPCODE:
       cmk_pkey_generate_key_material(pkey, enc, skey_buf);
-      cmk_aes_encrypt(enc, cmk_hkdf(enc, skey_buf), secret, secret_len);
+      cmk_symmetric_encrypt(enc, cmk_hkdf(enc, skey_buf), secret, secret_len);
       PUSHs(enc_ref);
 
 void
@@ -238,7 +249,7 @@ decrypt(pkey, enc)
       secret_buffer *skey_buf= secret_buffer_new(0, NULL);
    PPCODE:
       cmk_pkey_recreate_key_material(pkey, enc, skey_buf);
-      cmk_aes_decrypt(enc, cmk_hkdf(enc, skey_buf), secret);
+      cmk_symmetric_decrypt(enc, cmk_hkdf(enc, skey_buf), secret);
       PUSHs(secret_ref);
 
 MODULE =  Crypt::MultiKey               PACKAGE = Crypt::MultiKey::Coffer

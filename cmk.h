@@ -86,13 +86,13 @@ extern void cmk_pkey_recreate_key_material(cmk_pkey *privkey, HV *tumbler, secre
 secret_buffer *cmk_hkdf(HV *params, secret_buffer *key_material);
 
 /* Perform symmetric encryption using the supplied AES key, storing the ciphertext and parameters
- * into the hash `enc_out`.
+ * into the hash `params`.
  */
-extern void cmk_aes_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret, size_t secret_len);
+extern void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret, size_t secret_len);
 
-/* Perform symmetric decryption using the supplied AES key and ciphertext and parameters in enc_in,
- * storing the original secret into secret_out.
+/* Perform symmetric decryption using the supplied AES key and ciphertext and parameters in
+ * `params`, storing the original secret into secret_out.
  */
-extern void cmk_aes_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *secret_out);
+extern void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *secret_out);
 
 #endif /* define CMK_H */
