@@ -28,6 +28,9 @@ my $test= ExtUtils::CFeatureTest->new;
 
 $test->header('stdbool.h');
 $test->feature(HAVE_BOOL      => 'bool x= true; return x == false;');
+$test->header('stdint.h');
+$test->feature(HAVE_ENDIAN_H => 'uint32_t le= htole32(0x12345678); return le > 0? 0 : 1;',
+               { h => 'endian.h' });
 
 $test->require_feature(HAVE_LIBSSL
                => 'unsigned char buf[1]; return RAND_bytes(buf, 1) == 1? 0 : 1;',

@@ -22,7 +22,6 @@
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
-#include <endian.h>
 
 #ifndef HAVE_BOOL
    #define bool int
