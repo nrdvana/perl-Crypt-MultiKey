@@ -30,16 +30,6 @@ subtest gcm_no_padding => sub {
 };
 
 subtest gcm_padding => sub {
-   subtest 'all variable-length size encodings' => sub {
-      skip_all 'TEST_CRYPT_MULTIKEY_EXHAUSTIVE is not set'
-         unless $ENV{TEST_CRYPT_MULTIKEY_EXHAUSTIVE};
-      skip_all 'TEST_CRYPT_MULTIKEY_EXHAUSTIVE was not set in Makefile during build'
-         unless Crypt::MultiKey->can('_test_all_var_size_encodings');
-      note 'This may take a while';
-      Crypt::MultiKey::_test_all_var_size_encodings();
-      pass('_test_all_var_size_encodings');
-   };
-
    my $aes_key= secret(append_random => 32);
    #define VARSIZE_1BYTE_LIM 0x80
    #define VARSIZE_2BYTE_LIM 0x4080
@@ -56,9 +46,9 @@ subtest gcm_padding => sub {
    }
    for my $len (@lengths) {
       my $s1= secret("x" x $len);
-      my %params= ( cipher => 'AES-256-GCM', pad_to => $len + 20 );
+      my %params= ( cipher => 'AES-256-GCM', pad => $len + 200 );
       Crypt::MultiKey::symmetric_encrypt(\%params, $aes_key, $s1);
-      is( length $params{ciphertext}, 12 + $len + 20 + 16, 'length $ciphertext' );
+      is( length $params{ciphertext}, 12 + $len + 200 + 16, 'length $ciphertext' );
       my $s2= Crypt::MultiKey::symmetric_decrypt(\%params, $aes_key);
       is( $s2->length, $len, "decoded length=$len" );
       is( $s1->memcmp($s2), 0, "s1 == s2" )

@@ -76,91 +76,6 @@ static size_t round_up_to_pow2(size_t n) {
    return n+1;
 }
 
-#define VARSIZE_1BYTE_LIM 0x80
-#define VARSIZE_2BYTE_LIM 0x4080
-#define VARSIZE_4BYTE_LIM 0x20004080
-#define VARSIZE_8BYTE_LIM 0x1000000020004080
-
-/* Encode a size_t up to 10**18 into 1..8 bytes of data, and return the number
- * of bytes written.
- * Returns 0 on failure (if the size exceeds max, or buffer is too small)
- */
-static size_t encode_var_size(U8 *buf, size_t buf_len, size_t val) {
-   if (val < VARSIZE_1BYTE_LIM && buf_len >= 1) {
-      buf[0]= (uint8_t) ((val << 1) | 1);
-      return 1;
-   }
-   else if (val < VARSIZE_2BYTE_LIM && buf_len >= 2) {
-      uint16_t bytes= htole16(((val - VARSIZE_1BYTE_LIM) << 2) | 2);
-      memcpy(buf, &bytes, sizeof(bytes));
-      return 2;
-   } else if (val < VARSIZE_4BYTE_LIM && buf_len >= 4) {
-      uint32_t bytes= htole32(((val - VARSIZE_2BYTE_LIM) << 3) | 4);
-      memcpy(buf, &bytes, sizeof(bytes));
-      return 4;
-   } else if (buf_len >= 8
-# if SIZE_MAX > 0xFFFFFFFF
-   && val < VARSIZE_8BYTE_LIM
-#endif
-   ) {
-      uint64_t bytes= htole64(((uint64_t)(val - VARSIZE_4BYTE_LIM) << 4) | 8);
-      memcpy(buf, &bytes, sizeof(bytes));
-      return 8;
-   }
-   return 0; /* exceeds maximum encoding size */
-}
-
-/* Decode between 1 and 8 bytes of variable-length integer into a size_t,
- * and return the number of bytes consumed.
- * Returns 0 on failure. (if the buffer was truncated, or the value would overflow size_t)
- */
-static size_t decode_var_size(U8 *buf, size_t buf_len, size_t *size_out) {
-   if (buf_len >= 1 && (buf[0] & 1)) {
-      *size_out= buf[0] >> 1;
-      return 1;
-   }
-   else if (buf_len >= 2 && (buf[0] & 2)) {
-      *size_out= VARSIZE_1BYTE_LIM + ((((size_t)buf[1]) << 6) | (buf[0] >> 2));
-      return 2;
-   }
-   else if (buf_len >= 4 && (buf[0] & 4)) {
-      uint32_t val;
-      memcpy(&val, buf, sizeof(val));
-      *size_out= VARSIZE_2BYTE_LIM + (le32toh(val) >> 3);
-      return 4;
-   }
-   else if (buf_len >= 8 && (buf[0] & 8)) {
-      uint64_t val;
-      memcpy(&val, buf, sizeof(val));
-      val= VARSIZE_4BYTE_LIM + (le64toh(val) >> 4);
-      if (val > SIZE_MAX)
-         return 0;
-      *size_out= val;
-      return 8;
-   }
-   return 0; /* either buffer overrun, or integer > min(SIZE_MAX, 2**60) */
-}
-
-/* This is a test routine to ensure that every conceivable size gets encoded and decoded
- * correctly, since a mistake here could render some encrypted data unreadable!
- */
-#ifdef TEST_CRYPT_MULTIKEY_EXHAUSTIVE
-void cmk_test_all_var_size_encodings() {
-   dTHX;
-   U8 buf[8];
-   size_t x, y;
-   for (x= 0; x <= VARSIZE_4BYTE_LIM+1; x++) {
-      size_t enc_len= encode_var_size(buf, sizeof(buf), x);
-      size_t dec_len= decode_var_size(buf, sizeof(buf), &y);
-      if (!enc_len || enc_len > sizeof(buf) || enc_len != dec_len || x != y)
-         croak("Failed cmk_test_all_var_size_encodings x=%ld y=%ld enc_len=%d dec_len=%d",
-            (long)x, (long)y, (int)enc_len, (int)dec_len);
-      if (!(x & 0xFFFFFF))
-         warn("# x=%ld\n", (long) x);
-   }
-}
-#endif
-
 /* Generate a version 4 (random) UUID into the provided SV.
  * UUID v4 format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
  * where x is random hex digit, y is one of 8,9,a,b
@@ -1075,6 +990,10 @@ cleanup:
    return aes_key;
 }
 
+/* 8 random + 0..63 random + 8 bytes of length */
+#define CMK_PAD_PREFIX_MAX_SIZE (8 + 63 + 8)
+#define CMK_PAD_PREFIX_VARSIZE(buf) (((buf)[0] ^ (buf)[1] ^ (buf)[2] ^ (buf)[3] ^ (buf)[4] ^ (buf)[5] ^ (buf)[6] ^ (buf)[7]) & 0x3F)
+
 /* Perform symmetric encryption using the supplied key, storing the ciphertext and
  * parameters into the hash `params`.
  */
@@ -1115,21 +1034,32 @@ void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret,
    /* branch for stream ciphers */
    if (cipher == EVP_aes_256_gcm()) {
       U8 *ciphertext_pos, *ciphertext_lim, *nonce, *gcm_tag;
-      U8 varsize_buf[8];
-      size_t varsize_len= 0, padded_len= secret_len;
+      U8 prefix_buf[CMK_PAD_PREFIX_MAX_SIZE];
+      size_t prefix_len= 0, padded_len= secret_len;
 
       /* check if length-hiding requested */
-      svp= hv_fetchs(params, "pad_to", 0);
+      svp= hv_fetchs(params, "pad", 0);
       if (svp && *svp && SvTRUE(*svp)) {
-         IV pad_to= SvIV(*svp);
-         if (pad_to < 0 || (size_t)pad_to < secret_len + 8)
-            GOTO_CLEANUP_CROAK("pad_to must be greater than secret_len + 8");
-         varsize_len= encode_var_size(varsize_buf, sizeof(varsize_buf), secret_len);
-         if (!varsize_len || varsize_len > 8)
-            GOTO_CLEANUP_CROAK("BUG: can't encode length of secret");
-         padded_len= (size_t) pad_to;
+         uint64_t packed_secret_len;
+         IV pad= SvIV(*svp);
+         if (pad < 1)
+            GOTO_CLEANUP_CROAK("pad must be greater than 0");
+         /* generate random prefix bytes */
+         if (RAND_bytes(prefix_buf, sizeof(prefix_buf)) != 1)
+            GOTO_CLEANUP_CROAK("Failed to generate random prefix");
+         /* hash the first 8 bytes to determine how many random bytes to include */
+         prefix_len= 8 + CMK_PAD_PREFIX_VARSIZE(prefix_buf) + 8;
+         /* now store the true secret length as little-endian 64-bit */
+         packed_secret_len= htole64(secret_len);
+         memcpy(prefix_buf + prefix_len - 8, &packed_secret_len, 8);
+         /* then take the prefix length and secret length and round them up to a multiple of pad */
+         padded_len+= prefix_len;
+         padded_len+= pad - (padded_len % pad);
       }
 
+      /* The encrypted result is N bytes of public nonce followed by the output bytes of the
+       * cipher followed by the public GCM tag bytes.  These can all be allocated as a single
+       * buffer inside of an SV, then assign pointers to the components */
       nonce= cmk_prepare_sv_buffer((sv= newSVpvs("")),
          CMK_AES_256_GCM_NONCE_LEN + padded_len + CMK_AES_256_GCM_TAG_LEN);
       ciphertext_pos= nonce + CMK_AES_256_GCM_NONCE_LEN;
@@ -1145,11 +1075,12 @@ void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret,
       )
          GOTO_CLEANUP_CROAK("AES-GCM init failed");
 
-      if (varsize_len) {
-         if (EVP_EncryptUpdate(aes_ctx, ciphertext_pos, &outlen, varsize_buf, (int)varsize_len) != 1
-            || outlen != (int)varsize_len)
+      if (prefix_len) {
+         if (EVP_EncryptUpdate(aes_ctx, ciphertext_pos, &outlen, prefix_buf, (int)prefix_len) != 1
+            || outlen != (int)prefix_len)
             GOTO_CLEANUP_CROAK("AES-GCM encrypt (secret_len) failed");
-         ciphertext_pos += varsize_len;
+         ciphertext_pos += prefix_len;
+         OPENSSL_cleanse(prefix_buf, prefix_len);
       }
 
       while (secret_len) {
@@ -1164,7 +1095,7 @@ void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret,
       }
 
       /* Encrypt empty bytes up to requested length */
-      if (varsize_len) {
+      if (padded_len > secret_len) {
          U8 tmp[1024];
          memset(tmp, 0, sizeof(tmp));
          while (ciphertext_pos < ciphertext_lim) {
@@ -1334,30 +1265,34 @@ void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *se
          GOTO_CLEANUP_CROAK("AES-GCM decrypt init failed");
 
       /* check if length obfuscation was used */
-      svp= hv_fetchs(params, "pad_to", 0);
+      svp= hv_fetchs(params, "pad", 0);
       if (svp && *svp && SvTRUE(*svp)) {
-         U8 buffer[8];
-         size_t varsize_len; /* number of bytes used by variable-length int at start of secret */
-
-         /* variable-length size can be up to 8 bytes */
-         len= ciphertext_len < sizeof(buffer)? ciphertext_len : sizeof(buffer);
-         if (EVP_DecryptUpdate(aes_ctx, buffer, &outlen, ciphertext_pos, (int)len) != 1)
+         uint64_t packed_secret_len;
+         U8 prefix_buf[CMK_PAD_PREFIX_MAX_SIZE];
+         size_t prefix_len;
+         /* read up to PREFIX_MAX_SIZE of potential prefix */
+         len= ciphertext_len < sizeof(prefix_buf)? ciphertext_len : sizeof(prefix_buf);
+         if (EVP_DecryptUpdate(aes_ctx, prefix_buf, &outlen, ciphertext_pos, (int)len) != 1)
             GOTO_CLEANUP_CROAK("AES-GCM decrypt failed");
-         varsize_len= decode_var_size(buffer, outlen, &secret_len);
-         if (!varsize_len || secret_len > ciphertext_len - varsize_len)
-            GOTO_CLEANUP_CROAK("Failed to decode variable-length size from start of secret");
+         /* hash the first 8 bytes to determine true length of the prefix */
+         prefix_len= 8 + CMK_PAD_PREFIX_VARSIZE(prefix_buf) + 8;
+         /* now load the true secret length as little-endian 64-bit */
+         memcpy(&packed_secret_len, prefix_buf + prefix_len - 8, 8);
+         secret_len= le64toh(packed_secret_len);
+         /* allocate secret buffer and set up position pointers */
          secret_buffer_set_len(secret_out, secret_len);
          secret_pos= secret_out->data;
          secret_lim= secret_pos + secret_len;
-         /* copy across any bytes that were already decrypted and not part of the length */
-         if (outlen > varsize_len) {
-            size_t n= outlen - varsize_len;
+         /* copy across any bytes that were already decrypted and not part of the prefix */
+         if (outlen > prefix_len) {
+            size_t n= outlen - prefix_len;
             if (n > secret_len)
                n= secret_len;
-            memcpy(secret_pos, buffer+varsize_len, n);
+            memcpy(secret_pos, prefix_buf+prefix_len, n);
             secret_pos += n;
          }
          ciphertext_pos += outlen;
+         OPENSSL_cleanse(prefix_buf, sizeof(prefix_buf));
       } else {
          secret_buffer_set_len(secret_out, secret_len);
          secret_pos= secret_out->data;
