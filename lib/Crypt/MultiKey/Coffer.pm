@@ -2,8 +2,8 @@ package Crypt::MultiKey::Coffer;
 use strict;
 use warnings;
 use Carp;
-use Scalar::Util qw( blessed );
-use MIME::Base64 ();
+use Scalar::Util qw/ blessed looks_like_number /;
+use MIME::Base64 qw/ encode_base64 decode_base64 /;
 use Crypt::SecretBuffer qw/ secret HEX BASE64 ISO8859_1 /;
 use Crypt::SecretBuffer::PEM;
 use Crypt::MultiKey;
@@ -169,7 +169,7 @@ True if the cipher_data is defined and contains a ciphertext string
 
 =cut
 
-sub cipher_data { $_[0]{cipher_data} }
+sub cipher_data { $_[0]{cipher_data}= $_[1] if @_ > 1; $_[0]{cipher_data} }
 sub has_ciphertext { defined $_[0]{cipher_data} && defined $_[0]{cipher_data}{ciphertext} }
 
 =attribute content_type
@@ -362,18 +362,23 @@ Load a Coffer from a file.  This does not decrypt the data.  See L</unlock>.
 
 =cut
 
+# Make sure attributes (or methods) are applied in the following order:
+our %_attr_pri= (
+   user_meta => -2,
+   content_type => -1,
+   save => 1,
+   # everything else defaults to 0
+);
+
 sub new {
    my $class= shift;
    my %attrs= @_ == 1? %{$_[0]} : @_;
    my $self= bless { locks => [] }, $class;
-   # If 'save' is requested, do that after everything else
-   my $save= delete $attrs{save};
    # Hook for subclasses to process attributes
    $self->_init(\%attrs) if $self->can('_init');
    # Every remaining attribute must have a writable accessor
-   $self->$_($attrs{$_}) for keys %attrs;
-   # Now apply the 'save', if requested
-   $self->save($save) if length $save;
+   $self->$_($attrs{$_})
+      for sort { ($_attr_pri{$a}||0) <=> ($_attr_pri{$b}||0) } keys %attrs;
    return $self;
 }
 
@@ -694,7 +699,7 @@ sub _import_pem {
    my %attrs;
 
    # Version check.  
-   if (my $min_version= delete $h{min_version}) {
+   if (my $min_version= delete $h{version}) {
       $min_version= version->parse($min_version);
       my $writer_version= version->parse(delete $h{writer_version} || 0);
       carp "'$path' requires version $min_version of Crypt::MultiKey::Coffer"
@@ -740,18 +745,26 @@ sub _import_pem {
    for my $lock (@{ $attrs{locks} }) {
       for my $tmbl (@{ $lock->{tumblers} }) {
          for (qw( pubkey ephemeral_pubkey rsa_key_ciphertext )) {
-            $tmbl->{$_}= base64_decode($tmbl->{$_})
+            $tmbl->{$_}= decode_base64($tmbl->{$_})
                if defined $tmbl->{$_};
          }
       }
       # base64 decode binary fields
       for (qw( kdf_salt ciphertext )) {
-         $lock->{$_}= base64_decode($lock->{$_})
+         $lock->{$_}= decode_base64($lock->{$_})
             if defined $lock->{$_};
       }
    }
 
-   $attrs{cipher_data}{ciphertext}= $pem->content;
+   # PEM object provides a Span with encoding=BASE64.  Need to decode that to bytes.
+   my $ciphertext= $pem->content;
+   if (_isa_secret_span($ciphertext) && $ciphertext->encoding == BASE64) {
+      my $buf= secret;
+      $ciphertext->copy_to($buf, encoding => ISO8859_1);
+      $ciphertext= $buf;
+   }
+   $attrs{cipher_data}{ciphertext}= $ciphertext;
+
    # validate all attributes to make sure constructor doesn't call methods
    if (my @unauth= grep !$_importable_attributes{$_}, keys %attrs) {
       carp "The following PEM headers cannot be imported: ".join(', ', sort @unauth);
@@ -801,14 +814,14 @@ sub _export_pem {
          delete $tumbler{pubkey} unless $export_pubkey;
          # base64 encode binary fields
          for (qw( pubkey ephemeral_pubkey rsa_key_ciphertext )) {
-            $tumbler{$_}= base64_encode($tumbler{$_}, '')
+            $tumbler{$_}= encode_base64($tumbler{$_}, '')
                if defined $tumbler{$_};
          }
          push @{ $lock{tumblers} }, \%tumbler;
       }
       # base64 encode binary fields
       for (qw( kdf_salt ciphertext )) {
-         $lock{$_}= base64_encode($lock{$_}, '')
+         $lock{$_}= encode_base64($lock{$_}, '')
             if defined $lock{$_};
       }
       push @locks_export, \%lock;

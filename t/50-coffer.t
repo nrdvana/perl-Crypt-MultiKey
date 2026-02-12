@@ -1,6 +1,7 @@
 use FindBin;
 use lib "$FindBin::Bin/lib";
 use Test2AndUtils;
+use File::Temp;
 use Crypt::SecretBuffer qw( secret );
 use Crypt::MultiKey::Coffer;
 
@@ -46,11 +47,41 @@ subtest encrypt_lock_unlock_decrypt => sub {
    ok( $c->add_access($key), 'add_access' );
    ok( $c->encrypt, 'encrypt' );
    ok( $c->lock, 'lock' );
-   note explain $c->locks;
    ok( $c->unlock($key), 'unlock' );
    ok( $c->decrypt, 'decrypt' );
    is( $c->content->memcmp($data), 0, 'secret matches' );
 };
 
+subtest save_load_unlock => sub {
+   my $data= "Testing 2 3 4";
+   my $tmpdir= File::Temp->newdir;
+   my $key= Crypt::MultiKey::PKey->generate;
+   my $c= Crypt::MultiKey::Coffer->new(
+      name => "Example",
+      user_meta => { a => 1, b => [ 1, 2, 3 ] },
+      content => $data,
+      content_type => 'text/plain'
+   );
+   ok( $c->add_access($key), 'add_access' );
+   ok( $c->save("$tmpdir/coffer.pem"), 'save' );
+   my $slurp= do { local $/; open my $fh, '<', "$tmpdir/coffer.pem" or die; <$fh> or die; };
+   note $slurp;
+   is( my $c2= Crypt::MultiKey::Coffer->load("$tmpdir/coffer.pem"),
+      object {
+         call name => 'Example';
+         call user_meta => {
+            name => "Example",
+            a => 1,
+            b => [ 1, 2, 3 ],
+         };
+         call unlocked => F;
+         call has_content => F;
+         call has_ciphertext => T;
+      }
+   );
+   ok( $c2->unlock($key), 'unlock' );
+   #note explain $c2;
+   is( $c2->content->memcmp($data), 0, 'content matches' );
+};
 
 done_testing;
