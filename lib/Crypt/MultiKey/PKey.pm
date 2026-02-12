@@ -4,6 +4,7 @@ use warnings;
 use Carp;
 use Scalar::Util qw/ blessed /;
 use MIME::Base64;
+use Digest::SHA qw/ sha256_base64 /;
 use Crypt::SecretBuffer qw/ secret HEX BASE64 ISO8859_1 /;
 use Crypt::SecretBuffer::INI;
 use Crypt::SecretBuffer::PEM;
@@ -84,7 +85,12 @@ when you call L</decrypt_private>.
 =cut
 
 sub type { $_[0]{type} }
-sub fingerprint { $_[0]{fingerprint} }
+sub fingerprint {
+   $_[0]{fingerprint} ||= do {
+      $_[0]->_export_pubkey(my $pub);
+      'SHA256:'.sha256_base64($pub);
+   };
+}
 sub path { $_[0]{path} }
 sub mechanism { undef; }
 sub public {

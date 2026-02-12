@@ -65,14 +65,14 @@ sub _round_up_to_pow2 {
 
 =head1 FILE FORMAT
 
-A Coffer is encoded in PEM, with leading attributes that describe the contents of the coffer
-and which keys can unlock it.
+A Coffer is encoded in PEM, with headers that describe the contents of the coffer and which keys
+can unlock it.
 
   -----BEGIN CRYPT MULTIKEY COFFER-----
   version: 0.001
   writer_version: 0.001
-  user_meta.name: User-supplied Name of This Coffer For Convenience
-  user_meta.xyz: Arbitrary user-supplied metadata
+  user_meta.name: User-supplied Name of This Coffer
+  user_meta.example1: arbitrary user-supplied metadata
   content_type: application/binary
   locks.0.tumbler.0.key_fingerprint: KeyFingerprint
   locks.0.tumbler.0.ephemeral_pubkey: base64==
@@ -181,19 +181,19 @@ C<content> as a key/value dictionary.
 =attribute content
 
 This attribute is an unencrypted L<Crypt::SecretBuffer> of the secret data of the Coffer.
-If L</cipher_data> is defined and the coffer is unlocked, reading this attribute will
-lazy-decrypt it.  If there is no L</cipher_data> (such as a new unsaved Coffer object) or the
-coffer is still locked, reading this attribute just returns C<undef>.
+If an encrypted copy exists (L</has_ciphertext> is true), reading this attribute will attempt
+to decrypt it, and fail if the Coffer is still locked.  If there is no encrypted copy (such as
+when a Coffer object is first created) or the, reading this attribute just returns C<undef>.
 
 Writing this attribute will invalidate the C<cipher_data> attribute, forcing it to be
 re-encrypted when you call L</save>.  Beware that if you make changes to the SecretBuffer object
 directly, the Coffer object will not be aware of those changes and the changes may be lost if
-the Coffer doesn't know they need re-encrypted.  Use L</invalidate_ciphertext> if you make
-changes directly.
+the Coffer doesn't know they need re-encrypted.  Set C<< $coffer->content_changed(1) >> if you
+need to flag the content as having changed.
 
-If you are using the Coffer for name/value storage, use the L</get> and L</set> methods instead
-of accessing this attribute.  In name/value mode, every access of this attribute will
-re-serialize your data.
+If you are using the Coffer for name/value storage, use the L</content_kv> attribute or L</get>
+and L</set> methods instead of accessing this attribute.  In name/value mode, every access of
+this attribute will re-serialize your data.
 
 =over
 
@@ -214,9 +214,9 @@ or write the whole attribute to properly indicate to the Coffer that it needs re
 
 =attribute content_changed
 
-True if you have used accessors to alter your C<content> attribute.  If you modify the content
-SecretBuffer yourself, you should set this attribute to true so that the Coffer knows it needs
-to re-encrypt the content.
+True if you have used accessors to alter your C<content> or C<content_kv> attribute.  If you
+modify the content SecretBuffer yourself, you should set this attribute to true so that the
+Coffer knows it needs to re-encrypt the content.
 
 =cut
 
@@ -227,7 +227,7 @@ sub content {
    $self->_set_content($_[0])
       if @_;
    $self->decrypt
-      if !$self->_have_content && $self->_have_ciphertext && $self->unlocked;
+      if !$self->has_content && $self->has_ciphertext;
    $self->_pack_content_kv
       if !defined $self->{content} && defined $self->{content_kv};
    $self->{content}
@@ -237,8 +237,10 @@ sub content_kv {
    my $self= shift;
    $self->_set_content_kv($_[0]) 
       if @_;
+   croak "content_type is not ".KV_CONTENT_TYPE
+      unless $self->content_type eq KV_CONTENT_TYPE;
    $self->decrypt
-      if !$self->_have_content && $self->_have_ciphertext && $self->unlocked;
+      if !$self->has_content && $self->has_ciphertext;
    $self->_unpack_content_kv
       if !defined $self->{content_kv} && defined $self->{content};
    $self->{content_kv}
@@ -254,8 +256,6 @@ sub _set_content {
       $self->{content_kv}= undef;
    } else {
       $self->{content}= _coerce_secret($val);
-      # Set default content type
-      $self->{content_type} ||= 'application/binary';
    }
    # discard key/value map, if any
    delete $self->{content_kv};
@@ -278,6 +278,33 @@ sub _set_content_kv {
    # discard plain scalar content, if any
    delete $self->{content};
    $self->content_changed(1);
+}
+
+sub _unpack_content_kv {
+   my $self= shift;
+   my $span= span($self->content);
+   my @kv= $span->parse_lenprefixed(-1)
+      or !$span->len # empty content is not an error
+      or croak "Failed to parse Key/Value pairs: ".$span->last_error;
+   croak "Failed to parse Key/Value pairs: odd number of strings"
+      if @kv & 1;
+   # unmask keys
+   for (0 .. ($#kv>>1)) {
+      my $k;
+      $kv[$_*2]->copy_to($k);
+      $kv[$_*2]= $k;
+   }
+   my %kv= @kv;
+   delete $self->{content};
+   $self->{content_kv}= \%kv;
+}
+
+sub _pack_content_kv {
+   my $self= shift;
+   my $buf= secret;
+   $buf->append_lenprefixed($_) for %{ $self->{content_kv} };
+   delete $self->{content_kv};
+   $self->{content}= $buf;
 }
 
 =attribute locks
@@ -361,7 +388,7 @@ sub load {
          or croak "No CRYPT MULTIKEY COFFER block found in file '$path'";
       last if $pem->label eq 'CRYPT MULTIKEY COFFER';
    }
-   my $attrs= $class_or_self->_import_pem($pem);
+   my $attrs= $class_or_self->_import_pem($pem, $path);
    $attrs->{path}= $path;
    # If called as a class method, return a new object
    return $class_or_self->new($attrs) unless ref $class_or_self;
@@ -383,12 +410,15 @@ any existing encrypted content has been decrypted into memory
 
 =item *
 
-all current L</access> items have the full public key available
+all current L</locks> have all their public keys available
 
 =back
 
 =cut
 
+# Try to find a PKey object for each key of each lock.  This can either decode the public
+# key from BASE64, or find the key with matching fingerprint from a supplied collection.
+# Returns true if all keys are present as PKey objects at the end.
 sub _inflate_lock_keys {
    my ($self, $keys, $missing_out)= @_;
    # User can provide an arrayref or hashref of keys
@@ -415,13 +445,15 @@ sub _inflate_lock_keys {
 
 sub generate_aes_key {
    my $self= shift;
+   croak "Can't generate_aes_key unless content has been decrypted or overwritten"
+      if $self->has_ciphertext && !$self->has_content;
    my @old_locks= @{ $self->locks };
-   croak "Generating a new Coffer aes_key required all existing locks to have public keys present";
+   croak "Generating a new Coffer aes_key required all existing locks to have public keys present"
       if @old_locks && !$self->_inflate_lock_keys;
    # Future compatibility; use same cipher as before.  Currently only AES-256-GCM is supported.
    my $cipher= $self->{cipher_data} && $self->{cipher_data}{cipher} || 'AES-256-GCM';
-   my $size= $self->cipher eq 'AES-256-XTS'? 64
-           : $self->cipher eq 'AES-256-GCM'? 32
+   my $size= $cipher eq 'AES-256-XTS'? 64
+           : $cipher eq 'AES-256-GCM'? 32
            : croak "Unsupported cipher $cipher";
    my $new_aes_key= secret(append_random => $size);
    my @new_locks;
@@ -466,7 +498,7 @@ sub add_access {
    my %lock= ( tumblers => \@tumblers );
    my $aes_key= Crypt::MultiKey::hkdf(\%lock, $key_material);
    # Use the keyslot's aes key to encrypt the Coffer's aes key
-   Crypt::MultiKey::aes_encrypt(\%lock, $aes_key, $self->aes_key);
+   Crypt::MultiKey::symmetric_encrypt(\%lock, $aes_key, $self->aes_key);
    push @{$self->locks}, \%lock;
    return \%lock;
 }
@@ -475,7 +507,7 @@ sub add_access {
 
   $coffer->unlock($key1, ... $keyN);
 
-This attempts to find a slot which can be unlocked by these keys, or a subset of them.
+This attempts to find a lock which can be unlocked by this list of keys, or a subset of them.
 If found, the L</aes_key> attribute is set, after which decryption and encryption methods can
 be used.
 
@@ -503,7 +535,7 @@ sub unlock {
       $keys_in_order[$_]->recreate_key_material($tumblers->[$_], $key_material)
          for 0..$#keys_in_order;
       my $aes_key= Crypt::MultiKey::hkdf($lock, $key_material);
-      my $coffer_aes_key= Crypt::MultiKey::aes_decrypt($lock, $aes_key);
+      my $coffer_aes_key= Crypt::MultiKey::symmetric_decrypt($lock, $aes_key);
       $self->aes_key($coffer_aes_key);
       return $self;
    }
@@ -540,7 +572,10 @@ fail if the L</aes_key> is not loaded.
 
 sub get {
    my ($self, $key)= @_;
-   $self->content_kv->{$key};
+   my $kv= $self->content_kv;
+   croak "content is not initialized"
+      unless $kv;
+   $kv->{$key};
 }
 
 =method set
@@ -548,8 +583,8 @@ sub get {
   $coffer->set($name, $secret);
 
 When L<content_type> is C<< application/crypt-multikey-coffer-kv >>, this method can be used to
-retrieve a secret by name.  Using this method when the content is not yet decrypted triggers it
-to be decrypted and will fail if the L</aes_key> is not loaded.  Using this method when no
+store a secret by name.  Using this method when the content is not yet decrypted triggers it
+to be decrypted, and will fail if the L</aes_key> is not loaded.  Using this method when no
 content or ciphertext are defined will initialize the content_type to
 C<< application/crypt-multikey-coffer-kv >> and the content_kv attribute to a hashref.
 
@@ -560,14 +595,17 @@ a state of "exists but undefined".
 
 sub set {
    my ($self, $key, $val)= @_;
-   if (!$self->_needs_encrypted && !$self->_has_ciphertext && !defined $self->{content_type}) {
-      $self->{content_type}= KV_CONTENT_TYPE;
-      $self->{content_kv}= {};
+   if (!defined $self->content_type && !$self->has_ciphertext && !$self->has_content) {
+      # initialize KV storage, which sets content_type.
+      $self->content_kv({});
    }
+   my $kv= $self->content_kv;
    if (defined $val) {
-      $self->content_kv->{$key}= _coerce_secret($val);
-   } else {
-      delete $self->content_kv->{$key};
+      $kv->{$key}= _coerce_secret($val);
+      $self->content_changed(1);
+   } elsif (exists $kv->{$key}) {
+      delete $kv->{$key};
+      $self->content_changed(1);
    }
 }
 
@@ -594,6 +632,18 @@ sub save {
    $self;
 }
 
+=method encrypt
+
+  $coffer->encrypt;
+
+Regenerate the L</cipher_data> attribute, and use a fresh C<aes_key> if possible.
+The C<content> or C<content_kv> attributes must be initialized.
+
+This is called automatically during L</save> if the Coffer is aware that the L<cipher_data>
+is not current.
+
+=cut
+
 sub encrypt {
    my $self= shift;
    # preconditions: the content must be defined
@@ -602,30 +652,54 @@ sub encrypt {
    # If possible, use a fresh AES key.
    # This requires that all locks have the public key present.
    $self->generate_aes_key if $self->_inflate_lock_keys;
-   # Fill the encryption parameters
+   # Preserve some encryption parameters from the previous encryption.
    my %cipher_data;
+   my $prev_cipher= $self->{cipher_data};
+   @cipher_data{'cipher','pad'}= @{$prev_cipher}{'cipher','pad'}
+      if defined $prev_cipher;
+   # Main encryption routine
    my $secret= $self->content;
-   Crypt::MultiKey::aes_encrypt(\%cipher_data, $self->aes_key, $secret);
+   Crypt::MultiKey::symmetric_encrypt(\%cipher_data, $self->aes_key, $secret);
    $self->{cipher_data}= \%cipher_data;
 }
 
+=method decrypt
+
+  $coffer->decrypt;
+
+Regenerate the C<content> attribute from the C<cipher_data> attribute.  The L</cipher_data>
+attribute must be initialized and the correct L</aes_key> must be loaded.
+
+This is called automatically when accessing an uninitialized C<content> or C<content_kv> if the
+Coffer is unlocked.
+
+=cut
+
 sub decrypt {
-   ...
+   my $self= shift;
+   # preconditions: the cipher_data must have ciphertext and aes_key must be loaded
+   croak "Coffer is locked"
+      unless $self->unlocked;
+   croak "No ciphertext defined"
+      unless $self->has_ciphertext;
+   $self->{content}= Crypt::MultiKey::symmetric_decrypt($self->cipher_data, $self->aes_key);
 }
 
+our %_importable_attributes= map +($_ => 1),
+   qw( locks user_meta cipher_data content_type );
 # Extract Coffer attributes from a Crypt::SecretBuffer::PEM object
 sub _import_pem {
-   my ($self, $pem)= @_;
+   my ($self, $pem, $path)= @_;
    my %h= %{ $pem->headers };
    my %attrs;
 
    # Version check.  
-   if (my $min_version= delete $h->{min_version}) {
+   if (my $min_version= delete $h{min_version}) {
       $min_version= version->parse($min_version);
-      my $writer_version= version->parse(delete $h->{writer_version} || 0);
-      carp "'$path' requires version $version of Crypt::MultiKey::Coffer"
+      my $writer_version= version->parse(delete $h{writer_version} || 0);
+      carp "'$path' requires version $min_version of Crypt::MultiKey::Coffer"
          ." but this is only version ".__PACKAGE__->VERSION
-         if $version > __PACKAGE__->VERSION;
+         if $min_version > __PACKAGE__->VERSION;
    } else {
       carp "No module version found in PEM headers";
    }
@@ -669,7 +743,6 @@ sub _import_pem {
             $tmbl->{$_}= base64_decode($tmbl->{$_})
                if defined $tmbl->{$_};
          }
-         push @{ $lock{tumblers} }, \%tumbler;
       }
       # base64 decode binary fields
       for (qw( kdf_salt ciphertext )) {
@@ -679,19 +752,28 @@ sub _import_pem {
    }
 
    $attrs{cipher_data}{ciphertext}= $pem->content;
-   # TODO: validate all attributes to make sure constructor doesn't call methods
-   ...
+   # validate all attributes to make sure constructor doesn't call methods
+   if (my @unauth= grep !$_importable_attributes{$_}, keys %attrs) {
+      carp "The following PEM headers cannot be imported: ".join(', ', sort @unauth);
+      delete @attrs{@unauth};
+   }
    \%attrs;
 }
 
+# Utility to flatten Perl structured data into plain key/value appropriate for PEM headers
 sub _struct_to_kv {
-   my $prefix= shift;
-   return ( $prefix => $_[0] ) unless ref $_[0];
-   my $node= shift;
-   if (ref $_[0] eq 'ARRAY') {
+   my ($prefix, $node)= @_;
+   if (!ref $node) {
+      # The value may not start or end with whitespace or contain any control characters.
+      # It may contain unicode, in which case we helpfully encode that.
+      croak "Value at $prefix may not contain control characters" if $node =~ /[\x00-\x1F\x7F]/;
+      croak "Value at $prefix may not begin or end with whitespace" if $node =~ /(^\s|\s\z)/;
+      return ( $prefix => $node );
+   }
+   elsif (ref $node eq 'ARRAY') {
       return map _struct_to_kv($prefix.'.'.$_ => $node->[$_]), 0 .. $#$node;
    }
-   elsif (ref $_[0] eq 'HASH') {
+   elsif (ref $node eq 'HASH') {
       my @ret;
       for (sort keys %$node) {
          /^[^\x00-\x1F\x7F .:0-9][^\x00-\x1F\x7F .:]*\z/
@@ -733,62 +815,25 @@ sub _export_pem {
    }
    my %cipher_data_export= %{ $self->cipher_data };
    my $ciphertext= delete $cipher_data_export{ciphertext};
+   my @header_kv= (
+      version => '0.001',
+      writer_version => __PACKAGE__->VERSION,
+      _struct_to_kv(user_meta => $self->user_meta),
+      _struct_to_kv(locks     => \@locks_export),
+      content_type => $self->content_type,
+      _struct_to_kv(cipher_data => \%cipher_data_export),
+   );
+   # PEM doesn't define a character encoding for headers, but for this use of PEM, UTF-8 seems
+   # to be the most sensible encoding.  Try to coerce things to UTF-8 so that it "just works".
+   for (grep /[^\x00-\x7F]/, @header_kv) {
+      utf8::decode($_); # in case the string was already encoded
+      utf8::encode($_);
+   }
    return Crypt::SecretBuffer::PEM->new(
-      label     => 'CRYPT SECRETBUFFER COFFER',
-      header_kv => [
-         version => '0.001',
-         writer_version => __PACKAGE__->VERSION,
-         _struct_to_kv(user_meta => $self->user_meta),
-         _struct_to_kv(locks     => \@locks_export),
-         content_type => $self->content_type,
-         _struct_to_kv(cipher_data => \%cipher_data_export),
-      ],
+      label     => 'CRYPT MULTIKEY COFFER',
+      header_kv => \@header_kv,
       content   => $ciphertext,
    );
-}
-
-sub _unpack_content_kv {
-   my ($self, $span)= @_;
-   # Break the content buffer into a list of length-delimited spans
-   my ($len, @kv);
-   while ($span->len) {
-      croak "Incomplete string in coffer key/value list"
-         unless $span->len >= 4;
-      $span->subspan(0, 4)->copy_to($len);
-      $len= unpack 'N', $len;
-      croak "Incomplete string in coffer key/value list"
-         unless $span->len >= 4 + $len;
-      push @kv, $span->subspan(4, $len);
-      $span->pos($span->pos + 4 + $len);
-   }
-   croak "Odd number of key/value elements in coffer" if @kv & 1;
-   # Now copy out all the keys (non-secret) into perl scalars
-   for (my $i= 0; $i < @kv; $i += 2) {
-      my $k;
-      $kv[$i]->copy_to($k);
-      $kv[$i]= $k;
-   }
-   return { @kv };
-}
-
-sub _pack_content_kv {
-   my ($self, $hash)= @_;
-   my $buf= secret();
-   my $size= 0;
-   $size += 4 + (_is_secret($_) || _is_Secret_span($_)? $_->length : length $_)
-      for %$hash;
-   $buf->capacity($size, 'AT_LEAST');
-   for (%$hash) {
-      # In case SecretBuffer does something "interesting" during append (like flattening UTF-8,
-      # or dereferencing some new kind of buffer object), append first and then patch up the
-      # length after.
-      my $before= $buf->length;
-      $buf->append("1234")->append($_);
-      my $len= $buf->length - 4 - $before;
-      croak "Secret exceeds 2^31 length" if $len > 0x7FFFFFFF;
-      $buf->substr($before, 4, pack('N', $len));
-   }
-   return $buf;
 }
 
 our %_known_lock_fields= map +($_ => 1),
@@ -826,18 +871,5 @@ sub _validate_locks {
    }
    return 1;
 }
-
-# Applies universally to scalars, secret buffers, or secret buffer spans
-sub _decode_base64_nonsecret {
-   _isa_secret($_[0])? $_[0]->span(encoding => BASE64)->copy_to($_[1], encoding => ISO8859_1)
-   : _isa_secret_span($_[0])? $_[0]->clone(encoding => BASE64)->copy_to($_[1], encoding => ISO8859_1)
-   : $_[1]= decode_base64($_[0]);
-}
-sub _encode_base64 {
-   return _isa_secret($_[0])? $_[0]->span->copy(encoding => BASE64)
-        : _isa_secret_span($_[0])? $_[0]->copy(encoding => BASE64)
-        : MIME::Base64::encode_base64($_[0], '');
-}
-
 
 1;
