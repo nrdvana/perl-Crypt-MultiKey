@@ -154,14 +154,30 @@ has_private(pkey)
       RETVAL
 
 void
-_import_pubkey(pkey, buffer)
+_clear_key(pkey)
+   maybe_cmk_pkey *pkey
+   PPCODE:
+      if (pkey && *pkey) {
+         EVP_PKEY_free(*pkey);
+         *pkey= NULL;
+      }
+
+void
+_import_spki(pkey, buffer)
    auto_cmk_pkey *pkey
    SV *buffer
    INIT:
       STRLEN len;
       const char *buf= secret_buffer_SvPVbyte(buffer, &len);
    PPCODE:
-      cmk_pkey_import_pubkey(pkey, buf, len);
+      cmk_pkey_import_spki(pkey, buf, len);
+
+void
+_export_spki(pkey, buf)
+   cmk_pubkey *pkey
+   SV *buf
+   PPCODE:
+      cmk_pkey_export_spki(pkey, buf);
 
 void
 _import_pkcs8(pkey, buffer, pass_sv=&PL_sv_undef)
@@ -188,11 +204,26 @@ _import_pem(pkey, buffer, pass_sv=&PL_sv_undef)
       cmk_pkey_import_pem(pkey, buf, len, pass, pass_len);
 
 void
-_export_pubkey(pkey, buf)
-   cmk_pubkey *pkey
-   SV *buf
+_import_openssh_privkey(pkey, buffer, pass_sv=&PL_sv_undef)
+   auto_cmk_pkey *pkey
+   SV *buffer
+   SV *pass_sv
+   INIT:
+      STRLEN len, pass_len= 0;
+      const char *buf= secret_buffer_SvPVbyte(buffer, &len);
+      const char *pass= SvOK(pass_sv)? secret_buffer_SvPVbyte(pass_sv, &pass_len) : NULL;
    PPCODE:
-      cmk_pkey_export_pubkey(pkey, buf);
+      cmk_pkey_import_openssh_privkey(pkey, buf, len, pass, pass_len);
+
+void
+_import_openssh_pubkey(pkey, buffer)
+   auto_cmk_pkey *pkey
+   SV *buffer
+   INIT:
+      STRLEN len;
+      const char *buf= secret_buffer_SvPVbyte(buffer, &len);
+   PPCODE:
+      cmk_pkey_import_openssh_pubkey(pkey, buf, len);
 
 void
 _export_pkcs8(pkey, buf, pass_sv=&PL_sv_undef, kdf_iter=100000)

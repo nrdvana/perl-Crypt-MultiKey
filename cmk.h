@@ -42,12 +42,12 @@ extern void cmk_pkey_dup(cmk_pkey *pk, cmk_pkey *orig);
 /* Load the public key from the buffer and store it into MAGIC on the ::PKey object.
  * The buffer should contain ASN.1 DER bytes of RFC5280's SubjectPublicKeyInfo structure.
  */
-extern void cmk_pkey_import_pubkey(cmk_pkey *pk, const U8 *buf, STRLEN buf_len);
+extern void cmk_pkey_import_spki(cmk_pkey *pk, const U8 *buf, STRLEN buf_len);
 
 /* Save the public key from ::PKey MAGIC into the supplied buffer.
  * The buffer receives ASN.1 DER bytes of RFC5280's SubjectPublicKeyInfo structure.
  */
-extern void cmk_pkey_export_pubkey(cmk_pkey *pk, SV *buf_out);
+extern void cmk_pkey_export_spki(cmk_pkey *pk, SV *buf_out);
 
 /* Load the private key from the buffer and store it into MAGIC on the ::PKey object.
  * The buffer should contain ASN.1 DER bytes of PKCS#8 which may be storing an encrypted private
@@ -65,6 +65,18 @@ extern void cmk_pkey_export_pkcs8(cmk_pkey *pk, const char *pass, STRLEN pw_len,
  * This should be able to handle most OpenSSH and OpenSSL key formats.
  */
 extern void cmk_pkey_import_pem(cmk_pkey *pk, const U8 *buf, STRLEN buf_len, const char *pw, STRLEN pw_len);
+
+/* Import a key from OpenSSH public key format (having already decoded the base64).
+ */
+extern void cmk_pkey_import_openssh_pubkey(cmk_pkey *pk, const U8 *buf, STRLEN buf_len);
+
+/* Import a key from OpenSSH private key format (having already decoded the base64).
+ * This can fall back to loading a public key if the key is encrypted and the password is NULL,
+ * because the public keys are stored in the unencrypted half of the file.
+ * If the password is provided and is incorrect, this croaks instead of falling back to loading
+ * the public key.
+ */
+extern void cmk_pkey_import_openssh_privkey(cmk_pkey *pk, const U8 *buf, STRLEN buf_len, const char *pw, STRLEN pw_len);
 
 /* Generate symmetric key material from the public key and store the public data in tumbler_out.
  * This appends bytes to skey_buf, so multiple keys can concatenate to the same buffer

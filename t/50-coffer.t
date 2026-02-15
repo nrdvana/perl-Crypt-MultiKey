@@ -55,15 +55,19 @@ subtest encrypt_lock_unlock_decrypt => sub {
 subtest save_load_unlock => sub {
    my $data= "Testing 2 3 4";
    my $tmpdir= File::Temp->newdir;
-   my $key= Crypt::MultiKey::PKey->generate;
-   my $c= Crypt::MultiKey::Coffer->new(
-      name => "Example",
-      user_meta => { a => 1, b => [ 1, 2, 3 ] },
-      content => $data,
-      content_type => 'text/plain'
-   );
-   ok( $c->add_access($key), 'add_access' );
-   ok( $c->save("$tmpdir/coffer.pem"), 'save' );
+   {
+      my $key= Crypt::MultiKey::PKey->generate;
+      my $c= Crypt::MultiKey::Coffer->new(
+         name => "Example",
+         user_meta => { a => 1, b => [ 1, 2, 3 ] },
+         content => $data,
+         content_type => 'text/plain'
+      );
+      ok( $c->add_access($key), 'add_access' );
+      ok( $c->save("$tmpdir/coffer.pem"), 'save coffer' );
+      $key->encrypt_private('keypassword');
+      ok( $key->save("$tmpdir/key.pem"), 'save key' );
+   }
    my $slurp= do { local $/; open my $fh, '<', "$tmpdir/coffer.pem" or die; <$fh> or die; };
    note $slurp;
    is( my $c2= Crypt::MultiKey::Coffer->load("$tmpdir/coffer.pem"),
@@ -79,6 +83,10 @@ subtest save_load_unlock => sub {
          call has_ciphertext => T;
       }
    );
+   my $key= Crypt::MultiKey::PKey->load("$tmpdir/key.pem");
+   ok( $key->has_public, 'public loaded' );
+   $key->decrypt_private('keypassword');
+   ok( $key->has_private, 'private loaded' );
    ok( $c2->unlock($key), 'unlock' );
    #note explain $c2;
    is( $c2->content->memcmp($data), 0, 'content matches' );

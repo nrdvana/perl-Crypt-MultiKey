@@ -128,6 +128,28 @@ cmk_croak_with_ssl_error(const char *context, const char *err) {
    }
 }
 
+/* Decode Base64 text (skipping whitespace) and return raw bytes in a secret_buffer.
+ * Croaks on failure.
+ * libSSL has routines for this but the documentation mentions a history of bugs
+ * which I'd rather not deal with if users compile against old versions.
+ */
+static secret_buffer *
+cmk_decode_base64(const U8 *text, STRLEN text_len) {
+   /* might be over-allocated, but that's ok */
+   secret_buffer *out= secret_buffer_new((text_len + 1) * 3 / 4, NULL);
+   secret_buffer_parse b64, dest;
+
+   memset(&b64, 0, sizeof(b64));
+   b64.pos= (U8*) text;
+   b64.lim= (U8*) text + text_len;
+   b64.encoding= SECRET_BUFFER_ENCODING_BASE64;
+   secret_buffer_parse_init(&dest, out, 0, out->capacity, 0);
+   if (!secret_buffer_transcode(&b64, &dest))
+      croak("Malformed base64");
+   out->len= dest.pos - (U8*) out->data;
+   return out;
+}
+
 /* Return whether cmk_pkey pointer has a public key.
  * Currently, cmk_pkey is a typedef for EVP_PKEY*, and a non-null EVP_PKEY implies it has at
  * least a public key, so just check that it points to something.
@@ -465,8 +487,9 @@ cmk_get_privkey(SV *objref) {
    return pk;
 }
 
+/* Import from RFC 5280 SubjectPublicKeyInfo format */
 void
-cmk_pkey_import_pubkey(cmk_pkey *pk, const U8 *buf, STRLEN buf_len) {
+cmk_pkey_import_spki(cmk_pkey *pk, const U8 *buf, STRLEN buf_len) {
    EVP_PKEY *key= NULL;
    if (!d2i_PUBKEY(&key, &buf, buf_len) || !key)
       cmk_croak_with_ssl_error("import_pubkey", "Decoding SubjectPublicKeyInfo failed");
@@ -475,13 +498,13 @@ cmk_pkey_import_pubkey(cmk_pkey *pk, const U8 *buf, STRLEN buf_len) {
 }
 
 void
-cmk_pkey_export_pubkey(cmk_pkey *pk, SV *buf_out) {
+cmk_pkey_export_spki(cmk_pkey *pk, SV *buf_out) {
    secret_buffer *sb;
    U8 *buf;
    /* encode the public key into a scalar */
    int serialized_len= i2d_PUBKEY(*pk, NULL);
    if (serialized_len <= 0)
-      cmk_croak_with_ssl_error("export_pubkey", "i2d_PUBKEY failed");
+      cmk_croak_with_ssl_error("export_spki", "i2d_PUBKEY failed");
    /* buffer maight be a secret_buffer reference */
    if ((sb= secret_buffer_from_magic(buf_out, 0))) {
       secret_buffer_set_len(sb, serialized_len);
@@ -491,7 +514,7 @@ cmk_pkey_export_pubkey(cmk_pkey *pk, SV *buf_out) {
       buf= (U8*) cmk_prepare_sv_buffer(buf_out, serialized_len);
    }
    if (i2d_PUBKEY(*pk, &buf) != serialized_len)
-      cmk_croak_with_ssl_error("export_pubkey", "i2d_PUBKEY");
+      cmk_croak_with_ssl_error("export_spkio", "i2d_PUBKEY");
 }
 
 /* Load the private key from the buffer and store it into MAGIC on the ::PKey object.
@@ -1206,7 +1229,7 @@ void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret,
 cleanup:
    if (sv) SvREFCNT_dec(sv);
    if (aes_ctx) EVP_CIPHER_CTX_free(aes_ctx);
-   if (err) cmk_croak_with_ssl_error("aes_encrypt", err);
+   if (err) cmk_croak_with_ssl_error("symmetric_encrypt", err);
 }
 
 /* Perform symmetric decryption using the supplied AES key and ciphertext and parameters,
@@ -1374,5 +1397,7 @@ void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *se
    }
 cleanup:
    if (aes_ctx) EVP_CIPHER_CTX_free(aes_ctx);
-   if (err) cmk_croak_with_ssl_error("aes_decrypt", err);
+   if (err) cmk_croak_with_ssl_error("symmetric_decrypt", err);
 }
+
+#include "cmk_parse_openssh.c"

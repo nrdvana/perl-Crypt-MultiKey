@@ -189,19 +189,21 @@ sub key {
    };
 }
 
-# For security, only permit loading packages which are known to be installed
-our %_lazy_load_ok= map +($_ => 1), qw(
+# For security, only permit loading packages which are known to be safe to construct from
+# external configuration.
+our %lazy_loadable= map +($_ => 1), qw(
    Crypt::MultiKey::PKey::Unencrypted
    Crypt::MultiKey::PKey::Manual
    Crypt::MultiKey::PKey::Password
    Crypt::MultiKey::PKey::Yubikey
    Crypt::MultiKey::PKey::SSHAgentSignature
 );
+sub lazy_loadable { \%lazy_loadable }
 
-sub _lazy_load_class {
+sub lazy_load {
    my ($class)= @_;
-   croak "For security, class '$class' cannot be 'require'd on demand"
-      unless $_lazy_load_ok{$class};
+   croak "Class '$class' is not marked as safe for lazy-loading"
+      unless $lazy_loadable{$class};
    (my $fname= $class . '.pm') =~ s,::,/,g;
    require $fname;
    return $class;
