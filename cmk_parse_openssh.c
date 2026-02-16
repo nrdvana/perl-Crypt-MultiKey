@@ -136,6 +136,230 @@ cleanup:
    }
 }
 
+/* Parse an OpenSSH "openssh-key-v1" private key container and store either the private or
+ * public key into 'pk'.  If the key is unencrypted, this always loads the private key.
+ * If the key is encrypted and password was not provided, this falls back to loading the public
+ * key, which is stored as plaintext alongside the encrypted private key.
+ * If the key is encrypted and the password is provided, this attempts to decrypt and load the
+ * private key and croaks on failure.
+ *
+ * This function expects `data` to be the raw decoded bytes of the PEM block:
+ *
+ *    -----BEGIN OPENSSH PRIVATE KEY-----
+ *    (base64)
+ *    -----END OPENSSH PRIVATE KEY-----
+ *
+ * The base64 decoding is performed by the caller (Perl layer).
+ *
+ * Only the first key can be imported, though the container format supports multiple.
+ *
+ * ------------------------------------------------------------------------
+ * OUTER CONTAINER FORMAT  (from OpenSSH PROTOCOL.key)
+ * ------------------------------------------------------------------------
+ *
+ *   byte[]   "openssh-key-v1\0"    (15-byte magic including NUL)
+ *
+ *   string   ciphername            SSH string (uint32 len + bytes)
+ *   string   kdfname               SSH string
+ *   string   kdfoptions            SSH string
+ *   uint32   nkeys
+ *
+ *   string   publickey[nkeys]      SSH string(s), each containing a complete public key blob
+ *
+ *   string   privatekey_blob       SSH string containing either:
+ *                                     - plaintext private key structure (if ciphername="none")
+ *                                     - encrypted private key structure (otherwise)
+ *
+ * SSH "string" encoding is:
+ *     uint32 length (big-endian)
+ *     <length> bytes of data (not NUL terminated)
+ *
+ * ------------------------------------------------------------------------
+ * INNER PLAINTEXT PRIVATE KEY BLOB FORMAT
+ * ------------------------------------------------------------------------
+ *
+ * The privatekey_blob contains:
+ *
+ *   uint32  checkint1
+ *   uint32  checkint2
+ *
+ *   (checkint1 must equal checkint2; mismatch indicates wrong
+ *    passphrase or corrupted data in encrypted variants)
+ *
+ *   For each key (normally exactly 1):
+ *
+ *       string  keytype
+ *       ...     keytype-specific fields (see below)
+ *       string  comment
+ *
+ *   padding bytes:
+ *       1, 2, 3, ... up to cipher block size boundary.
+ *       For unencrypted keys, padding is still present and follows
+ *       the same incrementing pattern.
+ *
+ *  (no attempt is made to validate the padding)
+ *
+ * ------------------------------------------------------------------------
+ * KEYTYPE-SPECIFIC INNER FORMATS
+ * ------------------------------------------------------------------------
+ *
+ * ssh-rsa:
+ *
+ *     mpint  n
+ *     mpint  e
+ *     mpint  d
+ *     mpint  iqmp     (q^{-1} mod p)
+ *     mpint  p
+ *     mpint  q
+ *
+ * ssh-ed25519:
+ *
+ *     string  public_key      (32 bytes)
+ *     string  private_key     (64 bytes: seed||public_key)
+ *
+ *     The first 32 bytes of private_key are the Ed25519 seed.
+ *
+ * ecdsa-sha2-<curve>:
+ *
+ *     string  curve_name      (e.g. "nistp256")
+ *     string  public_point    (octet form, typically uncompressed)
+ *     mpint   private_scalar
+ *
+ */
+void
+cmk_pkey_import_openssh_privkey(cmk_pkey *pk, const U8 *data, STRLEN data_len,
+                                const char *pw, STRLEN pw_len
+) {
+   const char *err = NULL;
+   EVP_PKEY *pkey = NULL;
+   EVP_PKEY *pub0 = NULL;
+
+   secret_buffer_parse outer, inner;
+   const U8 *ciphername=NULL, *kdfname=NULL, *kdfopts=NULL;
+   size_t ciphername_len=0, kdfname_len=0, kdfopts_len=0;
+   uint32_t nkeys=0;
+
+   const U8 *pubblob0=NULL, *privblob=NULL;
+   size_t pubblob0_len=0, privblob_len=0;
+
+   secret_buffer *plain_sb = NULL;
+
+   memset(&outer, 0, sizeof(outer));
+   outer.pos = data;
+   outer.lim = data + data_len;
+
+   if (!cmk_parse_bytes_eq(&outer, "openssh-key-v1\0", 15))
+      croak(outer.error ? outer.error : "Bad OpenSSH key magic (expected 'openssh-key-v1')");
+
+   if (!cmk_parse_ssh_string(&outer, &ciphername, &ciphername_len) ||
+       !cmk_parse_ssh_string(&outer, &kdfname, &kdfname_len) ||
+       !cmk_parse_ssh_string(&outer, &kdfopts, &kdfopts_len) ||
+       !cmk_parse_uint32(&outer, &nkeys)) {
+      croak("Truncated OpenSSH header");
+   }
+
+   if (nkeys < 1)
+      croak("OpenSSH key contains no public keys");
+
+   if (!cmk_parse_ssh_string(&outer, &pubblob0, &pubblob0_len))
+      croak("Truncated OpenSSH public key");
+
+   for (uint32_t i=1; i<nkeys; i++) {
+      const U8 *tmp=NULL;
+      size_t tmp_len=0;
+      if (!cmk_parse_ssh_string(&outer, &tmp, &tmp_len))
+         croak("Truncated OpenSSH public key list");
+   }
+
+   if (!cmk_parse_ssh_string(&outer, &privblob, &privblob_len))
+      croak("Truncated OpenSSH private blob");
+
+   memset(&inner, 0, sizeof(inner));
+   /* Unencrypted? */
+   if ((ciphername_len == 4 && memcmp(ciphername, "none", 4) == 0) &&
+       (kdfname_len == 4 && memcmp(kdfname, "none", 4) == 0)
+   ) {
+      inner.pos = privblob;
+      inner.lim = privblob + privblob_len;
+   }
+   else if (!pw) {
+      /* Encrypted, but caller didn't supply password, so just load the public key. */
+      cmk_pkey_import_openssh_pubkey(pk, pubblob0, (STRLEN)pubblob0_len);
+      return;
+   }
+   else {
+      /* caller supplied a password -> MUST either decrypt+parse or die */
+      plain_sb = cmk_openssh_decrypt_private_blob(ciphername, ciphername_len,
+                                                  kdfname, kdfname_len,
+                                                  kdfopts, kdfopts_len,
+                                                  privblob, privblob_len,
+                                                  (const U8*)pw, (size_t)pw_len,
+                                                  &err);
+      if (!plain_sb)
+         croak("Failed to decrypt OpenSSH private key: %s", err);
+
+      inner.pos = plain_sb->data;
+      inner.lim = plain_sb->data + plain_sb->len;
+   }
+   pkey = cmk_parse_openssh_privkey_inner(&inner);
+   if (!pkey)
+      croak("Failed to parse OpenSSH private key (wrong password, or corrupt file)");
+   if (*pk) EVP_PKEY_free(*pk);
+   *pk = pkey;
+}
+
+static EVP_PKEY *
+cmk_parse_openssh_privkey_inner(secret_buffer_parse *parse) {
+   uint32_t c1, c2;
+   const U8 *keytype;
+   size_t keytype_len;
+   EVP_PKEY *pkey = NULL;
+
+   if (!cmk_parse_uint32(parse, &c1) || !cmk_parse_uint32(parse, &c2))
+      return NULL;
+
+   if (c1 != c2) {
+      parse->error = "OpenSSH checkints mismatch (wrong passphrase or corrupt key)";
+      return NULL;
+   }
+
+   if (!cmk_parse_ssh_string(parse, &keytype, &keytype_len))
+      return NULL;
+
+   if (keytype_len == 7 && memcmp(keytype, "ssh-rsa", 7) == 0) {
+      pkey = cmk_parse_openssh_rsa_priv_record(parse);
+   }
+   else if (keytype_len >= 11 && memcmp(keytype, "ecdsa-sha2-", 11) == 0) {
+      pkey = cmk_parse_openssh_ecdsa_priv_record(parse);
+   }
+   else if (keytype_len == 11 && memcmp(keytype, "ssh-ed25519", 11) == 0) {
+      pkey = cmk_parse_openssh_ed25519_priv_record(parse);
+   }
+   else {
+      parse->error = "Unsupported OpenSSH private key type";
+      return NULL;
+   }
+
+   if (!pkey) {
+      if (!parse->error) parse->error = "Failed to parse OpenSSH private key record";
+      return NULL;
+   }
+
+   /* comment */
+   {
+      const U8 *comment;
+      size_t comment_len;
+      if (!cmk_parse_ssh_string(parse, &comment, &comment_len)) {
+         EVP_PKEY_free(pkey);
+         return NULL;
+      }
+      /* ignore comment for now */
+   }
+
+   /* padding may follow; optional validation could be added later */
+   return pkey;
+}
+
 static EVP_PKEY *
 cmk_parse_openssh_rsa_priv_record(secret_buffer_parse *parse) {
    const char *err = NULL;
@@ -264,284 +488,6 @@ cmk_parse_openssh_ed25519_priv_record(secret_buffer_parse *parse) {
    return pkey;
 }
 
-static EVP_PKEY *
-cmk_parse_openssh_privkey_inner(secret_buffer_parse *parse) {
-   uint32_t c1, c2;
-   const U8 *keytype;
-   size_t keytype_len;
-   EVP_PKEY *pkey = NULL;
-
-   if (!cmk_parse_uint32(parse, &c1) || !cmk_parse_uint32(parse, &c2))
-      return NULL;
-
-   if (c1 != c2) {
-      parse->error = "OpenSSH checkints mismatch (wrong passphrase or corrupt key)";
-      return NULL;
-   }
-
-   if (!cmk_parse_ssh_string(parse, &keytype, &keytype_len))
-      return NULL;
-
-   if (keytype_len == 7 && memcmp(keytype, "ssh-rsa", 7) == 0) {
-      pkey = cmk_parse_openssh_rsa_priv_record(parse);
-   }
-   else if (keytype_len >= 11 && memcmp(keytype, "ecdsa-sha2-", 11) == 0) {
-      pkey = cmk_parse_openssh_ecdsa_priv_record(parse);
-   }
-   else if (keytype_len == 11 && memcmp(keytype, "ssh-ed25519", 11) == 0) {
-      pkey = cmk_parse_openssh_ed25519_priv_record(parse);
-   }
-   else {
-      parse->error = "Unsupported OpenSSH private key type";
-      return NULL;
-   }
-
-   if (!pkey) {
-      if (!parse->error) parse->error = "Failed to parse OpenSSH private key record";
-      return NULL;
-   }
-
-   /* comment */
-   {
-      const U8 *comment;
-      size_t comment_len;
-      if (!cmk_parse_ssh_string(parse, &comment, &comment_len)) {
-         EVP_PKEY_free(pkey);
-         return NULL;
-      }
-      /* ignore comment for now */
-   }
-
-   /* padding may follow; optional validation could be added later */
-   return pkey;
-}
-
-/*
- * Parse an OpenSSH "openssh-key-v1" private key container
- * (unencrypted variant only) and populate *pk with a new EVP_PKEY.
- *
- * This function expects `data` to be the raw decoded bytes of the
- * PEM block:
- *
- *    -----BEGIN OPENSSH PRIVATE KEY-----
- *    (base64)
- *    -----END OPENSSH PRIVATE KEY-----
- *
- * The base64 decoding is performed by the caller (Perl layer).
- *
- * ------------------------------------------------------------------------
- * OUTER CONTAINER FORMAT  (from OpenSSH PROTOCOL.key)
- * ------------------------------------------------------------------------
- *
- *   byte[]   "openssh-key-v1\0"    (15-byte magic including NUL)
- *
- *   string   ciphername            SSH string (uint32 len + bytes)
- *   string   kdfname               SSH string
- *   string   kdfoptions            SSH string
- *   uint32   nkeys
- *
- *   string   publickey[nkeys]      SSH string(s), each containing a
- *                                   complete SSH public key blob
- *
- *   string   privatekey_blob       SSH string containing either:
- *                                     - plaintext private key structure
- *                                       (if ciphername="none")
- *                                     - encrypted private key structure
- *                                       (otherwise)
- *
- * SSH "string" encoding is:
- *     uint32 length (big-endian)
- *     <length> bytes of data (not NUL terminated)
- *
- * This function currently supports only:
- *
- *     ciphername = "none"
- *     kdfname    = "none"
- *
- * Encrypted keys (ciphername != "none") are rejected and must be
- * handled by a higher-level function which performs bcrypt_pbkdf
- * and decryption before parsing the inner structure.
- *
- * ------------------------------------------------------------------------
- * INNER PLAINTEXT PRIVATE KEY BLOB FORMAT
- * ------------------------------------------------------------------------
- *
- * The privatekey_blob (after SSH length decoding) contains:
- *
- *   uint32  checkint1
- *   uint32  checkint2
- *
- *   (checkint1 must equal checkint2; mismatch indicates wrong
- *    passphrase or corrupted data in encrypted variants)
- *
- *   For each key (normally exactly 1):
- *
- *       string  keytype
- *       ...     keytype-specific fields (see below)
- *       string  comment
- *
- *   padding bytes:
- *       1, 2, 3, ... up to cipher block size boundary.
- *       For unencrypted keys, padding is still present and follows
- *       the same incrementing pattern.
- *
- *
- * ------------------------------------------------------------------------
- * KEYTYPE-SPECIFIC INNER FORMATS
- * ------------------------------------------------------------------------
- *
- * ssh-rsa:
- *
- *     mpint  n
- *     mpint  e
- *     mpint  d
- *     mpint  iqmp     (q^{-1} mod p)
- *     mpint  p
- *     mpint  q
- *
- * ssh-ed25519:
- *
- *     string  public_key      (32 bytes)
- *     string  private_key     (64 bytes: seed||public_key)
- *
- *     The first 32 bytes of private_key are the Ed25519 seed.
- *
- * ecdsa-sha2-<curve>:
- *
- *     string  curve_name      (e.g. "nistp256")
- *     string  public_point    (octet form, typically uncompressed)
- *     mpint   private_scalar
- *
- *
- * ------------------------------------------------------------------------
- * NOTES
- * ------------------------------------------------------------------------
- *
- *  - All integers are big-endian.
- *  - All mpint values are SSH mpint encoding (two's complement).
- *    Negative mpints are rejected for key parameters.
- *  - Only a single key is currently expected (nkeys == 1),
- *    though the container format supports more.
- *  - Publickey[nkeys] entries are parsed only to skip them;
- *    the private key blob is authoritative.
- *  - No attempt is made here to validate padding pattern.
- *
- * On success:
- *     - *pk is replaced with a newly constructed EVP_PKEY.
- *
- * On failure:
- *     - Croaks via cmk_croak_with_ssl_error().
- *     - Any partially constructed key is freed.
- *
- */
-void
-cmk_pkey_import_openssh_privkey(cmk_pkey *pk, const U8 *data, STRLEN data_len,
-                                const char *pw, STRLEN pw_len) {
-   const char *err = NULL;
-   EVP_PKEY *pkey = NULL;
-   EVP_PKEY *pub0 = NULL;
-
-   secret_buffer_parse outer, inner;
-   const U8 *ciphername=NULL, *kdfname=NULL, *kdfopts=NULL;
-   size_t ciphername_len=0, kdfname_len=0, kdfopts_len=0;
-   uint32_t nkeys=0;
-
-   const U8 *pubblob0=NULL, *privblob=NULL;
-   size_t pubblob0_len=0, privblob_len=0;
-
-   secret_buffer *plain_sb = NULL;
-
-   memset(&outer, 0, sizeof(outer));
-   outer.pos = data;
-   outer.lim = data + data_len;
-
-   if (!cmk_parse_bytes_eq(&outer, "openssh-key-v1\0", 15))
-      GOTO_CLEANUP_CROAK(outer.error ? outer.error : "Bad OpenSSH key magic");
-
-   if (!cmk_parse_ssh_string(&outer, &ciphername, &ciphername_len) ||
-       !cmk_parse_ssh_string(&outer, &kdfname, &kdfname_len) ||
-       !cmk_parse_ssh_string(&outer, &kdfopts, &kdfopts_len) ||
-       !cmk_parse_uint32(&outer, &nkeys)) {
-      GOTO_CLEANUP_CROAK(outer.error ? outer.error : "Truncated OpenSSH header");
-   }
-
-   if (nkeys < 1)
-      GOTO_CLEANUP_CROAK("OpenSSH key contains no public keys");
-
-   if (!cmk_parse_ssh_string(&outer, &pubblob0, &pubblob0_len))
-      GOTO_CLEANUP_CROAK(outer.error ? outer.error : "Truncated OpenSSH public key");
-
-   for (uint32_t i=1; i<nkeys; i++) {
-      const U8 *tmp=NULL;
-      size_t tmp_len=0;
-      if (!cmk_parse_ssh_string(&outer, &tmp, &tmp_len))
-         GOTO_CLEANUP_CROAK(outer.error ? outer.error : "Truncated OpenSSH public key list");
-   }
-
-   if (!cmk_parse_ssh_string(&outer, &privblob, &privblob_len))
-      GOTO_CLEANUP_CROAK(outer.error ? outer.error : "Truncated OpenSSH private blob");
-
-   /* Always parse publickey[0] so we can return public-only on demand */
-   {
-      cmk_pkey tmp = NULL;
-      cmk_pkey_import_openssh_pubkey(&tmp, pubblob0, (STRLEN)pubblob0_len);
-      pub0 = tmp;
-   }
-
-   /* Unencrypted */
-   if ((ciphername_len == 4 && memcmp(ciphername, "none", 4) == 0) &&
-       (kdfname_len == 4 && memcmp(kdfname, "none", 4) == 0)) {
-
-      memset(&inner, 0, sizeof(inner));
-      inner.pos = privblob;
-      inner.lim = privblob + privblob_len;
-
-      pkey = cmk_parse_openssh_privkey_inner(&inner);
-      if (!pkey)
-         GOTO_CLEANUP_CROAK(inner.error ? inner.error : "Failed to parse OpenSSH private key");
-   }
-   else {
-      /* Encrypted */
-      if (!pw) {
-         /* caller wants public-only */
-         pkey = pub0;
-         pub0 = NULL;
-      }
-      else {
-         /* caller supplied a password -> MUST either decrypt+parse or die */
-         plain_sb = cmk_openssh_decrypt_private_blob(ciphername, ciphername_len,
-                                                     kdfname, kdfname_len,
-                                                     kdfopts, kdfopts_len,
-                                                     privblob, privblob_len,
-                                                     (const U8*)pw, (size_t)pw_len,
-                                                     &err);
-         if (!plain_sb)
-            GOTO_CLEANUP_CROAK(err ? err : "Failed to decrypt OpenSSH private key");
-
-         memset(&inner, 0, sizeof(inner));
-         inner.pos = plain_sb->data;
-         inner.lim = plain_sb->data + plain_sb->len;
-
-         pkey = cmk_parse_openssh_privkey_inner(&inner);
-         if (!pkey) {
-            /* Most important wrong-password signal: checkints mismatch inside plain parser */
-            GOTO_CLEANUP_CROAK(inner.error ? inner.error : "Failed to parse decrypted OpenSSH key");
-         }
-      }
-   }
-
-cleanup:
-   if (pub0) EVP_PKEY_free(pub0);
-
-   if (err) {
-      if (pkey) EVP_PKEY_free(pkey);
-      cmk_croak_with_ssl_error("import_openssh_private_v1", err);
-   } else {
-      if (*pk) EVP_PKEY_free(*pk);
-      *pk = pkey;
-   }
-}
-
 static secret_buffer *
 cmk_openssh_decrypt_private_blob(const U8 *ciphername, size_t ciphername_len,
                                  const U8 *kdfname, size_t kdfname_len,
@@ -588,7 +534,6 @@ cmk_openssh_decrypt_private_blob(const U8 *ciphername, size_t ciphername_len,
 
    /* Derive key+iv into a secret buffer */
    keyiv_sb = secret_buffer_new(keyiv_len, NULL);
-   if (!keyiv_sb) { *err_out = "Out of memory (keyiv)"; goto cleanup; }
 
    if (!cmk_bcrypt_pbkdf((const U8*)pw, pw_len, salt, salt_len, rounds,
                         keyiv_sb->data, keyiv_len, err_out)) {
@@ -599,7 +544,6 @@ cmk_openssh_decrypt_private_blob(const U8 *ciphername, size_t ciphername_len,
     * For CTR mode: ciphertext length == plaintext length.
     */
    plain_sb = secret_buffer_new(enc_len, NULL);
-   if (!plain_sb) { *err_out = "Out of memory (plaintext)"; goto cleanup; }
 
    ctx = EVP_CIPHER_CTX_new();
    if (!ctx) { *err_out = "EVP_CIPHER_CTX_new failed"; goto cleanup; }
@@ -668,8 +612,9 @@ cmk_parse_openssh_bcrypt_kdfopts(const U8 *kdfopts, size_t kdfopts_len,
 /* Only CTR for now (easy to extend) */
 static const EVP_CIPHER *
 cmk_openssh_cipher_by_name(const U8 *ciphername, size_t ciphername_len,
-                           int *key_len_out, int *iv_len_out, int *blk_len_out) {
-   if (ciphername_len == 9 && memcmp(ciphername, "aes256-ctr", 9) == 0) {
+                           int *key_len_out, int *iv_len_out, int *blk_len_out)
+{
+   if (ciphername_len == 10 && memcmp(ciphername, "aes256-ctr", 10) == 0) {
       const EVP_CIPHER *c = EVP_aes_256_ctr();
       if (!c) return NULL;
       if (key_len_out) *key_len_out = EVP_CIPHER_key_length(c);
@@ -677,6 +622,7 @@ cmk_openssh_cipher_by_name(const U8 *ciphername, size_t ciphername_len,
       if (blk_len_out) *blk_len_out = EVP_CIPHER_block_size(c);
       return c;
    }
+   warn("# unhandled cipher '%*s'", (int)ciphername_len, ciphername);
 
    /* TODO later:
     * - aes128-ctr, aes192-ctr
@@ -684,22 +630,6 @@ cmk_openssh_cipher_by_name(const U8 *ciphername, size_t ciphername_len,
     * - chacha20-poly1305@openssh.com (OpenSSH special)
     */
    return NULL;
-}
-
-/* Derive `out_len` bytes from pass/salt using OpenSSH bcrypt_pbkdf.
- * Return true on success, false on failure (err_out set).
- *
- * SECURITY: output contains key material; caller should store it in secret_buffer.
- */
-static bool
-cmk_bcrypt_pbkdf(const U8 *pass, size_t pass_len,
-                 const U8 *salt, size_t salt_len,
-                 uint32_t rounds,
-                 U8 *out, size_t out_len,
-                 const char **err_out) {
-   (void)pass; (void)pass_len; (void)salt; (void)salt_len; (void)rounds; (void)out; (void)out_len;
-   *err_out = "bcrypt_pbkdf not implemented yet";
-   return false;
 }
 
 /* Read big-endian u32 from SSH wire format */
@@ -791,3 +721,4 @@ cmk_curve_nid_from_ssh_name(const U8 *name, size_t name_len) {
    return NID_undef;
 }
 
+#include "cmk_bcrypt_pbkdf.c"

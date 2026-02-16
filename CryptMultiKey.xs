@@ -283,7 +283,7 @@ decrypt(pkey, enc)
       cmk_symmetric_decrypt(enc, cmk_hkdf(enc, skey_buf), secret);
       PUSHs(secret_ref);
 
-MODULE =  Crypt::MultiKey               PACKAGE = Crypt::MultiKey::Coffer
+MODULE = Crypt::MultiKey               PACKAGE = Crypt::MultiKey::Coffer
 
 BOOT:
    HV *stash= gv_stashpvs("Crypt::MultiKey", 1);
