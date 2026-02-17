@@ -117,18 +117,15 @@ PEM
          call has_private => T;
       },
       'private key');
-   {
-      my $todo= todo "Need to implement SSH pbkdf algorithms";
-      is(Crypt::MultiKey::PKey->load(\$ssh_private_encrypted),
-         object {
-            call has_public => T;
-            call has_private => F;
-            call private_encrypted => $ssh_private_encrypted;
-            call [ decrypt_private => 'test' ], T;
-            call has_private => T;
-         },
-         'private key encrypted');
-   }
+   is(Crypt::MultiKey::PKey->load(\$ssh_private_encrypted),
+      object {
+         call has_public => T;
+         call has_private => F;
+         call private_encrypted => $ssh_private_encrypted;
+         call [ decrypt_private => 'test' ], T;
+         call has_private => T;
+      },
+      'private key encrypted');
 };
 
 done_testing;

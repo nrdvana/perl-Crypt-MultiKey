@@ -297,7 +297,7 @@ cmk_pkey_import_openssh_privkey(cmk_pkey *pk, const U8 *data, STRLEN data_len,
                                                   &err);
       if (!plain_sb)
          croak("Failed to decrypt OpenSSH private key: %s", err);
-
+//      warn("# decrypted privblob %ld bytes into %ld bytes of 'inner'\n", (long)privblob_len, (long)plain_sb->len);
       inner.pos = plain_sb->data;
       inner.lim = plain_sb->data + plain_sb->len;
    }
@@ -495,6 +495,7 @@ cmk_openssh_decrypt_private_blob(const U8 *ciphername, size_t ciphername_len,
                                  const U8 *enc, size_t enc_len,
                                  const U8 *pw, size_t pw_len,
                                  const char **err_out) {
+   const char *err= NULL;
    const EVP_CIPHER *cipher = NULL;
    EVP_CIPHER_CTX *ctx = NULL;
 
@@ -510,103 +511,76 @@ cmk_openssh_decrypt_private_blob(const U8 *ciphername, size_t ciphername_len,
 
    int outl1 = 0, outl2 = 0;
 
-   /* OpenSSH encrypted keys typically: kdfname="bcrypt" */
-   if (!(kdfname_len == 6 && memcmp(kdfname, "bcrypt", 6) == 0)) {
-      *err_out = "Unsupported OpenSSH KDF (expected bcrypt)";
-      return NULL;
-   }
-
    cipher = cmk_openssh_cipher_by_name(ciphername, ciphername_len, &key_len, &iv_len, &blk_len);
    if (!cipher) {
       *err_out = "Unsupported OpenSSH cipher";
       return NULL;
    }
 
-   if (!cmk_parse_openssh_bcrypt_kdfopts(kdfopts, kdfopts_len, &salt, &salt_len, &rounds, err_out))
-      return NULL;
+   /* OpenSSH encrypted keys typically have kdfname="bcrypt" */
+   if (kdfname_len == 6 && memcmp(kdfname, "bcrypt", 6) == 0) {
+      /* Parse OpenSSH bcrypt kdfoptions.
+       * kdfoptions is an SSH string containing: string salt; uint32 rounds;
+       */
+      secret_buffer_parse p;
+      memset(&p, 0, sizeof(p));
+      p.pos = kdfopts;
+      p.lim = kdfopts + kdfopts_len;
 
-   if (rounds < 1) {
-      *err_out = "Invalid bcrypt rounds";
-      return NULL;
+      if (!cmk_parse_ssh_string(&p, &salt, &salt_len)
+         || !cmk_parse_uint32(&p, &rounds))
+         GOTO_CLEANUP_CROAK("Error parsing bcrypt kdfoptions");
+
+      /* Derive key+iv into a secret buffer */
+      keyiv_len = key_len + iv_len;
+      keyiv_sb = secret_buffer_new(keyiv_len, NULL);
+      keyiv_sb->len= keyiv_len;
+      /* Run bcrypt on the password and salt to produce the key & iv */
+      if (!cmk_bcrypt_pbkdf((const U8*)pw, pw_len, salt, salt_len, rounds,
+                        keyiv_sb->data, keyiv_len, &err))
+         goto cleanup;
    }
-
-   keyiv_len = (size_t)key_len + (size_t)iv_len;
-
-   /* Derive key+iv into a secret buffer */
-   keyiv_sb = secret_buffer_new(keyiv_len, NULL);
-
-   if (!cmk_bcrypt_pbkdf((const U8*)pw, pw_len, salt, salt_len, rounds,
-                        keyiv_sb->data, keyiv_len, err_out)) {
-      goto cleanup;
+   else {
+      warn("# unsupported OpenSSH key derivation function '%.*s'", (int)kdfname_len, kdfname);
+      GOTO_CLEANUP_CROAK("unsupported OpenSSH key derivation function (currently only bcrypt is implemented)");
    }
 
    /* Allocate plaintext buffer in secret memory.
     * For CTR mode: ciphertext length == plaintext length.
     */
    plain_sb = secret_buffer_new(enc_len, NULL);
+   plain_sb->len= enc_len;
 
    ctx = EVP_CIPHER_CTX_new();
-   if (!ctx) { *err_out = "EVP_CIPHER_CTX_new failed"; goto cleanup; }
+   if (!ctx) GOTO_CLEANUP_CROAK("EVP_CIPHER_CTX_new failed");
 
    if (EVP_DecryptInit_ex(ctx, cipher, NULL,
                          keyiv_sb->data,
-                         keyiv_sb->data + key_len) != 1) {
-      *err_out = "EVP_DecryptInit_ex failed";
-      goto cleanup;
-   }
+                         keyiv_sb->data + key_len) != 1)
+      GOTO_CLEANUP_CROAK("EVP_DecryptInit_ex failed");
 
-   if (EVP_DecryptUpdate(ctx, plain_sb->data, &outl1, enc, (int)enc_len) != 1) {
-      *err_out = "EVP_DecryptUpdate failed";
-      goto cleanup;
-   }
+   if (EVP_DecryptUpdate(ctx, plain_sb->data, &outl1, enc, (int)enc_len) != 1)
+      GOTO_CLEANUP_CROAK("EVP_DecryptUpdate failed");
 
    /* CTR produces no padding; Final should succeed and usually outputs 0 bytes. */
-   if (EVP_DecryptFinal_ex(ctx, plain_sb->data + outl1, &outl2) != 1) {
+   if (EVP_DecryptFinal_ex(ctx, plain_sb->data + outl1, &outl2) != 1)
       /* Wrong password *might* still pass CTR decryption; we rely on checkints later.
-       * A Final failure here is more “cipher misuse” than “wrong pw”, but treat as error.
+       * A Final failure here is more “cipher misuse” than “wrong pw”.
        */
-      *err_out = "EVP_DecryptFinal_ex failed";
-      goto cleanup;
-   }
+      GOTO_CLEANUP_CROAK("EVP_DecryptFinal_ex failed");
 
    /* Adjust length if Final produced bytes (shouldn't for CTR) */
-   if ((size_t)(outl1 + outl2) != enc_len) {
+   if ((size_t)(outl1 + outl2) != enc_len)
       /* Keep strict; if you add CBC later, you’ll want different logic */
-      *err_out = "Unexpected decrypted length";
-      goto cleanup;
-   }
+      GOTO_CLEANUP_CROAK("Unexpected decrypted length");
 
 cleanup:
    if (ctx) EVP_CIPHER_CTX_free(ctx);
-
-   if (*err_out) {
+   if (err) {
+      *err_out= err;
       return NULL;
    }
    return plain_sb;
-}
-
-/* Parse OpenSSH bcrypt kdfoptions:
- * kdfoptions is an SSH string containing: string salt; uint32 rounds;
- */
-static bool
-cmk_parse_openssh_bcrypt_kdfopts(const U8 *kdfopts, size_t kdfopts_len,
-                                const U8 **salt_out, size_t *salt_len_out,
-                                uint32_t *rounds_out,
-                                const char **err_out) {
-   secret_buffer_parse p;
-   memset(&p, 0, sizeof(p));
-   p.pos = kdfopts;
-   p.lim = kdfopts + kdfopts_len;
-
-   if (!cmk_parse_ssh_string(&p, salt_out, salt_len_out)) {
-      *err_out = p.error ? p.error : "Truncated bcrypt kdfoptions (salt)";
-      return false;
-   }
-   if (!cmk_parse_uint32(&p, rounds_out)) {
-      *err_out = p.error ? p.error : "Truncated bcrypt kdfoptions (rounds)";
-      return false;
-   }
-   return true;
 }
 
 /* Only CTR for now (easy to extend) */
@@ -622,7 +596,7 @@ cmk_openssh_cipher_by_name(const U8 *ciphername, size_t ciphername_len,
       if (blk_len_out) *blk_len_out = EVP_CIPHER_block_size(c);
       return c;
    }
-   warn("# unhandled cipher '%*s'", (int)ciphername_len, ciphername);
+   warn("# unhandled cipher '%.*s'", (int)ciphername_len, ciphername);
 
    /* TODO later:
     * - aes128-ctr, aes192-ctr

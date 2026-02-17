@@ -14,31 +14,18 @@
 
 /* ---------- utilities ---------- */
 
-#ifndef MINIMUM
-# define MINIMUM(a,b) (((a) < (b)) ? (a) : (b))
-#endif
-
-static void
-cmk_explicit_bzero(void *p, size_t n) {
-   if (p && n)
-      OPENSSL_cleanse(p, n);
-}
-
 static bool
-cmk_sha512(uint8_t out[64], const uint8_t *in, size_t in_len, const char **err_out) {
-   EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+cmk_sha512(U8 out[64], const U8 *in, size_t in_len) {
+   bool success;
    unsigned int olen = 0;
-   if (!ctx) { *err_out = "EVP_MD_CTX_new failed"; return false; }
-   if (EVP_DigestInit_ex(ctx, EVP_sha512(), NULL) != 1 ||
-       EVP_DigestUpdate(ctx, in, in_len) != 1 ||
-       EVP_DigestFinal_ex(ctx, out, &olen) != 1) {
-      EVP_MD_CTX_free(ctx);
-      *err_out = "SHA512 digest failed";
-      return false;
-   }
+   EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+   if (!ctx) return false;
+   success= EVP_DigestInit_ex(ctx, EVP_sha512(), NULL) == 1
+         && EVP_DigestUpdate(ctx, in, in_len) == 1
+         && EVP_DigestFinal_ex(ctx, out, &olen) == 1
+         && olen == 64;
    EVP_MD_CTX_free(ctx);
-   if (olen != 64) { *err_out = "SHA512 digest length mismatch"; return false; }
-   return true;
+   return success;
 }
 
 /* ---------- minimal OpenBSD-style Blowfish (EksBlowfish helpers) ---------- */
@@ -61,7 +48,7 @@ static const uint32_t cmk_blf_init_P[18] = {
    0xc0ac29b7L, 0xc97c50ddL, 0x3f84d5b5L, 0xb5470917L, 0x9216d5d9L, 0x8979fb1bL
 };
 
-/* S-boxes: long but straightforward. */
+/* S-boxes */
 static const uint32_t cmk_blf_init_S[4][256] =
 {{
    0xd1310ba6L, 0x98dfb5acL, 0x2ffd72dbL, 0xd01adfb7L, 0xb8e1afedL, 0x6a267e96L,
@@ -256,16 +243,20 @@ cmk_blf_F(const cmk_blf_ctx *c, uint32_t x) {
 
 static void
 cmk_blf_encipher(cmk_blf_ctx *c, uint32_t *xl, uint32_t *xr) {
-   uint32_t Xl = *xl, Xr = *xr, tmp;
-   Xl ^= c->P[0];
-   for (int i = 1; i <= 16; i++) {
-      Xr ^= cmk_blf_F(c, Xl) ^ c->P[i];
-      tmp = Xl; Xl = Xr; Xr = tmp;
+   uint32_t L = *xl, R = *xr;
+   L ^= c->P[0];
+   /* Two rounds per iteration */
+   for (int i = 1; i < 16; i += 2) {
+      R ^= cmk_blf_F(c, L) ^ c->P[i];
+      L ^= cmk_blf_F(c, R) ^ c->P[i + 1];
    }
-   tmp = Xl; Xl = Xr; Xr = tmp;
-   Xr ^= c->P[17];
-   *xl = Xl;
-   *xr = Xr;
+   /* Final swap + last P */
+   L ^= R;
+   R ^= L;
+   L ^= R ^ c->P[17];
+
+   *xl = L;
+   *xr = R;
 }
 
 static void
@@ -385,9 +376,9 @@ cmk_bcrypt_hash(const uint8_t sha2pass[64], const uint8_t sha2salt[64], uint8_t 
       out[4 * i + 0] = (cdata[i]      ) & 0xFF;
    }
 
-   cmk_explicit_bzero(ciphertext, sizeof(ciphertext));
-   cmk_explicit_bzero(cdata, sizeof(cdata));
-   cmk_explicit_bzero(&state, sizeof(state));
+   OPENSSL_cleanse(ciphertext, sizeof(ciphertext));
+   OPENSSL_cleanse(cdata, sizeof(cdata));
+   OPENSSL_cleanse(&state, sizeof(state));
 }
 
 /* ---------- public API: cmk_bcrypt_pbkdf ---------- */
@@ -403,6 +394,7 @@ cmk_bcrypt_pbkdf(const uint8_t *pass, size_t pass_len,
                  uint32_t rounds,
                  uint8_t *out, size_t out_len,
                  const char **err_out) {
+   const char *err= NULL;
    uint8_t sha2pass[64];
    uint8_t sha2salt[64];
    uint8_t block[CMK_BCRYPT_HASHSIZE];
@@ -412,26 +404,28 @@ cmk_bcrypt_pbkdf(const uint8_t *pass, size_t pass_len,
    size_t i, j, amt, stride;
    uint32_t count;
    size_t orig_out_len = out_len;
-
-   if (!err_out) return false;
-   *err_out = NULL;
-
+#if 0
+   warn("# bcrypt_pbkdf pass_len=%ld salt_len=%ld rounds=%ld out_len=%ld\n",
+         (long)pass_len, (long)salt_len, (long)rounds, (long)out_len);
+#endif
    /* Match OpenBSD sanity checks. */
-   if (rounds < 1) { *err_out = "Invalid bcrypt rounds"; return false; }
-   if (pass_len == 0 || salt_len == 0 || out_len == 0) { *err_out = "Invalid input (empty)"; return false; }
-   if (out_len > (size_t)CMK_BCRYPT_HASHSIZE * (size_t)CMK_BCRYPT_HASHSIZE) {
-      *err_out = "Requested key too long";
-      return false;
-   }
-   if (salt_len > (1U << 20)) { *err_out = "Salt too long"; return false; }
+   if (rounds < 1)
+      GOTO_CLEANUP_CROAK("Invalid bcrypt rounds");
+   if (pass_len == 0 || salt_len == 0 || out_len == 0)
+      GOTO_CLEANUP_CROAK("Invalid input (empty)");
+   if (out_len > (size_t)CMK_BCRYPT_HASHSIZE * (size_t)CMK_BCRYPT_HASHSIZE)
+      GOTO_CLEANUP_CROAK("Requested key too long");
+   if (salt_len > (1U << 20))
+      GOTO_CLEANUP_CROAK("Salt too long");
 
    countsalt = (uint8_t*)OPENSSL_malloc(salt_len + 4);
-   if (!countsalt) { *err_out = "Out of memory"; return false; }
+   if (!countsalt) GOTO_CLEANUP_CROAK("Out of memory");
    memset(countsalt, 0, salt_len + 4);
    memcpy(countsalt, salt, salt_len);
 
    /* Collapse password: sha2pass = SHA512(pass) */
-   if (!cmk_sha512(sha2pass, pass, pass_len, err_out)) goto fail;
+   if (!cmk_sha512(sha2pass, pass, pass_len))
+      GOTO_CLEANUP_CROAK("sha512 failed");
 
    /* Output mixing parameters */
    stride = (out_len + sizeof(block) - 1) / sizeof(block);
@@ -445,21 +439,23 @@ cmk_bcrypt_pbkdf(const uint8_t *pass, size_t pass_len,
       countsalt[salt_len + 3] = (count      ) & 0xFF;
 
       /* first round: sha2salt = SHA512(countsalt) */
-      if (!cmk_sha512(sha2salt, countsalt, salt_len + 4, err_out)) goto fail;
+      if (!cmk_sha512(sha2salt, countsalt, salt_len + 4))
+         GOTO_CLEANUP_CROAK("sha512 failed");
 
       cmk_bcrypt_hash(sha2pass, sha2salt, tmp);
       memcpy(block, tmp, sizeof(block));
 
       for (i = 1; i < rounds; i++) {
          /* subsequent rounds: sha2salt = SHA512(prev tmp) */
-         if (!cmk_sha512(sha2salt, tmp, sizeof(tmp), err_out)) goto fail;
+         if (!cmk_sha512(sha2salt, tmp, sizeof(tmp)))
+            GOTO_CLEANUP_CROAK("sha512 failed");
          cmk_bcrypt_hash(sha2pass, sha2salt, tmp);
          for (j = 0; j < sizeof(block); j++)
             block[j] ^= tmp[j];
       }
 
       /* pbkdf2 deviation: output key material non-linearly (mixed) */
-      amt = MINIMUM(amt, out_len);
+      if (out_len < amt) amt = out_len;
       for (i = 0; i < amt; i++) {
          size_t dest = i * stride + (count - 1);
          if (dest >= orig_out_len)
@@ -469,19 +465,25 @@ cmk_bcrypt_pbkdf(const uint8_t *pass, size_t pass_len,
       out_len -= i;
    }
 
-   cmk_explicit_bzero(sha2pass, sizeof(sha2pass));
-   cmk_explicit_bzero(sha2salt, sizeof(sha2salt));
-   cmk_explicit_bzero(block, sizeof(block));
-   cmk_explicit_bzero(tmp, sizeof(tmp));
-   OPENSSL_free(countsalt);
+cleanup:
+   OPENSSL_cleanse(sha2pass, sizeof(sha2pass));
+   OPENSSL_cleanse(sha2salt, sizeof(sha2salt));
+   OPENSSL_cleanse(block, sizeof(block));
+   OPENSSL_cleanse(tmp, sizeof(tmp));
+   if (countsalt)
+      OPENSSL_clear_free(countsalt, salt_len+4);
+   if (err) {
+      *err_out= err;
+      return false;
+   }
+#if 0
+   {int i;
+   fprintf(stderr, "# bcrypt input: pass=\"%.*s\" rounds=%d salt=", (int)pass_len, pass, rounds);
+   for (i=0; i < salt_len; i++) fprintf(stderr, "%02x", salt[i]);
+   fprintf(stderr, "\n# bcrypt output: ");
+   for (i=0; i < 48; i++) fprintf(stderr, "%02x", out[i]);
+   fprintf(stderr, "\n");
+   }
+#endif
    return true;
-
-fail:
-   cmk_explicit_bzero(sha2pass, sizeof(sha2pass));
-   cmk_explicit_bzero(sha2salt, sizeof(sha2salt));
-   cmk_explicit_bzero(block, sizeof(block));
-   cmk_explicit_bzero(tmp, sizeof(tmp));
-   if (countsalt) OPENSSL_free(countsalt);
-   if (!*err_out) *err_out = "bcrypt_pbkdf failed";
-   return false;
 }
