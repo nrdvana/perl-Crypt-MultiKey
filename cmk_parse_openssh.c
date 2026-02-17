@@ -5,7 +5,7 @@ static bool cmk_parse_bytes_eq(secret_buffer_parse *parse, const char *literal, 
 static int cmk_curve_nid_from_ssh_name(const U8 *name, size_t name_len);
 static const EVP_CIPHER *cmk_openssh_cipher_by_name(const U8 *ciphername, size_t ciphername_len,
                            int *key_len_out, int *iv_len_out, int *blk_len_out);
-static EVP_PKEY *cmk_parse_openssh_privkey_inner(secret_buffer_parse *parse);
+static bool cmk_parse_openssh_privkey_inner(secret_buffer_parse *parse, cmk_pkey *pk);
 static EVP_PKEY *cmk_parse_openssh_rsa_priv_record(secret_buffer_parse *parse);
 static EVP_PKEY *cmk_parse_openssh_ecdsa_priv_record(secret_buffer_parse *parse);
 static EVP_PKEY *cmk_parse_openssh_ed25519_priv_record(secret_buffer_parse *parse);
@@ -231,8 +231,6 @@ cmk_pkey_import_openssh_privkey(cmk_pkey *pk, const U8 *data, STRLEN data_len,
                                 const char *pw, STRLEN pw_len
 ) {
    const char *err = NULL;
-   EVP_PKEY *pkey = NULL;
-   EVP_PKEY *pub0 = NULL;
 
    secret_buffer_parse outer, inner;
    const U8 *ciphername=NULL, *kdfname=NULL, *kdfopts=NULL;
@@ -301,15 +299,12 @@ cmk_pkey_import_openssh_privkey(cmk_pkey *pk, const U8 *data, STRLEN data_len,
       inner.pos = plain_sb->data;
       inner.lim = plain_sb->data + plain_sb->len;
    }
-   pkey = cmk_parse_openssh_privkey_inner(&inner);
-   if (!pkey)
-      croak("Failed to parse OpenSSH private key (wrong password, or corrupt file)");
-   if (*pk) EVP_PKEY_free(*pk);
-   *pk = pkey;
+   if (!cmk_parse_openssh_privkey_inner(&inner, pk))
+      croak("Failed to parse OpenSSH private key: %s", inner.error);
 }
 
-static EVP_PKEY *
-cmk_parse_openssh_privkey_inner(secret_buffer_parse *parse) {
+bool
+cmk_parse_openssh_privkey_inner(secret_buffer_parse *parse, cmk_pkey *pk) {
    uint32_t c1, c2;
    const U8 *keytype;
    size_t keytype_len;
@@ -319,7 +314,7 @@ cmk_parse_openssh_privkey_inner(secret_buffer_parse *parse) {
       return NULL;
 
    if (c1 != c2) {
-      parse->error = "OpenSSH checkints mismatch (wrong passphrase or corrupt key)";
+      parse->error = "checkint mismatch (wrong passphrase or corrupt key file)";
       return NULL;
    }
 
@@ -342,10 +337,11 @@ cmk_parse_openssh_privkey_inner(secret_buffer_parse *parse) {
 
    if (!pkey) {
       if (!parse->error) parse->error = "Failed to parse OpenSSH private key record";
-      return NULL;
+      return false;
    }
 
-   /* comment */
+   /* ignore comment for now */
+#if 0
    {
       const U8 *comment;
       size_t comment_len;
@@ -353,11 +349,12 @@ cmk_parse_openssh_privkey_inner(secret_buffer_parse *parse) {
          EVP_PKEY_free(pkey);
          return NULL;
       }
-      /* ignore comment for now */
    }
-
-   /* padding may follow; optional validation could be added later */
-   return pkey;
+#endif
+   /* padding may follow; optional validation could be added */
+   if (*pk) EVP_PKEY_free(*pk);
+   *pk= pkey;
+   return true;
 }
 
 static EVP_PKEY *
