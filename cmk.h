@@ -29,6 +29,8 @@ extern cmk_pkey* cmk_pkey_from_magic(SV *sv, int flags);
 extern cmk_pkey* cmk_get_pubkey(SV *objref);
 extern cmk_pkey* cmk_get_privkey(SV *objref);
 
+extern void cmk_pkey_get_algorithm_name(cmk_pkey *pk, SV *out);
+
 /* Create a new public/private keypair, store it into MAGIC on the ::PKey object,
  */
 extern void cmk_pkey_keygen(cmk_pkey *pk, const char *type_and_params);

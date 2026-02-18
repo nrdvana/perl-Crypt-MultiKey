@@ -131,6 +131,15 @@ symmetric_decrypt(params, aes_key, secret_out=NULL)
 MODULE = Crypt::MultiKey                PACKAGE = Crypt::MultiKey::PKey
 
 void
+algorithm(pkey)
+   maybe_cmk_pkey *pkey
+   PPCODE:
+      ST(0)= sv_newmortal();
+      if (pkey && *pkey)
+         cmk_pkey_get_algorithm_name(pkey, ST(0));
+      XSRETURN(1);
+
+void
 _keygen(pkey, type)
    auto_cmk_pkey *pkey
    const char *type

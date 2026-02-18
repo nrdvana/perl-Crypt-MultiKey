@@ -15,8 +15,13 @@
 #include <openssl/kdf.h>
 #include <openssl/bio.h>
 #include <openssl/buffer.h>
+#include <openssl/objects.h>
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
 #include <openssl/decoder.h>
+#include <openssl/core_names.h>
+#else
+/* 1.1.1 needs EC headers */
+#include <openssl/ec.h>
 #endif
 
 #include <string.h>
@@ -256,6 +261,60 @@ cleanup:
    *dest= clone;
 }
 
+/* Store a name of the algorithm (and it's major parameter, if relevant) into 'out'.
+ * This attempts to be round-trip compatible with cmk_pkey_keygen_params.
+ */
+void cmk_pkey_get_algorithm_name(cmk_pkey *pk, SV *out) {
+   if (!pk || !*pk) {
+      sv_setsv(out, &PL_sv_undef);
+   }
+   else {
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+      const char *alg = EVP_PKEY_get0_type_name(*pk);
+      if (!alg)
+         alg = "UNKNOWN";
+
+      if (EVP_PKEY_is_a(*pk, "RSA") || EVP_PKEY_is_a(*pk, "DSA") || EVP_PKEY_is_a(*pk, "DH")) {
+         sv_setpvf(out, "%s:bits=%d", alg, EVP_PKEY_get_bits(*pk));
+      }
+      else if (EVP_PKEY_is_a(*pk, "EC")) {
+         char curve[80];
+         size_t len = sizeof(curve);
+         if (EVP_PKEY_get_utf8_string_param(
+               *pk, OSSL_PKEY_PARAM_GROUP_NAME,
+               curve, sizeof(curve), &len))
+         {
+            sv_setpvf(out, "%s:curve=%s", alg, curve);
+         } else {
+            sv_setpv(out, alg);
+         }
+      }
+#else /* OpenSSL 1.1.1 */
+      int type = EVP_PKEY_base_id(*pk);
+      const char *alg = OBJ_nid2sn(type);
+      if (!alg)
+         alg = "UNKNOWN";
+
+      if (type == EVP_PKEY_RSA || type == EVP_PKEY_DSA || type == EVP_PKEY_DH) {
+         sv_setpvf(out, "%s:bits=%d", alg, EVP_PKEY_bits(*pk));
+      }
+      else if (type == EVP_PKEY_EC) {
+         EC_KEY *ec = EVP_PKEY_get0_EC_KEY(*pk);
+         const EC_GROUP *grp = ec? EC_KEY_get0_group(ec) : NULL;
+         int nid = grp? EC_GROUP_get_curve_name(grp) : NID_undef;
+         if (nid != NID_undef) {
+            sv_setpvf(out, "%s:curve=%s", alg, OBJ_nid2sn(nid));
+         } else {
+            sv_setpv(out, alg);
+         }
+      }
+#endif
+      else { /* "ED25519", "ED448", "X25519", "X448" */
+         sv_setpv(out, alg);
+      }
+   }
+}
+
 /* Public/Private Key generation based on string parameters.
  * I'm attempting to use the same names as OpenSSL3 but implement it in 1.1 compatible code.
  */
@@ -332,7 +391,7 @@ cmk_pkey_keygen_params(cmk_pkey *pk, const char *type, const char **params, int 
          int len= eq? eq - p : strlen(p);
          const char *value= eq? eq + 1 : "";
          if (len == 5 && memcmp(p, "group", 5) == 0
-            || len == 16 && memcmp(p, "ec_paramgen_curve", 16) == 0
+            || len == 5 && memcmp(p, "curve", 5) == 0
          ) {
             int curve_nid = OBJ_txt2nid(value);
             if (curve_nid == NID_undef)
