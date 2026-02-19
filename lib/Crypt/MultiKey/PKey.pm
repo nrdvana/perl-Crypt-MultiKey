@@ -1,4 +1,7 @@
 package Crypt::MultiKey::PKey;
+# VERSION
+# ABSTRACT: Object representing a Public/Private key pair (OpenSSL EVP_PKEY)
+
 use strict;
 use warnings;
 use Carp;
@@ -34,13 +37,13 @@ use Crypt::MultiKey;
 
 =head1 DESCRIPTION
 
-C<Crypt::MultiKey::PKey> is a public/private keypair where the public half is always available,
+C<Crypt::MultiKey::PKey> is a public/private key pair where the public half is always available,
 but the private half can be encrypted or removed.  The PKey can always L</encrypt> data, but the
 private half must be avalable to L</decrypt> that data again.
 
 =attribute algorithm
 
-The type of public-key cryptography used.  The default is C<'x25519'>.
+The type of public-key cryptography used.  This is selected during L</generate>.
 
 =attribute fingerprint
 
@@ -63,8 +66,8 @@ will silently query the SSH agent for whether the required SSH key is available.
 =attribute has_public
 
 Boolean; whether this key currently has the public half loaded.  This will be true except when
-loaded from a PEM file which only contained an encrypted private key, and the password hasn't yet
-been supplied.
+loaded from a PEM file which only contained an encrypted private key, and the password hasn't
+yet been supplied.
 
 =attribute has_private
 
@@ -73,14 +76,14 @@ L</decrypt_private>.
 
 =attribute public
 
-Export the public key in ASN.1 SubjectPublicKeyInfo structure defined in RFC5280, then encode
-as Base64.
+Export the public key in ASN.1 SubjectPublicKeyInfo structure defined in RFC5280, encoded as
+Base64.  This is the same format as found in the PEM body of public keys written by OpenSSL.
 
 =attribute private
 
 Export the private key as PKCS#8 (unencrypted) stored in a L<SecretBuffer|Crypt::SecretBuffer>
 as raw ASN.1 bytes.  This can be combined with L<Crypt::SecretBuffer::PEM> to produce a standard
-OpenSSL PEM text.
+OpenSSL PEM private key.
 
 =attribute private_encrypted
 
@@ -90,8 +93,6 @@ L</encrypt_private> method, it will always be a PKCS#8 ciphertext encoded as BAS
 PEM wrapper.
 
 =cut
-
-sub type { $_[0]{type} }
 
 sub fingerprint {
    $_[0]{fingerprint} ||= do {
@@ -456,8 +457,8 @@ key.
 
 Supported types and aliases:
 
-  EC:group=X
-  secp256k1   => EC:group=secp256k1
+  EC:curve=X
+  secp256k1   => EC:curve=secp256k1
   
   ed25519
   x25519
@@ -474,7 +475,7 @@ our %type_alias= (
    rsa1024   => 'RSA:bits=1024',
    rsa2048   => 'RSA:bits=2048',
    rsa4096   => 'RSA:bits=4096',
-   secp256k1 => 'EC:group=secp256k1',
+   secp256k1 => 'EC:curve=secp256k1',
 );
 sub generate {
    my ($self, $type)= @_;

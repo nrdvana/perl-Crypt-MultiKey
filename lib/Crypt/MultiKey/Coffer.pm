@@ -1,4 +1,7 @@
 package Crypt::MultiKey::Coffer;
+# VERSION
+# ABSTRACT: Encrypted container that can be unlocked with combinations of keys
+
 use strict;
 use warnings;
 use Carp;
@@ -9,26 +12,15 @@ use Crypt::SecretBuffer::PEM;
 use Crypt::MultiKey;
 use constant { KV_CONTENT_TYPE => 'application/crypt-multikey-coffer-kv' };
 
-sub _isa_pem_obj { blessed($_[0]) && $_[0]->can('headers') && $_[0]->can('content') }
-sub _isa_pow2 { $_[0] == _round_up_to_pow2($_[0]) }
-sub _isa_secret { blessed($_[0]) && $_[0]->can('unmask_to') }
-sub _isa_secret_span { blessed($_[0]) && $_[0]->can('subspan') }
+sub _isa_pem_obj { blessed($_[0]) && $_[0]->isa('Crypt::SecretBuffer::PEM') }
+sub _isa_secret { blessed($_[0]) && $_[0]->isa('Crypt::SecretBuffer') }
+sub _isa_secret_span { blessed($_[0]) && $_[0]->isa('Crypt::SecretBuffer::Span') }
 sub _coerce_secret {
    my $val= shift;
    return $val if _isa_secret($val) || _isa_secret_span($val);
    croak "Expected a Crypt::SecretBuffer, Crypt::SecretBuffer::Span, or something that can stringify to bytes"
       if ref $val && !blessed($val);
    return secret($val);
-}
-sub _round_up_to_pow2 {
-   my $n= $_[0] - 1;
-   $n |= $n >> 1;
-   $n |= $n >> 2;
-   $n |= $n >> 4;
-   $n |= $n >> 8;
-   $n |= $n >> 16;
-   $n |= $n >> 32;
-   return $n+1;
 }
 
 =head1 SYNOPSIS
@@ -838,7 +830,7 @@ sub _export_pem {
    );
    # PEM doesn't define a character encoding for headers, but for this use of PEM, UTF-8 seems
    # to be the most sensible encoding.  Try to coerce things to UTF-8 so that it "just works".
-   for (grep /[^\x00-\x7F]/, @header_kv) {
+   for (grep defined && /[^\x00-\x7F]/, @header_kv) {
       utf8::decode($_); # in case the string was already encoded
       utf8::encode($_);
    }

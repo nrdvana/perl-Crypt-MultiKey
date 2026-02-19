@@ -1,6 +1,6 @@
 package Crypt::MultiKey;
 # VERSION
-# ABSTRACT: Encrypt secrets with multiple keys, where any key can unlock them
+# ABSTRACT: Toolkit for encrypting data that can be unlocked by multiple key combinations
 
 =head1 SYNOPSIS
 
