@@ -325,7 +325,7 @@ sub _import_key {
    my ($self, $input, %options)= @_;
    my $is_pem= $input->isa("Crypt::SecretBuffer::PEM");
    delete $self->{fingerprint}; # clear cache
-   my $pass= $options{password} // $_ctor_password;
+   my $pass= defined $options{password}? $options{password} : $_ctor_password;
    # Does it look like PEM?
    if ($is_pem || span($input)->scan("-----BEGIN ")) {
       # This could be called on an existing object.  In case a key was already loaded, we need
@@ -544,7 +544,7 @@ sub export_pem {
 
 sub save {
    my ($self, $path)= @_;
-   $path //= $self->path;
+   $path= $self->path unless defined $path;
    defined $path or croak "No 'path' specified for saving key";
    $self->export->save_file($path, "rename");
    $self->path($path) if !defined $self->path;

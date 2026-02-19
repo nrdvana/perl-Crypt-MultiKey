@@ -22,7 +22,7 @@ jobs:
         uses: shogo82148/actions-setup-perl@v1
         with:
           perl-version: ${{ matrix.perl }}
-          enable-threads: ${{ matrix.threads }}
+          multi-thread: ${{ matrix.threads }}
       - name: Install deps
         run: cpm install -g
       - name: Build

@@ -8,11 +8,6 @@
  * when stored in MAGIC.  The MAGIC's pointer *is* the "struct" */
 typedef EVP_PKEY* cmk_pkey;
 
-/* Coerce an SV to be a PV with length pre-set to 'size', ready for writing.
- * Return the SV's buffer.
- */
-extern char * cmk_prepare_sv_buffer(SV *sv, size_t size);
-
 /* Store a text-notation UUID / GUID into buf_sv, enlarging it as needed. */
 extern SV * cmk_generate_uuid_v4(SV *buf_sv);
 

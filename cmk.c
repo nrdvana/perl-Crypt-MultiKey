@@ -1,6 +1,7 @@
 #include "EXTERN.h"
 #include "perl.h"
 #include "XSUB.h"
+#define NEED_mg_findext
 #include "ppport.h"
 
 #include "CryptMultiKey_config.h"
@@ -47,26 +48,29 @@
 #define CMK_KDF_SALT_LEN 32
 #define CMK_RSA_KEYMATERIAL_LEN 32
 
+/* I am only using foldEQ as a cross-platform stricmp for parsing user parameters,
+ * so this should be fine for Perl < 5.14 */
+#ifndef foldEQ
+static bool shim_foldEQ(const char *s1, const char *s2, int len) {
+        for (--len; len >= 0; --len)
+                if (toLOWER(s1[len]) != toLOWER(s2[len]))
+                        return 0;
+        return 1;
+}
+#define foldEQ shim_foldEQ
+#endif
+
 /* Force a SV to be a non-shared buffer of bytes of the requested size.
  * This changes the SV length even though the bytes haven't been initialized yet.
  * It also initializes the NUL-terminator.
  */
 char* cmk_prepare_sv_buffer(SV *sv, size_t size) {
-   STRLEN len;
    char *p;
-   if (!SvOK(sv)) /* avoid "uninitialized value in subroutine" warning */
+   if (!SvOK(sv)) /* prevent "Use of uninitialized value in subroutine entry" */
       sv_setpvs(sv, "");
-   p= SvPVbyte_force(sv, len);
-   if (len < size) {
-      SvGROW(sv, size+1);
-      SvCUR_set(sv, size);
-      p= SvPVX(sv);
-      p[size]= '\0';
-   }
-   else if (len > size) {
-      SvCUR_set(sv, size);
-      p[size]= '\0';
-   }
+   p= sv_grow(sv, size+1);
+   SvCUR_set(sv, size);
+   p[size]= '\0';
    return p;
 }
 
@@ -162,7 +166,7 @@ cmk_decode_base64(const U8 *text, STRLEN text_len) {
 bool
 cmk_pkey_has_public(cmk_pkey *pkey) {
    /* any non-null EVP_PKEY will have a public half */
-   return *pkey;
+   return *pkey != NULL;
 }
 
 /* Return whether cmk_pkey has the private half loaded.

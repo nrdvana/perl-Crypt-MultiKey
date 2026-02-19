@@ -164,7 +164,7 @@ sub new_vault {
 
 sub vault {
    my ($self, $name)= @_;
-   $self->{vault}{$name} //= do {
+   $self->{vault}{$name} ||= do {
       my $path= $self->_subpath("vault-$name.json");
       return undef unless -f $path;
       Crypt::MultiKey::Vault->new_from_file($path);
@@ -182,7 +182,7 @@ sub new_key {
 
 sub key {
    my ($self, $name)= @_;
-   $self->{key}{$name} //= do {
+   $self->{key}{$name} ||= do {
       my $path= $self->_subpath("key-$name.json");
       return undef unless -f $path;
       Crypt::MultiKey::PKey->new_from_file($path);

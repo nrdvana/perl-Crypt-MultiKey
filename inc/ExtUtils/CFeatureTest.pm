@@ -49,7 +49,7 @@ sub _spew {
 
 sub _maybe_list {
    ref $_[0] eq 'ARRAY'? (grep length, @{ $_[0] })
-   : length $_[0]? ( $_[0] )
+   : defined $_[0] && length $_[0]? ( $_[0] )
    : ()
 }
 
@@ -90,7 +90,7 @@ sub compile_and_run {
    { local $/= undef; $self->{last_compile_output}= <$out_txt>; }
    close $out_txt;
 
-   unlink grep length, $srcfile, $objfile, $exefile, $outfile;
+   unlink grep defined, $srcfile, $objfile, $exefile, $outfile;
    return $success;
 }
 
@@ -104,9 +104,9 @@ $self->{config_macros}
 int main(int argc, char **argv) { return 0; }
 END_C
    for my $path (undef, @paths) {
-      if ($self->compile_and_run($code, (length $path? (include_dirs => $path) : ()))) {
-         print "Found $header".(length $path? " at $path" : '')."\n";
-         push @{$self->{include_dirs}}, $path if length $path;
+      if ($self->compile_and_run($code, (defined $path? (include_dirs => $path) : ()))) {
+         print "Found $header".(defined $path? " at $path" : '')."\n";
+         push @{$self->{include_dirs}}, $path if defined $path;
          $self->{config_headers} .= "#include <$header>\n";
          $self->{config_header_set}{$header}= 1;
          (my $macro= 'HAVE_'.uc($header)) =~ s/\W/_/;
@@ -158,13 +158,13 @@ sub feature {
          $prefix .= "#include <$_>\n" for @headers;
          # expand convenient aliases
          push @{ $p->{include_dirs} }, _maybe_list(delete $p->{-I})
-            if length $p->{-I};
+            if defined $p->{-I};
          push @{ $p->{extra_compiler_flags} }, map "-D$_", _maybe_list(delete $p->{-D})
-            if length $p->{-D};
+            if defined $p->{-D};
          push @{ $p->{extra_linker_flags} }, map "-L$_", _maybe_list(delete $p->{-L})
-            if length $p->{-L};
+            if defined $p->{-L};
          push @{ $p->{extra_linker_flags} }, map "-l$_", _maybe_list(delete $p->{-l})
-            if length $p->{-l};
+            if defined $p->{-l};
       }
       $prefix .= $self->{config_macros};
       if ($self->compile_and_run($prefix.$code, $p? (%$p) : ())) {
@@ -177,14 +177,14 @@ sub feature {
                $self->{config_header_set}{$_}= 1;
             }
          }
-         if (length $macro) {
+         if (defined $macro && length $macro) {
             print "Found feature $macro\n";
             $self->{config_macros} .= "#define $macro\n";
          }
          return 1;
       }
    }
-   print "Feature $macro unavailable\n" if length $macro;
+   print "Feature $macro unavailable\n" if defined $macro && length $macro;
    return 0;
 }
 

@@ -14,9 +14,6 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include "cmk.h"
-#ifdef TEST_CRYPT_MULTIKEY_EXHAUSTIVE
-extern void cmk_test_all_var_size_encodings();
-#endif
 
 /**********************************************************************************************\
 * XS Utils
@@ -81,14 +78,6 @@ _openssl_version_components()
       XPUSHs(sv_2mortal(newSViv(major)));
       XPUSHs(sv_2mortal(newSViv(minor)));
       XPUSHs(sv_2mortal(newSViv(patch)));
-
-#ifdef TEST_CRYPT_MULTIKEY_EXHAUSTIVE
-void
-_test_all_var_size_encodings()
-   PPCODE:
-      cmk_test_all_var_size_encodings();
-      XSRETURN_YES;
-#endif
 
 void
 generate_uuid_v4()

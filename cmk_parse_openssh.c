@@ -311,15 +311,15 @@ cmk_parse_openssh_privkey_inner(secret_buffer_parse *parse, cmk_pkey *pk) {
    EVP_PKEY *pkey = NULL;
 
    if (!cmk_parse_uint32(parse, &c1) || !cmk_parse_uint32(parse, &c2))
-      return NULL;
+      return false;
 
    if (c1 != c2) {
       parse->error = "checkint mismatch (wrong passphrase or corrupt key file)";
-      return NULL;
+      return false;
    }
 
    if (!cmk_parse_ssh_string(parse, &keytype, &keytype_len))
-      return NULL;
+      return false;
 
    if (keytype_len == 7 && memcmp(keytype, "ssh-rsa", 7) == 0) {
       pkey = cmk_parse_openssh_rsa_priv_record(parse);
@@ -332,7 +332,7 @@ cmk_parse_openssh_privkey_inner(secret_buffer_parse *parse, cmk_pkey *pk) {
    }
    else {
       parse->error = "Unsupported OpenSSH private key type";
-      return NULL;
+      return false;
    }
 
    if (!pkey) {

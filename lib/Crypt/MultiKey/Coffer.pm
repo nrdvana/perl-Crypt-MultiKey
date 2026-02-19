@@ -5,6 +5,7 @@ our $VERSION= '0.001'; # VERSION
 use strict;
 use warnings;
 use Carp;
+use version;
 use Scalar::Util qw/ blessed looks_like_number /;
 use MIME::Base64 qw/ encode_base64 decode_base64 /;
 use Crypt::SecretBuffer qw/ secret HEX BASE64 ISO8859_1 /;
