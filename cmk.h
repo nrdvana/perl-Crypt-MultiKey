@@ -63,11 +63,6 @@ extern void cmk_pkey_import_pkcs8(cmk_pkey *pk, const U8 *buf, STRLEN buf_len, c
  */
 extern void cmk_pkey_export_pkcs8(cmk_pkey *pk, const char *pass, STRLEN pw_len, int kdf_iter, SV *buf_out);
 
-/* Import a key from a PEM block by best-effort of autodetecting the format.
- * This should be able to handle most OpenSSH and OpenSSL key formats.
- */
-extern void cmk_pkey_import_pem(cmk_pkey *pk, const U8 *buf, STRLEN buf_len, const char *pw, STRLEN pw_len);
-
 /* Import a key from OpenSSH public key format (having already decoded the base64).
  */
 extern void cmk_pkey_import_openssh_pubkey(cmk_pkey *pk, const U8 *buf, STRLEN buf_len);
