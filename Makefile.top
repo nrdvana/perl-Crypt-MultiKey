@@ -4,6 +4,7 @@ BEGIN {
    %PREREQ_PM= (
       #'ExtUtils::Depends' => '0.405',
       'ExtUtils::CBuilder' => '0.2800',
+      'Crypt::SecretBuffer' => '0.018',
    );
    # If the prereqs for this script are missing,
    # write out a Makefile that tells CPAN to install them
