@@ -1,5 +1,5 @@
 package Crypt::MultiKey::Coffer;
-# VERSION
+our $VERSION= '0.001'; # VERSION
 # ABSTRACT: Encrypted container that can be unlocked with combinations of keys
 
 use strict;
