@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    name: Linux Perl ${{ matrix.perl }} threads=${{ matrix.threads }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        perl: ['latest','5.8']
+        threads: [ true, false ]
+        exclude:
+          - perl: 'latest'
+            threads: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Perl
+        uses: shogo82148/actions-setup-perl@v1
+        with:
+          perl-version: ${{ matrix.perl }}
+          enable-threads: ${{ matrix.threads }}
+      - name: Install deps
+        run: cpm install -g
+      - name: Build
+        run: perl Makefile.PL
+      - name: Test
+        run: make test TEST_VERBOSE=1
+  windows:
+    name: Windows latest Perl
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        perl: ['latest'] #,'5.40','5.30','5.20','5.10']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Perl
+        uses: shogo82148/actions-setup-perl@v1
+        with:
+          perl-version: ${{ matrix.perl }}
+          distribution: strawberry # without this, libc crashes on _get_osfhandle()
+      - name: Install deps
+        run: cpm install -g
+      - name: Build
+        run: perl Makefile.PL
+      - name: Test
+        run: gmake test TEST_VERBOSE=1
+  macos:
+    name: macOS latest Perl
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Perl
+        uses: shogo82148/actions-setup-perl@v1
+        with:
+          perl-version: 'latest'
+      - name: Install deps
+        run: cpm install -g
+      - name: Build
+        run: perl Makefile.PL
+      - name: Test
+        run: make test TEST_VERBOSE=1
