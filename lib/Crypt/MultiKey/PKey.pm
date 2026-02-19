@@ -23,14 +23,14 @@ use Crypt::MultiKey;
   $key->clear_private;
   
   # encrypt some other data with the public half of the key
-  my $enc= $key->encrypt("Example Plaintext");
-  say JSON->new->encode($enc); # It's a hashref that you can serialize
+  my $cipherdata= $key->encrypt("Example Plaintext");
+  say JSON->new->encode($cipherdata); # It's a hashref that you can serialize
   
   # restore the private key, using the password
   $key->decrypt_private($pass); # croaks on wrong pass
   
   # Decrypt the data
-  say $key->decrypt($enc); # "Example Plaintext"
+  say $key->decrypt($cipherdata); # "Example Plaintext"
 
 =head1 DESCRIPTION
 
@@ -428,13 +428,15 @@ sub _import_key {
 
 sub _import_pem_headers {
    my ($self, $pem)= @_;
-   # mechanism header can change the class, then needs re-dispatched
+   # mechanism header can change the class, then might need re-dispatched
    my $mech= $pem->headers->{cmk_mechanism};
    if ($mech && $mech ne $self->mechanism) {
+      my $this_sub= $self->can('_import_pem_headers');
       $self->mechanism($mech);
       # guard against infinite loop
       $self->mechanism eq $mech or croak "BUG";
-      goto $self->can('_import_pem_headers');
+      my $new_sub= $self->can('_import_pem_headers');
+      goto $new_sub if $new_sub != $this_sub;
    }
    
    # check for a public_key header, which can be paired with encrypted PKCS#8
