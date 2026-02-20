@@ -18,11 +18,11 @@
 #include <openssl/buffer.h>
 #include <openssl/objects.h>
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
-#include <openssl/decoder.h>
-#include <openssl/core_names.h>
+  #include <openssl/decoder.h>
+  #include <openssl/core_names.h>
 #else
-/* 1.1.1 needs EC headers */
-#include <openssl/ec.h>
+  /* 1.1.1 needs EC headers */
+  #include <openssl/ec.h>
 #endif
 
 #include <string.h>
@@ -33,6 +33,9 @@
    #define bool int
    #define true 1
    #define false 0
+#endif
+#ifndef HAVE_ENDIAN_H
+   #include "cmk_compat_endian.h"
 #endif
 
 #include "cmk.h"
