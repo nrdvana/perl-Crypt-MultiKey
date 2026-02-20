@@ -58,6 +58,15 @@ jobs:
         uses: shogo82148/actions-setup-perl@v1
         with:
           perl-version: 'latest'
+      - name: Install LibreSSL + pkg-config
+        run: |
+          brew update
+          brew install libressl pkg-config
+      
+          echo "LIBRESSL_PREFIX=$(brew --prefix libressl)" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH=$(brew --prefix libressl)/lib/pkgconfig" >> $GITHUB_ENV
+          echo "CPPFLAGS=-I$(brew --prefix libressl)/include" >> $GITHUB_ENV
+          echo "LDFLAGS=-L$(brew --prefix libressl)/lib" >> $GITHUB_ENV
       - name: Install deps
         run: cpm install -g
       - name: Build
