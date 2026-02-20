@@ -13,6 +13,7 @@ BEGIN {
    %PREREQ_PM= (
       #'ExtUtils::Depends' => '0.405',
       'ExtUtils::CBuilder' => '0.2800',
+      'Crypt::SecretBuffer' => '0.018',
    );
    # If the prereqs for this script are missing,
    # write out a Makefile that tells CPAN to install them
@@ -43,6 +44,8 @@ $test->feature(HAVE_ENDIAN_H => 'uint32_t le= htole32(0x12345678); return le > 0
 
 $test->require_feature(HAVE_LIBSSL
                => 'unsigned char buf[1]; return RAND_bytes(buf, 1) == 1? 0 : 1;',
+               { h => 'openssl/rand.h', pkg_config => ['libressl'] },
+               { h => 'openssl/rand.h', pkg_config => ['openssl'] },
                { h => 'openssl/rand.h', -l => [ 'ssl', 'crypto' ] });
 
 $test->write_config_header('CryptMultiKey_config.h');
@@ -63,6 +66,8 @@ my %WriteMakefileArgs = (
   "ABSTRACT" => "Encrypt secrets with multiple keys, where any key can unlock them",
   "AUTHOR" => "Michael Conrad <mike\@nrdvana.net>",
   "CONFIGURE_REQUIRES" => {
+    "Crypt::SecretBuffer" => "0.018",
+    "ExtUtils::CBuilder" => "0.2800",
     "ExtUtils::MakeMaker" => 0
   },
   "DISTNAME" => "Crypt-MultiKey",
