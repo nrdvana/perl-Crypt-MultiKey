@@ -195,10 +195,14 @@ cmk_pkey_has_private(cmk_pkey *pkey) {
       return priv != NULL;
    }
 #endif
-   case EVP_PKEY_ED25519:
-   case EVP_PKEY_X25519:
+#ifdef EVP_PKEY_ED448
    case EVP_PKEY_ED448:
-   case EVP_PKEY_X448: {
+#endif
+#ifdef EVP_PKEY_X448
+   case EVP_PKEY_X448:
+#endif
+   case EVP_PKEY_ED25519:
+   case EVP_PKEY_X25519: {
       size_t len = 0;
       return EVP_PKEY_get_raw_private_key(*pkey, NULL, &len) == 1 && len > 0;
    }
@@ -724,8 +728,10 @@ cmk_pkey_generate_key_material(cmk_pkey *pubkey, HV *tumbler, secret_buffer *ske
    /* RSA keys encrypt/decrypt directly, but DSA-style keys need to create an ephermeral
     * key to perform a handshake with, to produce a shared secret.
     */
-   if (type == EVP_PKEY_X25519 || type == EVP_PKEY_X448
-    || type == EVP_PKEY_EC     || type == EVP_PKEY_DH
+   if (type == EVP_PKEY_X25519 || type == EVP_PKEY_EC || type == EVP_PKEY_DH
+#ifdef EVP_PKEY_X448
+      || type == EVP_PKEY_X448
+#endif
    ) {
       U8 *ephemeral_pub;    /* DER ephemeral pub for X25519 */
       int ephemeral_pub_len;
@@ -833,8 +839,10 @@ cmk_pkey_recreate_key_material(cmk_pkey *pk, HV *tumbler, secret_buffer *skey_bu
    int type = EVP_PKEY_base_id(*pk);
 
    /* Determine key type and decrypt accordingly */
-   if (type == EVP_PKEY_X25519 || type == EVP_PKEY_X448
-    || type == EVP_PKEY_EC     || type == EVP_PKEY_DH
+   if (type == EVP_PKEY_X25519 || type == EVP_PKEY_EC || type == EVP_PKEY_DH
+#ifdef EVP_PKEY_X448
+      || type == EVP_PKEY_X448
+#endif
    ) {
       STRLEN ephemeral_pub_der_len;
       U8 *ephemeral_pub_der;
