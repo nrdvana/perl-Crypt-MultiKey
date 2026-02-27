@@ -14,10 +14,13 @@ for (qw( x25519 RSA:bits=1024 secp256k1 )) {
       $key->encrypt_private("password", 99);
       like( $key->{private_encrypted}, qr{^[a-zA-Z0-9+/=\n]+\z}, 'private_encrypted created' );
       ok( $key->has_private, 'has_private_loaded is true' );
+      note "call ->clear_private";
       $key->clear_private;
       ok( !$key->has_private, 'has_private_loaded is false' );
       my $enc= $key->encrypt("Example Secret");
+      note "encrypted secret";
       ok( !eval { $key->decrypt($enc); 1 }, "can't decrypt secret" );
+      note "call ->decrypt_private";
       $key->decrypt_private("password");
       ok( $key->has_private, 'has_private_loaded is true' );
       my $secret= $key->decrypt($enc);

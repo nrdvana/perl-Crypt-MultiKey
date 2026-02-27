@@ -101,7 +101,7 @@ SV* cmk_generate_uuid_v4(SV *buf_sv) {
    U8 *byte_pos, *hex_pos, *next_dash;
    U8 *buf= (U8*) cmk_prepare_sv_buffer(buf_sv, 36);
    /* Generate 16 random bytes */
-   if (RAND_bytes((char*) buf, 16) != 1)
+   if (RAND_bytes(buf, 16) != 1)
       croak("RAND_bytes failed");
    /* Set version to 4 (bits 12-15 of time_hi_and_version field = byte 6, high nibble) */
    buf[6] = (buf[6] & 0x0F) | 0x40;
@@ -173,44 +173,54 @@ cmk_pkey_has_public(cmk_pkey *pkey) {
 }
 
 /* Return whether cmk_pkey has the private half loaded.
- * For known key types with easily inspectable private components, fetch that component and
- * check for error.  Fall back to i2d_PrivateKey which will fail if private half isn't present.
  */
 bool
 cmk_pkey_has_private(cmk_pkey *pkey) {
    if (!*pkey) return false;
+   /* From OpenSSL 3.0 onward, i2d_PrivateKey reliably returns false if the private key
+      is not loaded.  Before that, for some key types i2d_PrivateKey would fall back to
+      exporting the public key, making it useless for this purpose. */
+   #if OPENSSL_VERSION_NUMBER < 0x30000000L
    switch (EVP_PKEY_base_id(*pkey)) {
-#if 0
+   case EVP_PKEY_RSA2:
    case EVP_PKEY_RSA: {
-      const BIGNUM *n, *e, *d;
-      const RSA *rsa = EVP_PKEY_get0_RSA(pkey);
-      RSA_get0_key(rsa, &n, &e, &d);
+      /* If RSA 'd' parameter is set, it's a private key */
+      const BIGNUM *d= NULL;
+      const RSA *rsa = EVP_PKEY_get0_RSA(*pkey);
+      if (rsa)
+         RSA_get0_key(rsa, NULL, NULL, &d);
       return d != NULL;
    }
-
    case EVP_PKEY_EC: {
-      const BIGNUM *priv = NULL;
-      const EC_KEY *ec = EVP_PKEY_get0_EC_KEY(pkey);
-      priv = EC_KEY_get0_private_key(ec);
-      return priv != NULL;
+      const EC_KEY *ec = EVP_PKEY_get0_EC_KEY(*pkey);
+      return ec != NULL && EC_KEY_get0_private_key(ec) != NULL;
    }
-#endif
-#ifdef EVP_PKEY_ED448
+   #if defined(EVP_PKEY_ED25519) || defined(EVP_PKEY_X25519) || defined(EVP_PKEY_ED448) || defined(EVP_PKEY_X448)
+   # ifdef EVP_PKEY_ED448
    case EVP_PKEY_ED448:
-#endif
-#ifdef EVP_PKEY_X448
+   # endif
+   # ifdef EVP_PKEY_X448
    case EVP_PKEY_X448:
-#endif
+   # endif
+   # ifdef EVP_PKEY_ED25519
    case EVP_PKEY_ED25519:
-   case EVP_PKEY_X25519: {
-      size_t len = 0;
-      return EVP_PKEY_get_raw_private_key(*pkey, NULL, &len) == 1 && len > 0;
+   # endif
+   # ifdef EVP_PKEY_X25519
+   case EVP_PKEY_X25519:
+   # endif
+   {
+      U8 buf[256]; /* big enough for X448/Ed448 (57 bytes) and some room for the future */
+      size_t len = sizeof(buf);
+      int ret = EVP_PKEY_get_raw_private_key(*pkey, buf, &len);
+      OPENSSL_cleanse(buf, len > 0 && len <= sizeof(buf)? len : sizeof(buf));
+      return ret == 1 && len > 0;
    }
-
-   default:
-     /* Unknown type: fallback to i2d_PrivateKey probe */
-     return i2d_PrivateKey(*pkey, NULL) > 0;
+   #endif
+   default: (void)0;
    }
+   /* Unknown type: fallback to i2d_PrivateKey probe */
+   #endif
+   return i2d_PrivateKey(*pkey, NULL) > 0;
 }
 
 /* Clone a cmk_pkey.
@@ -224,9 +234,11 @@ cmk_pkey_dup(cmk_pkey *dest, cmk_pkey *src) {
    int len;
    U8 *buf = NULL;
 
+   ERR_clear_error();
+
    /* First, see if there is a private key encoding */
-   len = i2d_PrivateKey(*src, NULL);
-   if (len > 0) {
+   if (cmk_pkey_has_private(dest)) {
+      len = i2d_PrivateKey(*src, NULL);
       /* Full private+public key available: clone via private key only */
       if (!(buf = (U8*) safemalloc((Size_t)len)))
          GOTO_CLEANUP_CROAK("malloc failed");
@@ -307,14 +319,16 @@ void cmk_pkey_get_algorithm_name(cmk_pkey *pk, SV *out) {
          alg = "UNKNOWN";
 
       if (type == EVP_PKEY_RSA || type == EVP_PKEY_DSA || type == EVP_PKEY_DH) {
-         sv_setpvf(out, "%s:bits=%d", alg, EVP_PKEY_bits(*pk));
+         sv_setpvf(out, "%s:bits=%d",
+            type == EVP_PKEY_RSA? "RSA" : type == EVP_PKEY_DSA? "DSA" : "DH",
+            EVP_PKEY_bits(*pk));
       }
       else if (type == EVP_PKEY_EC) {
          EC_KEY *ec = EVP_PKEY_get0_EC_KEY(*pk);
          const EC_GROUP *grp = ec? EC_KEY_get0_group(ec) : NULL;
          int nid = grp? EC_GROUP_get_curve_name(grp) : NID_undef;
          if (nid != NID_undef) {
-            sv_setpvf(out, "%s:curve=%s", alg, OBJ_nid2sn(nid));
+            sv_setpvf(out, "EC:curve=%s", OBJ_nid2sn(nid));
          } else {
             sv_setpv(out, alg);
          }
@@ -322,9 +336,37 @@ void cmk_pkey_get_algorithm_name(cmk_pkey *pk, SV *out) {
 #endif
       else { /* "ED25519", "ED448", "X25519", "X448" */
          sv_setpv(out, alg);
+         #if OPENSSL_VERSION_NUMBER < 0x30000000L
+         {
+            STRLEN len;
+            char *str= SvPV(out, len);
+            for (STRLEN i = 0; i < len; i++)
+               str[i] = toUPPER(str[i]);
+            SvSETMAGIC(out);
+         }
+         #endif
       }
    }
 }
+
+/* Feature test: EVP RSA keygen controls exist in OpenSSL >= 1.0.2,
+ * but LibreSSL does not provide them (even if it defines OPENSSL_VERSION_NUMBER).
+ */
+#if !defined(LIBRESSL_VERSION_NUMBER) && (OPENSSL_VERSION_NUMBER >= 0x10002000L)
+#  define CMK_HAVE_EVP_RSA_KEYGEN_CTRLS 1
+#else
+#  define CMK_HAVE_EVP_RSA_KEYGEN_CTRLS 0
+#endif
+/* With OpenSSL 3.0, lots of methods that previously didn't use the set0/set1
+ * convention got renamed to start using it.
+ *  - get0 means it returns an existing pointer.
+ *  - get1 means it makes a copy that the caller must free.
+ *  - set0 means it transfers ownership and the caller should not free the reference
+ *  - set1 means it makes a copy and the caller still owns a reference.
+ */
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
+#  define EVP_PKEY_CTX_set1_rsa_keygen_pubexp EVP_PKEY_CTX_set_rsa_keygen_pubexp
+#endif
 
 /* Public/Private Key generation based on string parameters.
  * I'm attempting to use the same names as OpenSSL3 but implement it in 1.1 compatible code.
@@ -335,7 +377,12 @@ cmk_pkey_keygen_params(cmk_pkey *pk, const char *type, const char **params, int 
    EVP_PKEY_CTX *ctx= NULL;
    EVP_PKEY *pkey= NULL;
    BIGNUM *bignum= NULL;
+#if !CMK_HAVE_EVP_RSA_KEYGEN_CTRLS
+   RSA *rsa= NULL;
+#endif
    int type_len= strlen(type);
+
+   ERR_clear_error();
 
    if (type_len == 6 && foldEQ(type, "x25519", 6)) {
       if (param_count > 0)
@@ -346,16 +393,16 @@ cmk_pkey_keygen_params(cmk_pkey *pk, const char *type, const char **params, int 
    }  
    else if (type_len == 7 && foldEQ(type, "ED25519", 7)) {
       if (param_count > 0)
-         GOTO_CLEANUP_CROAK("x25519 does not take any parameters");
-      ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_X25519, NULL);
+         GOTO_CLEANUP_CROAK("ed25519 does not take any parameters");
+      ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_ED25519, NULL);
       if (!ctx || EVP_PKEY_keygen_init(ctx) <= 0)
          GOTO_CLEANUP_CROAK("keygen init (ED25519) failed");
    }
    else if (type_len == 3 && foldEQ(type, "RSA", 3)) {
       int i, bits= 4096;
-      ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
-      if (!ctx || EVP_PKEY_keygen_init(ctx) <= 0)
-         GOTO_CLEANUP_CROAK("keygen init (RSA) failed");
+      unsigned long pubexp_ul = RSA_F4; /* default 65537 */
+      int have_pubexp = 0;
+
       for (i= 0; i < param_count; i++) {
          const char *p = params[i];
          const char *eq = strchr(p, '=');
@@ -366,30 +413,65 @@ cmk_pkey_keygen_params(cmk_pkey *pk, const char *type, const char **params, int 
          ) {
             char *end;
             long exp= strtol(value, &end, 10);
-            if (*end != '\0' || end == value)
+            if (*end != '\0' || end == value || exp < 3)
                GOTO_CLEANUP_CROAK("invalid rsa_keygen_pubexp");
-            bignum = BN_new();
-            if (!bignum || !BN_set_word(bignum, exp))
-               GOTO_CLEANUP_CROAK("BN_new/BN_set_word failed");
-            if (EVP_PKEY_CTX_set1_rsa_keygen_pubexp(ctx, bignum) <= 0)
-               GOTO_CLEANUP_CROAK("EVP_PKEY_CTX_set1_rsa_keygen_pubexp failed");
-            BN_free(bignum);
-            bignum= NULL;
+            pubexp_ul= exp;
+            have_pubexp= 1;
          }
          else if (len == 4 && memcmp(p, "bits", 4) == 0
             || len == 15 && memcmp(p, "rsa-keygen-bits", 15) == 0
          ) {
             char *end;
-            bits= strtol(value, &end, 10);
-            if (*end != '\0' || end == value)
+            long v= strtol(value, &end, 10);
+            if (*end != '\0' || end == value || v < 512)
                GOTO_CLEANUP_CROAK("invalid 'rsa-keygen-bits' value");
+            bits= (int) v;
          }
          else {
             GOTO_CLEANUP_CROAK("Unknown RSA parameter");
          }
       }
+      
+      #if CMK_HAVE_EVP_RSA_KEYGEN_CTRLS
+      ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_RSA, NULL);
+      if (!ctx || EVP_PKEY_keygen_init(ctx) <= 0)
+         GOTO_CLEANUP_CROAK("keygen init (RSA) failed");
       if (EVP_PKEY_CTX_set_rsa_keygen_bits(ctx, bits) <= 0)
          GOTO_CLEANUP_CROAK("set_rsa_keygen_bits failed");
+      if (have_pubexp) {
+         bignum = BN_new();
+         if (!bignum || !BN_set_word(bignum, pubexp_ul))
+            GOTO_CLEANUP_CROAK("BN_new/BN_set_word failed");
+         if (EVP_PKEY_CTX_set1_rsa_keygen_pubexp(ctx, bignum) <= 0)
+            GOTO_CLEANUP_CROAK("EVP_PKEY_CTX_set1_rsa_keygen_pubexp failed");
+      }
+      #else
+      /* If this version of OpenSSL/LibreSSL can't modify the exponent in the key
+         generating context, we need to create the key the "old way" */
+      bignum = BN_new();
+      if (!bignum || !BN_set_word(bignum, pubexp_ul))
+         GOTO_CLEANUP_CROAK("BN_new/BN_set_word failed");
+
+      rsa = RSA_new();
+      if (!rsa)
+         GOTO_CLEANUP_CROAK("RSA_new failed");
+
+      if (RSA_generate_key_ex(rsa, bits, bignum, NULL) != 1)
+         GOTO_CLEANUP_CROAK("RSA_generate_key_ex failed");
+
+      /* assign rsa into new EVP_PKEY */
+      pkey = EVP_PKEY_new();
+      if (!pkey)
+         GOTO_CLEANUP_CROAK("EVP_PKEY_new failed");
+
+      /* Transfers ownership of rsa to pkey on success. */
+      if (EVP_PKEY_assign_RSA(pkey, rsa) != 1)
+         GOTO_CLEANUP_CROAK("EVP_PKEY_assign_RSA failed");
+      rsa = NULL;
+
+      /* bypass the call to EVP_PKEY_keygen on the context */
+      goto cleanup;
+      #endif
    }
    else if (type_len == 2 && foldEQ(type, "EC", 2)) {
       int i;
@@ -426,6 +508,10 @@ cmk_pkey_keygen_params(cmk_pkey *pk, const char *type, const char **params, int 
 cleanup:
    if (ctx)
       EVP_PKEY_CTX_free(ctx);
+#if !CMK_HAVE_EVP_RSA_KEYGEN_CTRLS
+   if (rsa)
+      RSA_free(rsa);
+#endif
    if (bignum)
       BN_free(bignum);
    if (err)
@@ -491,6 +577,7 @@ static int cmk_pkey_magic_dup(pTHX_ MAGIC *mg, CLONE_PARAMS *param) {
 
 static int cmk_pkey_magic_free(pTHX_ SV *sv, MAGIC *mg) {
    if (mg->mg_ptr) EVP_PKEY_free((EVP_PKEY*) mg->mg_ptr);
+   return 0;
 }
 
 static MGVTBL cmk_pkey_magic_vtbl = {
@@ -561,6 +648,9 @@ cmk_get_privkey(SV *objref) {
 void
 cmk_pkey_import_spki(cmk_pkey *pk, const U8 *buf, STRLEN buf_len) {
    EVP_PKEY *key= NULL;
+
+   ERR_clear_error();
+
    if (!d2i_PUBKEY(&key, &buf, buf_len) || !key)
       cmk_croak_with_ssl_error("import_pubkey", "Decoding SubjectPublicKeyInfo failed");
    if (*pk) EVP_PKEY_free(*pk);
@@ -571,6 +661,9 @@ void
 cmk_pkey_export_spki(cmk_pkey *pk, SV *buf_out) {
    secret_buffer *sb;
    U8 *buf;
+
+   ERR_clear_error();
+
    /* encode the public key into a scalar */
    int serialized_len= i2d_PUBKEY(*pk, NULL);
    if (serialized_len <= 0)
@@ -578,13 +671,13 @@ cmk_pkey_export_spki(cmk_pkey *pk, SV *buf_out) {
    /* buffer maight be a secret_buffer reference */
    if ((sb= secret_buffer_from_magic(buf_out, 0))) {
       secret_buffer_set_len(sb, serialized_len);
-      buf= sb->data;
+      buf= (U8*) sb->data;
    }
    else {
       buf= (U8*) cmk_prepare_sv_buffer(buf_out, serialized_len);
    }
    if (i2d_PUBKEY(*pk, &buf) != serialized_len)
-      cmk_croak_with_ssl_error("export_spkio", "i2d_PUBKEY");
+      cmk_croak_with_ssl_error("export_spki", "i2d_PUBKEY");
 }
 
 /* Load the private key from the buffer and store it into MAGIC on the ::PKey object.
@@ -598,10 +691,12 @@ cmk_pkey_import_pkcs8(cmk_pkey *pk, const U8 *buf, STRLEN buf_len, const char *p
    PKCS8_PRIV_KEY_INFO *p8inf= NULL;
    EVP_PKEY *pkey= NULL;
    const U8 *buf_copy = buf;
+   X509_SIG *p8= NULL;
+
+   ERR_clear_error();
 
    /* Try to decode as encrypted PKCS8 (X509_SIG) first */
-   X509_SIG *p8 = d2i_X509_SIG(NULL, &buf_copy, buf_len);
-
+   p8 = d2i_X509_SIG(NULL, &buf_copy, buf_len);
    if (p8) {
       /* Successfully decoded as X509_SIG - this means it's encrypted */
       if (!pw_len)
@@ -653,6 +748,8 @@ cmk_pkey_export_pkcs8(cmk_pkey *pk, const char *pw, STRLEN pw_len, int kdf_iters
    secret_buffer *sb;
    int serialized_len;
 
+   ERR_clear_error();
+
    /* Convert EVP_PKEY to PKCS8_PRIV_KEY_INFO */
    p8inf= EVP_PKEY2PKCS8(*pk);
    if (!p8inf)
@@ -686,7 +783,7 @@ cmk_pkey_export_pkcs8(cmk_pkey *pk, const char *pw, STRLEN pw_len, int kdf_iters
       GOTO_CLEANUP_CROAK("Can't determine PKCS8 serialized length");
    if ((sb= secret_buffer_from_magic(buf_out, 0))) {
       secret_buffer_set_len(sb, serialized_len);
-      buf= sb->data;
+      buf= (U8*) sb->data;
    } else {
       buf= (U8*) cmk_prepare_sv_buffer(buf_out, serialized_len);
    }
@@ -725,13 +822,18 @@ cmk_pkey_generate_key_material(cmk_pkey *pubkey, HV *tumbler, secret_buffer *ske
    SV *sv= NULL;
    int type= EVP_PKEY_base_id(*pubkey);
 
+   ERR_clear_error();
+
    /* RSA keys encrypt/decrypt directly, but DSA-style keys need to create an ephermeral
     * key to perform a handshake with, to produce a shared secret.
     */
-   if (type == EVP_PKEY_X25519 || type == EVP_PKEY_EC || type == EVP_PKEY_DH
-#ifdef EVP_PKEY_X448
+   if (type == EVP_PKEY_EC || type == EVP_PKEY_DH
+      #ifdef EVP_PKEY_X25519
+      || type == EVP_PKEY_X25519
+      #endif
+      #ifdef EVP_PKEY_X448
       || type == EVP_PKEY_X448
-#endif
+      #endif
    ) {
       U8 *ephemeral_pub;    /* DER ephemeral pub for X25519 */
       int ephemeral_pub_len;
@@ -739,19 +841,21 @@ cmk_pkey_generate_key_material(cmk_pkey *pubkey, HV *tumbler, secret_buffer *ske
 
       /* Generate ephemeral keypair of same type */
       pctx = EVP_PKEY_CTX_new(*pubkey, NULL);
-      if (!pctx ||
-         EVP_PKEY_keygen_init(pctx) <= 0 ||
-         EVP_PKEY_keygen(pctx, &ephemeral) <= 0
+      if (!pctx
+         || EVP_PKEY_keygen_init(pctx) <= 0
+         || EVP_PKEY_keygen(pctx, &ephemeral) <= 0
+         || !ephemeral
       )
          GOTO_CLEANUP_CROAK("Ephemeral key generation failed");
 
       /* Derive shared secret: ephemeral (private) + MultiKey::PKey object (public) */
       ctx= EVP_PKEY_CTX_new(ephemeral, NULL);
-      if (!ctx ||
-         EVP_PKEY_derive_init(ctx) <= 0 ||
-         EVP_PKEY_derive_set_peer(ctx, *pubkey) <= 0
-      )
+      if (!ctx)
+         GOTO_CLEANUP_CROAK("EVP_PKEY_CTX_new failed");
+      if (EVP_PKEY_derive_init(ctx) <= 0)
          GOTO_CLEANUP_CROAK("Derive init failed");
+      if (EVP_PKEY_derive_set_peer(ctx, *pubkey) <= 0)
+         GOTO_CLEANUP_CROAK("Derive set-peer failed");
 
       /* Query required length and enlarge the destination buffer */
       if (EVP_PKEY_derive(ctx, NULL, &shared_len) <= 0 || shared_len == 0)
@@ -759,7 +863,7 @@ cmk_pkey_generate_key_material(cmk_pkey *pubkey, HV *tumbler, secret_buffer *ske
       secret_buffer_alloc_at_least(skey_buf, skey_buf->len + shared_len);
 
       /* Derive the secret and update the buffer's length to match */
-      if (EVP_PKEY_derive(ctx, skey_buf->data + skey_buf->len, &shared_len) <= 0)
+      if (EVP_PKEY_derive(ctx, (U8*) skey_buf->data + skey_buf->len, &shared_len) <= 0)
          GOTO_CLEANUP_CROAK("Deriving shared secret failed");
       skey_buf->len += shared_len;
 
@@ -775,14 +879,18 @@ cmk_pkey_generate_key_material(cmk_pkey *pubkey, HV *tumbler, secret_buffer *ske
          GOTO_CLEANUP_CROAK("hv_store failed");
       sv= NULL; /* HV takes ownership */
    }
-   else if (type == EVP_PKEY_RSA || type == EVP_PKEY_RSA_PSS) {
+   else if (type == EVP_PKEY_RSA || type == EVP_PKEY_RSA2
+      #ifdef EVP_PKEY_RSA_PSS
+      || type == EVP_PKEY_RSA_PSS
+      #endif
+   ) {
       size_t rsa_ct_len= 0;
       U8 *buf_pos;
       /* ---- RSA branch (RSA-OAEP) ---- */
 
       /* Generate random wrap key */
       secret_buffer_alloc_at_least(skey_buf, skey_buf->len + CMK_RSA_KEYMATERIAL_LEN);
-      buf_pos= skey_buf->data + skey_buf->len;
+      buf_pos= (U8*) skey_buf->data + skey_buf->len;
       if (RAND_bytes(buf_pos, CMK_RSA_KEYMATERIAL_LEN) != 1)
          GOTO_CLEANUP_CROAK("RAND_bytes for wrap key failed");
       skey_buf->len += CMK_RSA_KEYMATERIAL_LEN;
@@ -801,7 +909,7 @@ cmk_pkey_generate_key_material(cmk_pkey *pubkey, HV *tumbler, secret_buffer *ske
          GOTO_CLEANUP_CROAK("RSA encrypt size query failed");
 
       if (EVP_PKEY_encrypt(rsa_ctx,
-            cmk_prepare_sv_buffer((sv= newSVpvs("")), rsa_ct_len), &rsa_ct_len,
+            (U8*) cmk_prepare_sv_buffer((sv= newSVpvs("")), rsa_ct_len), &rsa_ct_len,
             buf_pos, CMK_RSA_KEYMATERIAL_LEN) <= 0)
          GOTO_CLEANUP_CROAK("RSA encrypt failed");
 
@@ -811,6 +919,13 @@ cmk_pkey_generate_key_material(cmk_pkey *pubkey, HV *tumbler, secret_buffer *ske
       sv= NULL; /* HV takes ownership */
    }
    else {
+      #ifdef EVP_PKEY_ED25519
+      if (type == EVP_PKEY_ED25519
+         #ifdef EVP_PKEY_ED448
+         || type == EVP_PKEY_ED448
+         #endif
+      ) GOTO_CLEANUP_CROAK("ED25519 and ED448 keys can only be used for signatures");
+      #endif
       GOTO_CLEANUP_CROAK("Unsupported key type");
    }
 
@@ -838,17 +953,28 @@ cmk_pkey_recreate_key_material(cmk_pkey *pk, HV *tumbler, secret_buffer *skey_bu
    SV **svp;
    int type = EVP_PKEY_base_id(*pk);
 
+   /* Croak with a clean error message if the private half of the key isn't loaded.
+    * Also this avoids a LibreSSL segfault for X25519 keys if you call derive
+    * without the private half loaded. */
+   if (!cmk_pkey_has_private(pk))
+      croak("Private key not loaded");
+
+   ERR_clear_error();
+
    /* Determine key type and decrypt accordingly */
-   if (type == EVP_PKEY_X25519 || type == EVP_PKEY_EC || type == EVP_PKEY_DH
-#ifdef EVP_PKEY_X448
+   if (type == EVP_PKEY_EC || type == EVP_PKEY_DH
+      #ifdef EVP_PKEY_X25519
+      || type == EVP_PKEY_X25519
+      #endif
+      #ifdef EVP_PKEY_X448
       || type == EVP_PKEY_X448
-#endif
+      #endif
    ) {
+      /* ---- DSA-like branch: derive shared secret from ephemeral public key ---- */
       STRLEN ephemeral_pub_der_len;
       U8 *ephemeral_pub_der;
       size_t shared_len;
       const U8 *p;
-      /* ---- DSA-like branch: derive shared secret from ephemeral public key ---- */
 
       /* Extract ephemeral public key and KDF salt */
       svp = hv_fetchs(tumbler, "ephemeral_pubkey", 0);
@@ -876,15 +1002,19 @@ cmk_pkey_recreate_key_material(cmk_pkey *pk, HV *tumbler, secret_buffer *skey_bu
       secret_buffer_alloc_at_least(skey_buf, skey_buf->len + shared_len);
 
       /* Derive the secret and update the buffer's length to match */
-      if (EVP_PKEY_derive(ctx, skey_buf->data + skey_buf->len, &shared_len) <= 0)
+      if (EVP_PKEY_derive(ctx, (U8*) skey_buf->data + skey_buf->len, &shared_len) <= 0)
          GOTO_CLEANUP_CROAK("Deriving shared secret failed");
       skey_buf->len += shared_len;
    }
-   else if (type == EVP_PKEY_RSA || type == EVP_PKEY_RSA_PSS) {
+   else if (type == EVP_PKEY_RSA || type == EVP_PKEY_RSA2
+      #ifdef EVP_PKEY_RSA_PSS
+      || type == EVP_PKEY_RSA_PSS
+      #endif
+   ) {
+      /* ---- RSA branch: decrypt wrap key using RSA-OAEP ---- */
       STRLEN rsa_ct_len;
       U8 *rsa_ct;
       size_t decoded_len;
-      /* ---- RSA branch: decrypt wrap key using RSA-OAEP ---- */
 
       /* Extract encrypted wrap key */
       svp = hv_fetchs(tumbler, "rsa_key_ciphertext", 0);
@@ -909,11 +1039,18 @@ cmk_pkey_recreate_key_material(cmk_pkey *pk, HV *tumbler, secret_buffer *skey_bu
          GOTO_CLEANUP_CROAK("RSA encrypt size query failed");
       secret_buffer_alloc_at_least(skey_buf, skey_buf->len + decoded_len);
 
-      if (EVP_PKEY_decrypt(rsa_ctx, skey_buf->data + skey_buf->len, &decoded_len, rsa_ct, rsa_ct_len) <= 0)
+      if (EVP_PKEY_decrypt(rsa_ctx, (U8*) skey_buf->data + skey_buf->len, &decoded_len, rsa_ct, rsa_ct_len) <= 0)
          GOTO_CLEANUP_CROAK("RSA decrypt failed");
       skey_buf->len += decoded_len;
    }
    else {
+      #ifdef EVP_PKEY_ED25519
+      if (type == EVP_PKEY_ED25519
+         #ifdef EVP_PKEY_ED448
+         || type == EVP_PKEY_ED448
+         #endif
+      ) GOTO_CLEANUP_CROAK("ED25519 and ED448 keys can only be used for signatures");
+      #endif
       GOTO_CLEANUP_CROAK("Unsupported key type");
    }
 
@@ -921,7 +1058,7 @@ cleanup:
    if (ctx) EVP_PKEY_CTX_free(ctx);
    if (rsa_ctx) EVP_PKEY_CTX_free(rsa_ctx);
    if (ephemeral_pub) EVP_PKEY_free(ephemeral_pub);
-   if (err) cmk_croak_with_ssl_error("create_aes_key", err);
+   if (err) cmk_croak_with_ssl_error("recreate_key_material", err);
 }
 
 /* This runs HKDF on the key material to generate an AES key.
@@ -939,6 +1076,8 @@ cmk_hkdf(HV *params, secret_buffer *key_material) {
    STRLEN len, info_len, salt_len;
    U8 *salt, salt_buf[CMK_KDF_SALT_LEN];
    SV **svp, *sv;
+
+   ERR_clear_error();
 
    /* find out what key size is needed */
    svp= hv_fetchs(params, "cipher", 0);
@@ -977,7 +1116,7 @@ cmk_hkdf(HV *params, secret_buffer *key_material) {
    } else {
       if (RAND_bytes(salt_buf, sizeof salt_buf) != 1)
          GOTO_CLEANUP_CROAK("Failed to generate HKDF salt");
-      if (!hv_stores(params, "kdf_salt", (sv= newSVpvn(salt_buf, sizeof salt_buf))))
+      if (!hv_stores(params, "kdf_salt", (sv= newSVpvn((char*) salt_buf, sizeof salt_buf))))
          GOTO_CLEANUP_CROAK("hv_store failed");
       sv= NULL; /* hv owns it now */
       salt= salt_buf;
@@ -992,7 +1131,7 @@ cmk_hkdf(HV *params, secret_buffer *key_material) {
       || EVP_PKEY_CTX_set1_hkdf_salt(kdf, salt, salt_len) <= 0
       || EVP_PKEY_CTX_add1_hkdf_info(kdf, info, info_len) <= 0
       || EVP_PKEY_CTX_set1_hkdf_key(kdf, key_material->data, key_material->len) <= 0
-      || EVP_PKEY_derive(kdf, aes_key->data, &wrote) <= 0
+      || EVP_PKEY_derive(kdf, (U8*) aes_key->data, &wrote) <= 0
    )
       GOTO_CLEANUP_CROAK("HKDF failed");
    if (wrote != size)
@@ -1021,6 +1160,8 @@ void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret,
    U8 *buf;
    int outlen, need_key_len;
    STRLEN len;
+
+   ERR_clear_error();
 
    /* determine cipher */
    svp= hv_fetchs(params, "cipher", 0);
@@ -1076,7 +1217,7 @@ void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret,
       /* The encrypted result is N bytes of public nonce followed by the output bytes of the
        * cipher followed by the public GCM tag bytes.  These can all be allocated as a single
        * buffer inside of an SV, then assign pointers to the components */
-      nonce= cmk_prepare_sv_buffer((sv= newSVpvs("")),
+      nonce= (U8*) cmk_prepare_sv_buffer((sv= newSVpvs("")),
          CMK_AES_256_GCM_NONCE_LEN + padded_len + CMK_AES_256_GCM_TAG_LEN);
       ciphertext_pos= nonce + CMK_AES_256_GCM_NONCE_LEN;
       gcm_tag= ciphertext_lim= ciphertext_pos + padded_len;
@@ -1087,7 +1228,7 @@ void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret,
       if (!(aes_ctx = EVP_CIPHER_CTX_new())
          || EVP_EncryptInit_ex(aes_ctx, cipher, NULL, NULL, NULL) != 1
          || EVP_CIPHER_CTX_ctrl(aes_ctx, EVP_CTRL_GCM_SET_IVLEN, CMK_AES_256_GCM_NONCE_LEN, NULL) != 1
-         || EVP_EncryptInit_ex(aes_ctx, NULL, NULL, aes_key->data, nonce) != 1
+         || EVP_EncryptInit_ex(aes_ctx, NULL, NULL, (U8*) aes_key->data, nonce) != 1
       )
          GOTO_CLEANUP_CROAK("AES-GCM init failed");
 
@@ -1236,6 +1377,8 @@ void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *se
    STRLEN len;
    SV **svp;
 
+   ERR_clear_error();
+
    /* Determine cipher */
    svp= hv_fetchs(params, "cipher", 0);
    if (!svp || !*svp || !SvOK(*svp))
@@ -1275,7 +1418,7 @@ void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *se
       if (!(aes_ctx = EVP_CIPHER_CTX_new())
          || EVP_DecryptInit_ex(aes_ctx, cipher, NULL, NULL, NULL) != 1
          || EVP_CIPHER_CTX_ctrl(aes_ctx, EVP_CTRL_GCM_SET_IVLEN, CMK_AES_256_GCM_NONCE_LEN, NULL) != 1
-         || EVP_DecryptInit_ex(aes_ctx, NULL, NULL, aes_key->data, nonce) != 1
+         || EVP_DecryptInit_ex(aes_ctx, NULL, NULL, (U8*) aes_key->data, nonce) != 1
          || EVP_CIPHER_CTX_ctrl(aes_ctx, EVP_CTRL_GCM_SET_TAG, CMK_AES_256_GCM_TAG_LEN, gcm_tag) != 1
       )
          GOTO_CLEANUP_CROAK("AES-GCM decrypt init failed");
@@ -1297,7 +1440,7 @@ void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *se
          secret_len= le64toh(packed_secret_len);
          /* allocate secret buffer and set up position pointers */
          secret_buffer_set_len(secret_out, secret_len);
-         secret_pos= secret_out->data;
+         secret_pos= (U8*) secret_out->data;
          secret_lim= secret_pos + secret_len;
          /* copy across any bytes that were already decrypted and not part of the prefix */
          if (outlen > prefix_len) {
@@ -1311,7 +1454,7 @@ void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *se
          OPENSSL_cleanse(prefix_buf, sizeof(prefix_buf));
       } else {
          secret_buffer_set_len(secret_out, secret_len);
-         secret_pos= secret_out->data;
+         secret_pos= (U8*) secret_out->data;
          secret_lim= secret_pos + secret_len;
       }
       while (ciphertext_pos < ciphertext_lim) {
@@ -1325,7 +1468,7 @@ void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *se
             ciphertext_pos += n;
          }
          else { /* Decrypt the remainder of padding which should all be NUL bytes */
-            char buffer[1024];
+            U8 buffer[1024];
             int n= (ciphertext_lim - ciphertext_pos) > sizeof(buffer)? sizeof(buffer) : (int)(ciphertext_lim - ciphertext_pos);
             if (EVP_DecryptUpdate(aes_ctx, buffer, &outlen, ciphertext_pos, n) != 1
                || outlen != n)

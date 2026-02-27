@@ -11,6 +11,13 @@ is( Crypt::MultiKey::PKey->generate('x25519'),
    },
    'x25519');
 
+is( Crypt::MultiKey::PKey->generate('ed25519'),
+   object {
+      call algorithm => 'ED25519';
+      call sub { length decode_base64($_[0]->public) }, 44;
+   },
+   'ed25519');
+
 is( Crypt::MultiKey::PKey->generate('RSA'),
    object {
       call algorithm => 'RSA:bits=4096';

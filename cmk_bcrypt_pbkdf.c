@@ -367,7 +367,7 @@ cmk_bcrypt_hash(const uint8_t sha2pass[64], const uint8_t sha2salt[64], uint8_t 
       cdata[i] = cmk_blf_stream2word(ciphertext, sizeof(ciphertext), &j);
 
    for (int i = 0; i < 64; i++)
-      cmk_blf_enc(&state, cdata, (uint16_t)(sizeof(cdata) / sizeof(uint64_t)));
+      cmk_blf_enc(&state, cdata, (uint16_t)(sizeof(cdata) / (sizeof(uint64_t))));
 
    for (int i = 0; i < CMK_BCRYPT_WORDS; i++) {
       out[4 * i + 3] = (cdata[i] >> 24) & 0xFF;
@@ -470,8 +470,10 @@ cleanup:
    OPENSSL_cleanse(sha2salt, sizeof(sha2salt));
    OPENSSL_cleanse(block, sizeof(block));
    OPENSSL_cleanse(tmp, sizeof(tmp));
-   if (countsalt)
-      OPENSSL_clear_free(countsalt, salt_len+4);
+   if (countsalt) {
+      OPENSSL_cleanse(countsalt, salt_len+4);
+      OPENSSL_free(countsalt);
+   }
    if (err) {
       *err_out= err;
       return false;

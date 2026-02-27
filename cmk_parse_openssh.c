@@ -38,6 +38,8 @@ cmk_pkey_import_openssh_pubkey(cmk_pkey *pk, const U8 *data, STRLEN data_len) {
    size_t alg_len;
    secret_buffer_parse parse;
 
+   ERR_clear_error();
+
    memset(&parse, 0, sizeof(parse));
    parse.pos= (U8*) data;
    parse.lim= (U8*) data + data_len;
@@ -242,12 +244,14 @@ cmk_pkey_import_openssh_privkey(cmk_pkey *pk, const U8 *data, STRLEN data_len,
 
    secret_buffer *plain_sb = NULL;
 
+   ERR_clear_error();
+
    memset(&outer, 0, sizeof(outer));
    outer.pos = data;
    outer.lim = data + data_len;
 
    if (!cmk_parse_bytes_eq(&outer, "openssh-key-v1\0", 15))
-      croak(outer.error ? outer.error : "Bad OpenSSH key magic (expected 'openssh-key-v1')");
+      croak("%s", outer.error ? outer.error : "Bad OpenSSH key magic (expected 'openssh-key-v1')");
 
    if (!cmk_parse_ssh_string(&outer, &ciphername, &ciphername_len) ||
        !cmk_parse_ssh_string(&outer, &kdfname, &kdfname_len) ||
@@ -534,7 +538,7 @@ cmk_openssh_decrypt_private_blob(const U8 *ciphername, size_t ciphername_len,
       keyiv_sb->len= keyiv_len;
       /* Run bcrypt on the password and salt to produce the key & iv */
       if (!cmk_bcrypt_pbkdf((const U8*)pw, pw_len, salt, salt_len, rounds,
-                        keyiv_sb->data, keyiv_len, &err))
+                        (U8*) keyiv_sb->data, keyiv_len, &err))
          goto cleanup;
    }
    else {
@@ -552,15 +556,15 @@ cmk_openssh_decrypt_private_blob(const U8 *ciphername, size_t ciphername_len,
    if (!ctx) GOTO_CLEANUP_CROAK("EVP_CIPHER_CTX_new failed");
 
    if (EVP_DecryptInit_ex(ctx, cipher, NULL,
-                         keyiv_sb->data,
-                         keyiv_sb->data + key_len) != 1)
+                         (U8*) keyiv_sb->data,
+                         (U8*) keyiv_sb->data + key_len) != 1)
       GOTO_CLEANUP_CROAK("EVP_DecryptInit_ex failed");
 
-   if (EVP_DecryptUpdate(ctx, plain_sb->data, &outl1, enc, (int)enc_len) != 1)
+   if (EVP_DecryptUpdate(ctx, (U8*) plain_sb->data, &outl1, enc, (int)enc_len) != 1)
       GOTO_CLEANUP_CROAK("EVP_DecryptUpdate failed");
 
    /* CTR produces no padding; Final should succeed and usually outputs 0 bytes. */
-   if (EVP_DecryptFinal_ex(ctx, plain_sb->data + outl1, &outl2) != 1)
+   if (EVP_DecryptFinal_ex(ctx, (U8*) plain_sb->data + outl1, &outl2) != 1)
       /* Wrong password *might* still pass CTR decryption; we rely on checkints later.
        * A Final failure here is more “cipher misuse” than “wrong pw”.
        */

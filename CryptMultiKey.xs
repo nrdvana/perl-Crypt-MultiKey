@@ -98,7 +98,7 @@ symmetric_encrypt(params, aes_key, secret)
    SV *secret
    INIT:
       STRLEN len;
-      const char *buf= secret_buffer_SvPVbyte(secret, &len);
+      const U8 *buf= (const U8*) secret_buffer_SvPVbyte(secret, &len);
    PPCODE:
       cmk_symmetric_encrypt(params, aes_key, buf, len);
       XSRETURN(1); /* return params hashref */
@@ -166,7 +166,7 @@ _import_spki(pkey, buffer)
    SV *buffer
    INIT:
       STRLEN len;
-      const char *buf= secret_buffer_SvPVbyte(buffer, &len);
+      const U8 *buf= (const U8*) secret_buffer_SvPVbyte(buffer, &len);
    PPCODE:
       cmk_pkey_import_spki(pkey, buf, len);
 
@@ -184,7 +184,7 @@ _import_pkcs8(pkey, buffer, pass_sv=&PL_sv_undef)
    SV *pass_sv
    INIT:
       STRLEN len, pass_len= 0;
-      const char *buf= secret_buffer_SvPVbyte(buffer, &len);
+      const U8 *buf= (const U8*) secret_buffer_SvPVbyte(buffer, &len);
       const char *pass= SvOK(pass_sv)? secret_buffer_SvPVbyte(pass_sv, &pass_len) : NULL;
    PPCODE:
       cmk_pkey_import_pkcs8(pkey, buf, len, pass, pass_len);
@@ -196,7 +196,7 @@ _import_openssh_privkey(pkey, buffer, pass_sv=&PL_sv_undef)
    SV *pass_sv
    INIT:
       STRLEN len, pass_len= 0;
-      const char *buf= secret_buffer_SvPVbyte(buffer, &len);
+      const U8 *buf= (const U8*) secret_buffer_SvPVbyte(buffer, &len);
       const char *pass= SvOK(pass_sv)? secret_buffer_SvPVbyte(pass_sv, &pass_len) : NULL;
    PPCODE:
       cmk_pkey_import_openssh_privkey(pkey, buf, len, pass, pass_len);
@@ -207,7 +207,7 @@ _import_openssh_pubkey(pkey, buffer)
    SV *buffer
    INIT:
       STRLEN len;
-      const char *buf= secret_buffer_SvPVbyte(buffer, &len);
+      const U8 *buf= (const U8*) secret_buffer_SvPVbyte(buffer, &len);
    PPCODE:
       cmk_pkey_import_openssh_pubkey(pkey, buf, len);
 
@@ -247,7 +247,7 @@ encrypt(pkey, secret_sv)
    SV *secret_sv
    INIT:
       STRLEN secret_len= 0;
-      const U8 *secret= secret_buffer_SvPVbyte(secret_sv, &secret_len);
+      const U8 *secret= (const U8*) secret_buffer_SvPVbyte(secret_sv, &secret_len);
       secret_buffer *skey_buf= secret_buffer_new(0, NULL);
       HV *enc= newHV();
       SV *enc_ref= sv_2mortal(newRV_noinc((SV*) enc)); /* ensure HV gets cleaned up on error */
