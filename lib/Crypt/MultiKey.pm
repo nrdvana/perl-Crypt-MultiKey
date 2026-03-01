@@ -4,73 +4,93 @@ package Crypt::MultiKey;
 
 =head1 SYNOPSIS
 
-  use Crypt::MultiKey;
-  use Crypt::SecretBuffer 'secret';
+  use Crypt::MultiKey qw( pkey coffer );
+  use Crypt::SecretBuffer qw( secret );
   
-  my $repo= Crypt::MultiKey->new('/some/path/');
-  say $_->name for $repo->vault_list;
-  say $_->name for $repo->key_list;
+  # Encrypt data with your public key
+  my $pubkey= pkey(load => '~/.ssh/id_rsa.pub');
+  my $encrypted= $pubkey->encrypt("secret data");
+  
+  # Load your private key
+  my $privkey= pkey(load => '~/.ssh/is_rsa');
+  
+  # If your private key is itself encrypted, prompt for password
+  if ($privkey->private_encrypted) {
+    my $pasword= secret;
+    $password->append_console_line(STDIN, prompt => 'password: ')
+      or die "require password";
+    $privkey->decrypt_private($password);
+  }
+  
+  # use private key to decrypt data
+  my $secret= $privkey->decrypt($encrypted);
 
-  # Create a password-based key
-  my $pw= secret;
-  $pw->append_console_line(STDIN, prompt => 'Enter password: ')
-    or die "aborted";
-  $repo->new_key('master_pw', Password => { password => $pw });
+  # Store multiple data strings in a Coffer, locked with a variety of keys
+  my $coffer= coffer(content => "My Secrets");
+  $coffer->add_access($privkey);
+  my $key2= pkey(generate => 'x25519');
+  my $key3= pkey(generate => 'secp256k1');
+  $coffer->add_access($key2, $key3);  # requires both
+  $coffer->save('coffer.pem');
   
-  # Create a key that can be activated by your SSH agent
-  $repo->new_key("ssh-$username", SSHAgentSignature => { pubkey => $pubkey_string });
+  # Open a coffer
+  $coffer= coffer(load => 'coffer.pem');
+  $coffer->unlock($privkey);
+  # or $coffer->unlock($key2, $key3);
   
-  # Create a key that can be activated by the holder of the key to a SSL certificate
-  $repo->new_key('our_keyserver', KeyServer => { url => $url });
+  # content of a coffer is a SecretBuffer
+  $coffer->content->unmask_to(sub { say $_[0] });
   
-  # Create a vault and store into it the secret used to encrypt a ZFS dataset
-  my $vault= $repo->new_vault('ZFS-key');
-  $vault->pair_with($repo->key_list);
-  my $zfs_key= secret(append_random => 16);
-  $vault->store('zfs_key', $zfs_key);
-  
-  ... # later,
-  
-  my $vault= $repo->vault('ZFS-key');
-  $vault->unlock(interactive => 1); # try ssh agent, try key server, fall back to pw
-  my $zfs_key= $vault->load('zfs_key');
-
 =head1 DESCRIPTION
 
 This module is an implementation of a "key wrapping scheme" (such as done by age or libsodium),
-but with a focus on applying it to specifc workflows rather than being just an abstract tool.
+but with a focus on applying it to specifc workflows rather than being just a generic container
+for data.
 
 Since there are so many "secrets" and "keys" involved in this system, I'm using the following
 metaphor to help disambiguate them:
 
 =over
 
+=item PKey
+
+The L<PKey|Crypt::MultiKey::PKey> objects are wrappers around a public/private key system,
+currently OpenSSL's C<EVP_PKEY>.
+A PKey can either be a public key, private key, or public key with an encrypted private key.
+Subclasses of C<Crypt::MultiKey::PKey> implement different ways of recovering the private half
+of the key; for example the L<Crypt::MultiKey::PKey::SSHAgentSignature> can use a signature
+from an SSH agent as a password to decrypt the private half of the PKey, and the
+L<Crypt::MultiKey::PKey::YubiKey> uses a challenge/response from a YubiKey as a password to
+unlock the private half.
+
+PKey objects can be loaded from OpenSSL public key PEM files, OpenSSL private key PEM files,
+OpenSSH public keys, and OpenSSH private keys, and in limited cases even encrypted OpenSSH
+private keys.  New keys are saved as OpenSSL format with additional PEM headers to hold the
+attributes of the object.
+
+=item Coffer
+
+A L<Coffer|Crypt::MultiKey::Coffer> object is a container that implements a key-wrapping scheme
+where a master "file key" is encrypted with one or more "Locks" and each "Lock" can require one
+or more PKeys to unlock it.  A symmetric AES key is derived from the file key and used to
+encrypt the data payload.  Coffers are also stored in PEM format, with PEM headers that describe
+which keys can unlock the Coffer, and a MAC to guard against tampering.
+
+The coffer file may also contain any number of PKey PEM blocks if you wish to keep all the
+coffer's keys (with private-half encrypted) bundled in the same file to ensure they don't get
+lost.
+
+Because a Coffer is always locked using public/private key pairs, the coffer can be re-encrypted
+at any time without needing the private halves present/decrypted.
+
 =item Vault
 
-A Vault object is an encrytion context that can be used to encrypt or decrypt user data, and is
-initially created with a secret AES symmetric key in an "unlocked" state.  The Vault
-conceptually contains a key/value dictionary of secrets which can be loaded and stored while
-the vault is unlocked.  The Vault may be paired with any number of Key objects, and pairing can
-only occur while the Vault is unlocked.  *Any* paired key can unlock the Vault.
-
-Vaults are stored in a JSON file, with the encrypted name/value data stored in hexidecimal.
-For larger encrypted data (over a configurable threshold), a directory of the same name of the
-Vault file is created and the large data streams are written to files named with GUIDs.
-The names of data stored in the Vault cannot be determined without first unlocking the Vault.
-The name/value data stored in the Vault is not intended to be a performant database, but rather
-just a simple convenient way to store more than one thing in the same Vault.  The Vault is
-re-encrypted and written to disk after every ->store operation.
-
-=item Key
-
-The Key objects are wrappers around a public/private key system, and then the private half
-is either encrypted or stored separately.  A Key is "enabled" when the private half is known
-and "disabled" when it isn't.  The private half is used to decrypt the AES key of a Vault.
-
-The fact that every Key has a public component is what allows them to be paired with a Vault
-even while they are disabled.  The practical application of this is that you can establish a
-Key for a hardware device, or a password physically stored in a safe deposit box, and then
-later pair this Key with new Vaults without first needing to enable it.
+A L<Vault|Crypt::MultiKey::Vault> object is a container just like a Coffer but designed for
+compatibility with Linux's dm-crypt implementation.  The Vault can be unlocked and then an
+offset can be bound to a loopback device, and then initialize dm-crypt so that the rest of the
+file can be read/written directly by a Device Mapper block device.  In this case,
+Crypt::MultiKey is really just acting as a substitute for LUKS, but one which is perhaps more
+self-explanatory since the head of the file is PEM plaintext.
 
 =back
 
@@ -102,44 +122,12 @@ secret is written.
 
 This module collection facilitates all of that.
 
-=head2 Design
-
-A typical directory of MultiKey files might look like:
-
-  /etc/mk/
-  /etc/mk/vault-root.json
-  /etc/mk/vault-root/12345678-1234-12-12-123456789ABCDEF.enc
-  /etc/mk/key-master_pw.json
-  /etc/mk/key-yubikey.json
-  /etc/mk/key-our_company_keyserver.json
-  /etc/mk/key-ssh_user1.json
-
-Vaults start with C<"vault-">.  In this case there is only one, named C<"root">.
-The contents of the vault named "root" could include any number of name/value pairs, but at
-least one of them was large enough to get written out as its own file in the C<< vault-root/ >>
-subdirectory.  The vault json includes details about which keys it has been paired with, such
-as the salt that was used in the pairing for the encryption context.  It references the keys
-by UUID rather than filename, so you can rename the key files without breaking things.
-
-Keys are stored in files with the prefix C<< key- >>.  In this example, there is one key named
-'master_pw' encrypted with a password, one key named 'yubikey' that is tied to a specific USB
-hardware device, one key named 'our_company_keyserver' which refers to a different host by URL,
-and a key named 'ssh_user1' which is linked to the ssh key of user1.  Each key json contains
-the UUID, and public key components of the public/private keypair.  It will also contain details
-which algorithm to use to enable it.
-
-While you *can* put all the files into a standard directory layout like this, you are not
-required to.  You could pair a key with a vault then completely remove the key file from the
-filesystem to e.g. a USB stick.  Later, your perl script could point a MultiKey instance at the
-file on the removable media to make the key available as if it had been in the directory with
-the others.
-
 =cut
 
 use strict;
 use warnings;
 use Carp;
-use parent qw( DynaLoader );
+use parent qw( DynaLoader Exporter );
 use Crypt::SecretBuffer 0.016;
 use Crypt::SecretBuffer qw( BASE64 );
 sub dl_load_flags {0x01} # Share extern symbols with other modules
@@ -153,41 +141,96 @@ sub _openssl_version {
    }
 }
 
-sub new_vault {
-   my ($self, $name)= splice @_, 0, 2;
-   my $path= $self->_subpath("vault-$name.json");
-   $self->{vault}{$name} || -e $path
-      and croak "Path already exists: $path";
-   my @opts= ( path => $path, name => $name, ref $_[0] eq 'HASH'? %{$_[0]} : @_ );
-   Crypt::MultiKey::Vault->new(@opts)
+our @EXPORT_OK= qw(
+   pkey coffer vault hkdf symmetric_encrypt symmetric_decrypt
+   lazy_load lazy_loadable
+);
+
+=head1 Functions
+
+All functions can be exported, or called by the full package name.
+They cannot be called as class methods.
+
+=head2 pkey
+
+Shortcut for C<< Crypt::MultiKey::PKey->new(@_) >>.
+
+=head2 coffer
+
+Shortcut for C<< Crypt::MultiKey::Coffer->new(@_) >>.
+
+=head2 vault
+
+Shortcut for C<< Crypt::MultiKey::Vault->new(@_) >>.
+
+=cut
+
+sub pkey {
+   Crypt::MultiKey::PKey->new(@_);
+}
+
+sub coffer {
+   require Crypt::MultiKey::Coffer;
+   Crypt::MultiKey::Coffer->new(@_);
 }
 
 sub vault {
-   my ($self, $name)= @_;
-   $self->{vault}{$name} ||= do {
-      my $path= $self->_subpath("vault-$name.json");
-      return undef unless -f $path;
-      Crypt::MultiKey::Vault->new_from_file($path);
-   };
+   require Crypt::MultiKey::Vault;
+   Crypt::MultiKey::Vault->new(@_);
 }
 
-sub new_key {
-   my ($self, $name, $type)= splice @_, 0, 3;
-   my $path= $self ->_subpath("key-$name.json");
-   $self->{key}{$name} || -e $path
-      and croak "Key '$name' already exists";
-   my @opts= ( path => $path, name => $name, ref $_[0] eq 'HASH'? %{$_[0]} : @_ );
-   Crypt::MultiKey::PKey->load_class_for_type($type)->new(@opts)
-}
+=head2 hkdf
 
-sub key {
-   my ($self, $name)= @_;
-   $self->{key}{$name} ||= do {
-      my $path= $self->_subpath("key-$name.json");
-      return undef unless -f $path;
-      Crypt::MultiKey::PKey->new_from_file($path);
-   };
-}
+  my %params;
+  $secret_buffer= hkdf(\%params, $secret_key_material);
+  # %params:
+  #   size           - number of bytes to generate
+  #   cipher         - substitute for 'size'; name of a cipher
+  #   kdf_info       - namespace for key derivation
+  #   kdf_salt       - salt bytes, will be generated if not provided
+
+This runs OpenSSL's EVP_PKEY_HKDF with EVP_sha256, supplying 'info' and 'salt' and storing the
+output into a new SecretBuffer object.
+
+=head2 symmetric_encrypt
+
+  my %params;
+  symmetric_encrypt(\%params, $aes_key, $secret);
+  # %params:
+  #   cipher     - Currently must be AES-256-GCM; will be assigned if unset
+  #   pad        - optionally prefix the secret with random bytes
+  #                and pad to specified length.
+  #   ciphertext - set on output to the encrypted bytes of ciphertext
+
+This performs encryption using a cipher (currently always AES-256-GCM) and optional padding
+to obscure the length of the secret.  The ciphertext is written into a field of C<%params>.
+You must preserve the entire contents of C<%params> to be passed to C<symmetric_decrypt>.
+The C<$aes_key> should be a SecretBuffer object and must be the correct length for the cipher.
+Use L</hkdf> to get a key the correct length.
+
+=head2 symmetric_decrypt
+
+  my %params; # previous encryption result
+  my $secret= symmetric_decrypt(\%params, $aes_key);
+
+This decrypts the previous result of C<symmetric_encrypt>.  If using C<AES-GCM>, it will also
+verify whether the C<$aes_key> was the correct key.
+
+=head2 lazy_load
+
+  $class= lazy_load($class);
+
+Given a class name, perform 'require' on that class name if and only if it is in the permitted
+set of L</lazy_loadable>.
+
+=head2 lazy_loadable
+
+Convenient accessor for C<< %Crypt::MultiKey::lazy_loadable >>.  Returns a global hashref of the
+names of classes which are safe to load on demand; i.e. from tainted input requesting a class be
+used to process that input.  This hashref is writeable so that other modules may add more names
+to the list.
+
+=cut
 
 # For security, only permit loading packages which are known to be safe to construct from
 # external configuration.
@@ -209,6 +252,7 @@ sub lazy_load {
    return $class;
 }
 
+# Can't do anything useful without PKey, so load it automatically
 require Crypt::MultiKey::PKey;
 
 1;

@@ -80,7 +80,7 @@ _openssl_version_components()
       XPUSHs(sv_2mortal(newSViv(patch)));
 
 void
-generate_uuid_v4()
+_generate_uuid_v4()
    PPCODE:
       XPUSHs(cmk_generate_uuid_v4(sv_newmortal()));
 

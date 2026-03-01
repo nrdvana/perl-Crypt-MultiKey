@@ -67,7 +67,7 @@ static bool shim_foldEQ(const char *s1, const char *s2, int len) {
  * This changes the SV length even though the bytes haven't been initialized yet.
  * It also initializes the NUL-terminator.
  */
-char* cmk_prepare_sv_buffer(SV *sv, size_t size) {
+static char* cmk_prepare_sv_buffer(SV *sv, size_t size) {
    char *p;
    if (!SvOK(sv)) /* prevent "Use of uninitialized value in subroutine entry" */
       sv_setpvs(sv, "");
@@ -75,6 +75,13 @@ char* cmk_prepare_sv_buffer(SV *sv, size_t size) {
    SvCUR_set(sv, size);
    p[size]= '\0';
    return p;
+}
+
+static bool looks_like_integer(SV *sv) {
+   return SvNOK(sv)? SvNV(sv) == SvIV(sv)
+        : SvIOK(sv) || SvUOK(sv)? true
+        : looks_like_number(sv)? SvNV(sv) == SvIV(sv)
+        : false;
 }
 
 static size_t round_up_to_pow2(size_t n) {
@@ -1069,7 +1076,7 @@ cleanup:
 secret_buffer *
 cmk_hkdf(HV *params, secret_buffer *key_material) {
    const char *err= NULL;
-   secret_buffer *aes_key= NULL;
+   secret_buffer *out_buf= NULL;
    EVP_PKEY_CTX *kdf= NULL;
    size_t size, wrote;
    U8 *buf, *info;
@@ -1096,7 +1103,15 @@ cmk_hkdf(HV *params, secret_buffer *key_material) {
          GOTO_CLEANUP_CROAK("hv_store failed");
       sv= NULL;
    }
-   aes_key= secret_buffer_new(size, NULL);
+
+   svp= hv_fetchs(params, "size", 0);
+   if (svp && *svp && SvOK(*svp)) {
+      if (!looks_like_integer(*svp) || SvIV(*svp) <= 0)
+         croak("Expected positive integer for 'size'");
+      size= SvIV(*svp);
+   }
+
+   out_buf= secret_buffer_new(size, NULL);
    
    /* determine the 'info' parameter */
    svp= hv_fetchs(params, "kdf_info", 0);
@@ -1131,18 +1146,18 @@ cmk_hkdf(HV *params, secret_buffer *key_material) {
       || EVP_PKEY_CTX_set1_hkdf_salt(kdf, salt, salt_len) <= 0
       || EVP_PKEY_CTX_add1_hkdf_info(kdf, info, info_len) <= 0
       || EVP_PKEY_CTX_set1_hkdf_key(kdf, key_material->data, key_material->len) <= 0
-      || EVP_PKEY_derive(kdf, (U8*) aes_key->data, &wrote) <= 0
+      || EVP_PKEY_derive(kdf, (U8*) out_buf->data, &wrote) <= 0
    )
       GOTO_CLEANUP_CROAK("HKDF failed");
    if (wrote != size)
       GOTO_CLEANUP_CROAK("HKDF returned wrong size");
-   aes_key->len= wrote;
+   out_buf->len= wrote;
    
 cleanup:
    if (sv) SvREFCNT_dec(sv);
    if (kdf) EVP_PKEY_CTX_free(kdf);
    if (err) cmk_croak_with_ssl_error(NULL, err);
-   return aes_key;
+   return out_buf;
 }
 
 /* 8 random + 0..63 random + 8 bytes of length */
