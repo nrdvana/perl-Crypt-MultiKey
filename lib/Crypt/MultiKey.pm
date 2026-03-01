@@ -192,6 +192,13 @@ sub vault {
 This runs OpenSSL's EVP_PKEY_HKDF with EVP_sha256, supplying 'info' and 'salt' and storing the
 output into a new SecretBuffer object.
 
+=head2 sha256
+
+  $secret_buffer= sha256(@strings);
+
+Feed one or more strings (which may be SecretBuffers or Spans) into sha256 and return the result
+as a SecretBuffer.  The buffer contains raw bytes, not hex or base64.
+
 =head2 symmetric_encrypt
 
   my %params;

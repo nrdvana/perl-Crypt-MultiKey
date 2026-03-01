@@ -85,6 +85,16 @@ _generate_uuid_v4()
       XPUSHs(cmk_generate_uuid_v4(sv_newmortal()));
 
 void
+sha256(...)
+   INIT:
+      SV *mortal_buf_ref= NULL;
+      secret_buffer *out_sb= secret_buffer_new(32, &mortal_buf_ref);
+      out_sb->len= 32;
+   PPCODE:
+      cmk_sha256( (U8*) out_sb->data, &ST(0), items);
+      XPUSHs(mortal_buf_ref);
+
+void
 hkdf(params, key_material)
    HV *params
    secret_buffer *key_material

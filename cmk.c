@@ -1068,6 +1068,43 @@ cleanup:
    if (err) cmk_croak_with_ssl_error("recreate_key_material", err);
 }
 
+void
+cmk_sha256(U8 dest[32], SV **input, size_t n_items) {
+   const char *err= NULL;
+   EVP_MD_CTX *ctx = NULL;
+   unsigned int outlen = 0;
+
+   ERR_clear_error();
+
+   ctx = EVP_MD_CTX_new();
+   if (!ctx)
+      GOTO_CLEANUP_CROAK("EVP_MD_CTX_new failed");
+
+   if (EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) != 1)
+      GOTO_CLEANUP_CROAK("EVP_DigestInit_ex(SHA-256) failed");
+
+   for (size_t i = 0; i < n_items; i++) {
+      STRLEN len = 0;
+      const U8 *buf = (const U8*) secret_buffer_SvPVbyte(input[i], &len);
+
+      /* Allow empty items: update with 0 bytes is fine */
+      if (len > 0) {
+         if (EVP_DigestUpdate(ctx, buf, (size_t)len) != 1)
+            GOTO_CLEANUP_CROAK("EVP_DigestUpdate failed");
+      }
+   }
+
+   if (EVP_DigestFinal_ex(ctx, dest, &outlen) != 1)
+      GOTO_CLEANUP_CROAK("EVP_DigestFinal_ex failed");
+
+cleanup:
+   if (ctx) EVP_MD_CTX_free(ctx);
+   if (err) cmk_croak_with_ssl_error("sha256", err);
+   if (outlen != 32)
+      /* Should never happen for SHA-256 */
+      croak("cmk_sha256: unexpected digest length %u", outlen);
+}
+
 /* This runs HKDF on the key material to generate an AES key.
  * It reads the cipher from the encryption parameters to know how large to make the key.
  * It also creates a random salt and stores that into the encryption parameters.

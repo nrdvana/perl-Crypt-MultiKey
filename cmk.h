@@ -82,6 +82,11 @@ extern void cmk_pkey_generate_key_material(cmk_pkey *pubkey, HV *tumbler_out, se
  */
 extern void cmk_pkey_recreate_key_material(cmk_pkey *privkey, HV *tumbler, secret_buffer *skey_buf);
 
+/* Run sha256 on a list of SV, which may be scalars or SecretBuffer objects or Spans
+ * Sha256 always generates 32 bytes, so write it into a fixed-length array.
+ */
+extern void cmk_sha256(U8 dest[32], SV **input, size_t n_items);
+
 /* This runs HKDF on the key material to generate an AES key.
  * It reads the cipher from the encryption parameters to know how large to make the key.
  * It also creates a random salt and stores that into the encryption parameters.
