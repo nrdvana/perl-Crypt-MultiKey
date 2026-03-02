@@ -56,4 +56,20 @@ subtest gcm_padding => sub {
    }
 };
 
+subtest gcm_auth_data => sub {
+   my $aes_key= secret(append_random => 32);
+   my $s1= secret(append_random => 100);
+   my %params= ( cipher => 'AES-256-GCM', auth_data => 'some context' );
+   Crypt::MultiKey::symmetric_encrypt(\%params, $aes_key, $s1);
+   my $s2= Crypt::MultiKey::symmetric_decrypt(\%params, $aes_key);
+   is( $s1->memcmp($s2), 0, "s1 == s2" );
+
+   $params{auth_data}= 'tampered-with context';
+   ok( !eval { $s2= Crypt::MultiKey::symmetric_decrypt(\%params, $aes_key); 1 },
+      'decrypt fails with tampered context' );
+   delete $params{auth_data};
+   ok( !eval { $s2= Crypt::MultiKey::symmetric_decrypt(\%params, $aes_key); 1 },
+      'decrypt fails with missing context' );
+};
+
 done_testing;

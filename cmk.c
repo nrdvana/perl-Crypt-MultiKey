@@ -1288,6 +1288,21 @@ void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret,
       )
          GOTO_CLEANUP_CROAK("AES-GCM init failed");
 
+      /* The integrity_context parameter allows the user to include AAD
+       * (Additional Authenticated Data) into the GCM counter so that the GCM tag is
+       * validating the authenticity of the secret *and* the additional data, even
+       * though the additional data is not included in the ciphertext.
+       */
+      svp= hv_fetchs(params, "auth_data", 0);
+      if (svp && *svp && SvOK(*svp)) {
+         STRLEN aad_len = 0;
+         const U8 *aad = (const U8*)secret_buffer_SvPVbyte(*svp, &aad_len);
+         if (aad_len) {
+            if (EVP_EncryptUpdate(aes_ctx, NULL, &outlen, aad, (int)aad_len) != 1)
+               GOTO_CLEANUP_CROAK("AES-GCM add integrity_context failed");
+         }
+      }
+
       if (prefix_len) {
          if (EVP_EncryptUpdate(aes_ctx, ciphertext_pos, &outlen, prefix_buf, (int)prefix_len) != 1
             || outlen != (int)prefix_len)
@@ -1479,6 +1494,20 @@ void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *se
       )
          GOTO_CLEANUP_CROAK("AES-GCM decrypt init failed");
 
+      /* The integrity_context parameter allows the user to include AAD
+       * (Additional Authenticated Data) into the GCM counter so that the GCM tag is
+       * validating the authenticity of the secret *and* the additional data, even
+       * though the additional data is not included in the ciphertext.
+       */
+      svp = hv_fetchs(params, "auth_data", 0);
+      if (svp && *svp && SvOK(*svp)) {
+         STRLEN aad_len = 0;
+         const U8 *aad = (const U8*)secret_buffer_SvPVbyte(*svp, &aad_len);
+         if (aad_len) {
+            if (EVP_DecryptUpdate(aes_ctx, NULL, &outlen, aad, (int)aad_len) != 1)
+               GOTO_CLEANUP_CROAK("AES-GCM add integrity_context failed");
+         }
+      }
       /* check if length obfuscation was used */
       svp= hv_fetchs(params, "pad", 0);
       if (svp && *svp && SvTRUE(*svp)) {
@@ -1596,7 +1625,10 @@ void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *se
    }
 cleanup:
    if (aes_ctx) EVP_CIPHER_CTX_free(aes_ctx);
-   if (err) cmk_croak_with_ssl_error("symmetric_decrypt", err);
+   if (err) {
+      secret_buffer_set_len(secret_out, 0); /* calls OPENSSL_cleanse */
+      cmk_croak_with_ssl_error("symmetric_decrypt", err);
+   }
 }
 
 #include "cmk_parse_openssh.c"

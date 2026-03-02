@@ -207,6 +207,11 @@ as a SecretBuffer.  The buffer contains raw bytes, not hex or base64.
   #   cipher     - Currently must be AES-256-GCM; will be assigned if unset
   #   pad        - optionally prefix the secret with random bytes
   #                and pad to specified length.
+  #   auth_data  - optional Additional Authenticated Data (AAD) for AES-GCM
+  #                to include in the validation tag of the ciphertext.
+  #                In other words, cause decryption to fail if it isn't given
+  #                identical 'auth_data'.  The failure will be indistinguishable
+  #                from an incorrect $aes_key.
   #   ciphertext - set on output to the encrypted bytes of ciphertext
 
 This performs encryption using a cipher (currently always AES-256-GCM) and optional padding
@@ -214,6 +219,9 @@ to obscure the length of the secret.  The ciphertext is written into a field of 
 You must preserve the entire contents of C<%params> to be passed to C<symmetric_decrypt>.
 The C<$aes_key> should be a SecretBuffer object and must be the correct length for the cipher.
 Use L</hkdf> to get a key the correct length.
+
+If you use C<auth_data>, you should *not* serialize that alongside the other parameters, and
+instead reconstruct the C<auth_data> before decryption.
 
 =head2 symmetric_decrypt
 
