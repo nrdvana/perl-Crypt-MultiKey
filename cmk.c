@@ -1198,6 +1198,7 @@ cleanup:
 }
 
 /* 8 random + 0..63 random + 8 bytes of length */
+#define CMK_PAD_PREFIX_MIN_SIZE (8 + 0 + 8)
 #define CMK_PAD_PREFIX_MAX_SIZE (8 + 63 + 8)
 #define CMK_PAD_PREFIX_VARSIZE(buf) (((buf)[0] ^ (buf)[1] ^ (buf)[2] ^ (buf)[3] ^ (buf)[4] ^ (buf)[5] ^ (buf)[6] ^ (buf)[7]) & 0x3F)
 
@@ -1243,6 +1244,7 @@ void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret,
    /* branch for stream ciphers */
    if (cipher == EVP_aes_256_gcm()) {
       U8 *ciphertext_pos, *ciphertext_lim, *nonce, *gcm_tag;
+      const U8 *secret_pos, *secret_lim;
       U8 prefix_buf[CMK_PAD_PREFIX_MAX_SIZE];
       size_t prefix_len= 0, padded_len= secret_len;
 
@@ -1250,6 +1252,7 @@ void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret,
       svp= hv_fetchs(params, "pad", 0);
       if (svp && *svp && SvTRUE(*svp)) {
          uint64_t packed_secret_len;
+         size_t rem;
          IV pad= SvIV(*svp);
          if (pad < 1)
             GOTO_CLEANUP_CROAK("pad must be greater than 0");
@@ -1263,7 +1266,8 @@ void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret,
          memcpy(prefix_buf + prefix_len - 8, &packed_secret_len, 8);
          /* then take the prefix length and secret length and round them up to a multiple of pad */
          padded_len+= prefix_len;
-         padded_len+= pad - (padded_len % pad);
+         rem= padded_len % pad;
+         if (rem) padded_len+= pad - rem;
       }
 
       /* The encrypted result is N bytes of public nonce followed by the output bytes of the
@@ -1292,14 +1296,14 @@ void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret,
          OPENSSL_cleanse(prefix_buf, prefix_len);
       }
 
-      while (secret_len) {
+      for (secret_pos= secret, secret_lim= secret+secret_len; secret_pos < secret_lim;) {
          /* handle unlikely edge case where secret is larger than INT_MAX */
-         int n= secret_len > INT_MAX? INT_MAX : secret_len;
-         if (EVP_EncryptUpdate(aes_ctx, ciphertext_pos, &outlen, secret, n) != 1
+         size_t remain= secret_lim - secret_pos;
+         int n= remain > INT_MAX? INT_MAX : (int) remain;
+         if (EVP_EncryptUpdate(aes_ctx, ciphertext_pos, &outlen, secret_pos, n) != 1
             || outlen != n)
             GOTO_CLEANUP_CROAK("AES-GCM encrypt (secret) failed");
-         secret += n;
-         secret_len -= n;
+         secret_pos += n;
          ciphertext_pos += n;
       }
 
@@ -1483,13 +1487,20 @@ void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *se
          size_t prefix_len;
          /* read up to PREFIX_MAX_SIZE of potential prefix */
          len= ciphertext_len < sizeof(prefix_buf)? ciphertext_len : sizeof(prefix_buf);
+         if (len < CMK_PAD_PREFIX_MIN_SIZE)
+            GOTO_CLEANUP_CROAK("Ciphertext is too short to be a padded secret");
          if (EVP_DecryptUpdate(aes_ctx, prefix_buf, &outlen, ciphertext_pos, (int)len) != 1)
             GOTO_CLEANUP_CROAK("AES-GCM decrypt failed");
          /* hash the first 8 bytes to determine true length of the prefix */
          prefix_len= 8 + CMK_PAD_PREFIX_VARSIZE(prefix_buf) + 8;
+         if (len < prefix_len)
+            GOTO_CLEANUP_CROAK("Ciphertext is too short to be a padded secret");
          /* now load the true secret length as little-endian 64-bit */
          memcpy(&packed_secret_len, prefix_buf + prefix_len - 8, 8);
          secret_len= le64toh(packed_secret_len);
+         /* sanity check */
+         if (ciphertext_len < prefix_len + secret_len)
+            GOTO_CLEANUP_CROAK("Ciphertext is too short to be a padded secret");
          /* allocate secret buffer and set up position pointers */
          secret_buffer_set_len(secret_out, secret_len);
          secret_pos= (U8*) secret_out->data;
