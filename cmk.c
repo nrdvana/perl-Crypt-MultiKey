@@ -20,9 +20,11 @@
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
   #include <openssl/decoder.h>
   #include <openssl/core_names.h>
+  #include <openssl/params.h>
 #else
   /* 1.1.1 needs EC headers */
   #include <openssl/ec.h>
+  #include <openssl/hmac.h>
 #endif
 
 #include <string.h>
@@ -1102,7 +1104,7 @@ cleanup:
    if (err) cmk_croak_with_ssl_error("sha256", err);
    if (outlen != 32)
       /* Should never happen for SHA-256 */
-      croak("cmk_sha256: unexpected digest length %u", outlen);
+      croak("sha256: unexpected digest output length %u", outlen);
 }
 
 /* This runs HKDF on the key material to generate an AES key.
@@ -1195,6 +1197,87 @@ cleanup:
    if (kdf) EVP_PKEY_CTX_free(kdf);
    if (err) cmk_croak_with_ssl_error(NULL, err);
    return out_buf;
+}
+
+void
+cmk_hmac_sha256(U8 dest[32], const U8 *key, size_t key_len, SV **input, size_t n_items) {
+   const char *err = NULL;
+   size_t outlen = 0;
+
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+   /* OpenSSL 3.x: EVP_MAC */
+   EVP_MAC *mac = NULL;
+   EVP_MAC_CTX *mctx = NULL;
+
+   ERR_clear_error();
+
+   mac = EVP_MAC_fetch(NULL, "HMAC", NULL);
+   if (!mac)
+      GOTO_CLEANUP_CROAK("EVP_MAC_fetch(HMAC) failed");
+
+   mctx = EVP_MAC_CTX_new(mac);
+   if (!mctx)
+      GOTO_CLEANUP_CROAK("EVP_MAC_CTX_new failed");
+
+   /* Set digest=SHA256 */
+   OSSL_PARAM params[2];
+   params[0] = OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST, (char *)"SHA256", 0);
+   params[1] = OSSL_PARAM_construct_end();
+
+   if (EVP_MAC_init(mctx, key, key_len, params) != 1)
+      GOTO_CLEANUP_CROAK("EVP_MAC_init(HMAC/SHA256) failed");
+
+   for (size_t i = 0; i < n_items; i++) {
+      STRLEN len = 0;
+      const U8 *buf = (const U8 *)secret_buffer_SvPVbyte(input[i], &len);
+      if (len > 0) {
+         if (EVP_MAC_update(mctx, buf, (size_t)len) != 1)
+            GOTO_CLEANUP_CROAK("EVP_MAC_update failed");
+      }
+   }
+
+   outlen = 0;
+   if (EVP_MAC_final(mctx, dest, &outlen, 32) != 1)
+      GOTO_CLEANUP_CROAK("EVP_MAC_final failed");
+
+cleanup:
+   if (mctx) EVP_MAC_CTX_free(mctx);
+   if (mac) EVP_MAC_free(mac);
+#else
+   /* OpenSSL 1.1.x: HMAC_CTX (not deprecated there) */
+   HMAC_CTX *ctx = NULL;
+
+   ERR_clear_error();
+
+   ctx = HMAC_CTX_new();
+   if (!ctx)
+      GOTO_CLEANUP_CROAK("HMAC_CTX_new failed");
+
+   if (HMAC_Init_ex(ctx, key, (int)key_len, EVP_sha256(), NULL) != 1)
+      GOTO_CLEANUP_CROAK("HMAC_Init_ex(SHA-256) failed");
+
+   for (size_t i = 0; i < n_items; i++) {
+      STRLEN len = 0;
+      const U8 *buf = (const U8 *)secret_buffer_SvPVbyte(input[i], &len);
+      if (len > 0) {
+         if (HMAC_Update(ctx, buf, (size_t)len) != 1)
+            GOTO_CLEANUP_CROAK("HMAC_Update failed");
+      }
+   }
+
+   {
+      unsigned outlen_u= 0;
+      if (HMAC_Final(ctx, dest, &outlen_u) != 1)
+         GOTO_CLEANUP_CROAK("HMAC_Final failed");
+      outlen= outlen_u;
+   }
+
+cleanup:
+   if (ctx) HMAC_CTX_free(ctx);
+#endif
+   if (err) cmk_croak_with_ssl_error("hmac_sha256", err);
+   if (outlen != 32)
+      croak("hmac_sha256: unexpected mac length %d", (int)outlen);
 }
 
 /* 8 random + 0..63 random + 8 bytes of length */
