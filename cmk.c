@@ -1070,6 +1070,9 @@ cleanup:
    if (err) cmk_croak_with_ssl_error("recreate_key_material", err);
 }
 
+/* Simple implementation of SHA256 that hashes a combined list of items,
+ * each of which can be a plain scalar, scalar-ref, SecretBuffer, or Span.
+ */
 void
 cmk_sha256(U8 dest[32], SV **input, size_t n_items) {
    const char *err= NULL;
@@ -1154,27 +1157,42 @@ cmk_hkdf(HV *params, secret_buffer *key_material) {
    
    /* determine the 'info' parameter */
    svp= hv_fetchs(params, "kdf_info", 0);
-   if (svp && *svp && SvOK(*svp)) {
-      info= (U8*) secret_buffer_SvPVbyte(*svp, &info_len);
+   if (svp && *svp) {
+      /* info may be explicitly set to an empty string or undef */
+      if (!SvOK(*svp)) {
+         info = NULL;
+         info_len = 0;
+      } else {
+         info= (U8*) secret_buffer_SvPVbyte(*svp, &info_len);
+         if (info_len == 0)
+            info = NULL;
+      }
    } else {
       info= (U8*) "Crypt::MultiKey";
       info_len= 15;
    }
 
    /* was salt provided? */
-   svp= hv_fetchs(params, "kdf_salt", 0);
-   if (svp && *svp && SvOK(*svp)) {
-      salt= (U8*) secret_buffer_SvPVbyte(*svp, &salt_len);
-      if (salt_len != CMK_KDF_SALT_LEN)
-         GOTO_CLEANUP_CROAK("kdf_salt length must be " STRINGIFY_MACRO(CMK_KDF_SALT_LEN) " bytes");
+   svp = hv_fetchs(params, "kdf_salt", 0);
+   if (svp && *svp) {
+      /* info may be explicitly set to an empty string or undef */
+      if (!SvOK(*svp)) {
+         salt = NULL;
+         salt_len = 0;
+      } else {
+         salt = (U8*) secret_buffer_SvPVbyte(*svp, &salt_len);
+         if (salt_len == 0)
+            salt = NULL;
+      }
    } else {
+      /* kdf_salt key not present at all ==> generate random salt and store it */
       if (RAND_bytes(salt_buf, sizeof salt_buf) != 1)
          GOTO_CLEANUP_CROAK("Failed to generate HKDF salt");
-      if (!hv_stores(params, "kdf_salt", (sv= newSVpvn((char*) salt_buf, sizeof salt_buf))))
+      if (!hv_stores(params, "kdf_salt", (sv = newSVpvn((char*)salt_buf, sizeof salt_buf))))
          GOTO_CLEANUP_CROAK("hv_store failed");
-      sv= NULL; /* hv owns it now */
-      salt= salt_buf;
-      salt_len= sizeof salt_buf;
+      sv = NULL; /* hv owns it now */
+      salt = salt_buf;
+      salt_len = sizeof salt_buf;
    }
 
    wrote= size;
@@ -1199,6 +1217,9 @@ cleanup:
    return out_buf;
 }
 
+/* Simple implementation of HMAC-SHA256 that hashes a combined list of items,
+ * each of which can be a plain scalar, scalar-ref, SecretBuffer, or Span.
+ */
 void
 cmk_hmac_sha256(U8 dest[32], const U8 *key, size_t key_len, SV **input, size_t n_items) {
    const char *err = NULL;
@@ -1280,7 +1301,7 @@ cleanup:
       croak("hmac_sha256: unexpected mac length %d", (int)outlen);
 }
 
-/* 8 random + 0..63 random + 8 bytes of length */
+/* 8 random bytes + 0..63 random bytes + 8 byte secret_len */
 #define CMK_PAD_PREFIX_MIN_SIZE (8 + 0 + 8)
 #define CMK_PAD_PREFIX_MAX_SIZE (8 + 63 + 8)
 #define CMK_PAD_PREFIX_VARSIZE(buf) (((buf)[0] ^ (buf)[1] ^ (buf)[2] ^ (buf)[3] ^ (buf)[4] ^ (buf)[5] ^ (buf)[6] ^ (buf)[7]) & 0x3F)
