@@ -1,3 +1,39 @@
+## Overview
+
+This project is a perl XS module built on top of OpenSSL to provide an encrypted container
+that can be unlocked by various combinations of keys.  They keys are always public/private
+so that the container can be re-encrypted against the public keys without having the private
+keys present.
+
+## Concepts
+
+### Coffer
+
+Crypt::MultiKey::Coffer is a container with an encrypted 'content', and can also act as a
+password safe by using a built-in key/value storage format.  The Coffer is the main object of
+interest in this module collection.
+
+### PKey
+
+Crypt::MultiKey::PKey is a wrapper around OpenSSL's EVP_PKEY.  Its three main states are
+"public key only", "full public+private key", or "public key with encrypted private key".
+Subclasses of PKey implement different strategies for loading/decrypting the private half
+of the key.
+
+### SecretBuffer
+
+This project makes lots of use of Crypt::SecretBuffer.  That module is a public CPAN module and
+you can inspect its documentation with "perldoc Crypt::SecretBuffer".
+SecretBuffer is a mutable buffer which always zeroes it's memory buffers when resized or freed.
+SecretBuffer also has a C API.  One non-obvious feature of SecretBuffer is that the function
+`secret_buffer *buf= secret_buffer_new(capacity, SV **ref)` creates a *mortal* perl object and
+returns a C pointer to it's internal struct, so this struct will free itself at the end of the
+XS function call regardless of whether we exit normally or with an exception.  So, the C code
+that creates new secret buffers never needs to free them or zero them, because that is automatic.
+You can find the C API for secret_buffer by looking for the path output by
+ `perldoc -l Crypt::SecretBuffer` and then replace with suffix
+`Crypt/SecretBuffer/Install/SecretBuffer.h`.
+
 ## CODE STYLE
 
 Please use a 3-space indent throughout.
@@ -7,8 +43,8 @@ Please use a 3-space indent throughout.
 Please use C89 compatible syntax, with `/* */` comments, and declaring variables at the top of
 a block.
 
-When writing C code, look for opportunities to reduce the number of curly braces, for instance
-writing
+When writing C code, look for opportunities to reduce the number of curly braces when the control
+flow is obvious, for instance, writing
 
 ```
    if (test) {
@@ -45,17 +81,16 @@ throughout the function.  Beware of any Perl API functions that might 'croak'.
 
 When writing XS code, take special care to make sure that if something dies with an exception,
 the Perl temporaries system will take care of cleaning up allocations etc.  For example,
-SAVEFREEPV can deallocate buffers automatically.  For buffers containing secretss, you can use
+SAVEFREEPV can deallocate buffers automatically.  For buffers containing secrets, you can use
 the C API of Crypt::SecretBuffer to create temporary buffers that will get wiped as perl frees
 the temporaries.
-Use "croak" or "croak_with_syserror" in any place that the user has obviously violated the API
-of a function.  Return false/NULL for common scenarios where a result can't be computed but
+Use "croak" or "cmk_croak_with_ssl_error" in any place that the user has obviously violated the
+API of a function.  Return false/NULL for common scenarios where a result can't be computed but
 there was a reasonable expectation a user might supply those parameters.
 
 Note the style of the functions used in the typemap that convert Perl objects into pointers to
-C structs, like `cmk_key* cmk_key_from_magic(SV *obj, int flags);`.  The extension
-MAGIC is a fast and foolproof way to tie C structures to perl objects, and ensure a proper
-cleanup.
+C structs, like `cmk_pkey* cmk_pkey_from_magic(SV *obj, int flags);`.  The extension MAGIC is
+a fast and foolproof way to tie C structures to perl objects, and ensure a proper cleanup.
 
 ### Perl Code
 
@@ -74,8 +109,7 @@ is( $actual, $expected )
 You can choose whether to leave those diagnostics in the end result or not based on whether you
 expect them to be useful in the future.
 
-TESTING
--------
+## TESTING
 
 This is an XS module, so it needs to be built before tests can be run.  There is a helper
 script `./dzil-prove` which compiles the module and then runs `prove`.  You can also pass a
