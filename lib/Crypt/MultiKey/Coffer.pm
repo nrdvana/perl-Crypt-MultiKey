@@ -1,6 +1,6 @@
 package Crypt::MultiKey::Coffer;
 our $VERSION= '0.001'; # VERSION
-# ABSTRACT: Encrypted container that can be unlocked with combinations of keys
+# ABSTRACT: Encrypted container that can be unlocked with various combinations of keys
 
 use strict;
 use warnings;
@@ -9,7 +9,7 @@ use version;
 use Scalar::Util qw/ blessed looks_like_number /;
 use MIME::Base64 qw/ encode_base64 decode_base64 /;
 use Crypt::SecretBuffer qw/ secret HEX BASE64 ISO8859_1 /;
-use Crypt::SecretBuffer::PEM;
+use Crypt::SecretBuffer::PEM 0.020;
 use Crypt::MultiKey;
 use constant { KV_CONTENT_TYPE => 'application/crypt-multikey-coffer-kv' };
 
@@ -58,27 +58,28 @@ sub _coerce_secret {
 
 =head1 FILE FORMAT
 
-A Coffer is encoded in PEM, with headers that describe the contents of the coffer and which keys
-can unlock it.
+A Coffer is encoded in PEM format, with headers that describe the contents of the coffer and
+which keys can unlock it.
 
   -----BEGIN CRYPT MULTIKEY COFFER-----
   version: 0.001
   writer_version: 0.001
-  user_meta.name: User-supplied Name of This Coffer
-  user_meta.example1: arbitrary user-supplied metadata
-  content_type: application/binary
-  locks.0.tumbler.0.key_fingerprint: KeyFingerprint
-  locks.0.tumbler.0.ephemeral_pubkey: base64==
-  locks.0.kdf_salt: base64==
+  user_meta.name: Example
+  locks.0.cipher: AES-256-GCM
   locks.0.ciphertext: base64==
-  locks.1.tumbler.0.key_fingerprint: Key0Fingerprint
-  locks.1.tumbler.0.ephemeral_pubkey: base64==
-  locks.1.tumbler.1.key_fingerprint: Key1Fingerprint
-  locks.1.tumbler.1.ephemeral_pubkey: base64==
-  locks.1.kdf_salt: base64==
+  locks.0.tumblers.0.ephemeral_pubkey: base64==
+  locks.0.tumblers.0.key_fingerprint: SHA256:base64==
+  locks.1.cipher: AES-256-GCM
   locks.1.ciphertext: base64==
+  locks.1.tumblers.0.ephemeral_pubkey: base64==
+  locks.1.tumblers.0.key_fingerprint: SHA256:base64==
+  locks.1.tumblers.1.ephemeral_pubkey: base64==
+  locks.1.tumblers.1.key_fingerprint: SHA256:base64==
+  content_type: text/plain
+  cipher_data.cipher: AES-256-GCM
+  pem_header_authentication: HMAC-SHA256:base64==
   
-  Base64Base64Base64Base64.....==
+  base64==
   -----END CRYPT MULTIKEY COFFER-----
 
 The content is either binary data of your choice, or a key/value format written by this module
@@ -97,7 +98,10 @@ Filesystem path from which to load and save the Coffer.
 An arbitrary hashref of name/value strings that will be added to the PEM as
 C<< u.$name = $value >>.  Because PEM has no escaping system, the names and values may not
 contain control characters or begin or end with space characters.  The names also may not
-contain '.' or be purely numeric, because these are sued for encoding the structure of the data.
+contain '.' or be purely numeric, because these are used for encoding the structure of the data.
+
+Warning: the authenticity of C<user_meta> does not get checked until you have L</unlock>ed the
+coffer.  Never trust L<user_meta> on a locked Coffer unless the file was stored securely.
 
 =attribute name
 
@@ -106,44 +110,57 @@ for the file indicating its purpose or contents.  This defaults to the basename 
 
 =cut
 
-sub path { $_[0]{path}= $_[1] if @_ > 1; $_[0]{path} }
+sub path { @_ > 1? shift->_set_path(@_) : $_[0]{path} }
+sub _set_path { $_[0]{path}= $_[1]; $_[0] }
 
-sub user_meta { $_[0]{user_meta}= $_[1] if @_ > 1; $_[0]{user_meta} ||= {} }
+sub user_meta { @_ > 1? shift->_set_user_meta(@_) : ($_[0]{user_meta} ||= {}) }
+sub _set_user_meta { $_[0]{user_meta}= $_[1]; $_[0] }
 
-sub name {
-   my $meta= $_[0]->user_meta;
-   $meta->{name}= $_[1] if @_ > 1;
-   $meta->{name};
-}
+sub name { @_ > 1? shift->_set_name(@_) : $_[0]->user_meta->{name} }
+sub _set_name { $_[0]->user_meta->{name}= $_[1]; $_[0] }
 
-=attribute aes_key
+=attribute file_key
 
-A L<Crypt::SecretBuffer> holding the AES key used to encrypt/decrypt the content.
-A Coffer is logically "unlocked" when the C<aes_key> is defined, and "locked" (or uninitialized)
-when it isn't.
+A L<Crypt::SecretBuffer> holding the secret key used to derive the AES key for
+encrypting/decrypting the content and derive the HMAC key for authenticating the PEM headers.
+A Coffer is logically "unlocked" when the C<file_key> is defined, and "locked"
+(or uninitialized) when it isn't.
 
 =over
 
 =item unlocked
 
-Convenience accessor that returns true if C<aes_key> is defined.
+Convenience accessor that returns true if C<file_key> is defined.
 
 =back
 
 =cut
 
-sub aes_key {
-   $_[0]->_set_aes_key($_[1]) if @_ > 1;
-   $_[0]{aes_key}
+sub file_key { @_ > 1? shift->_set_file_key(@_) : $_[0]{file_key} }
+
+sub _cipher_key {
+   my $file_key= $_[0]->file_key || croak "Coffer is locked";
+   return Crypt::MultiKey::hkdf(
+      { size => 32, kdf_info => 'Crypt::MultiKey::Coffer/cipher_key', kdf_salt => '' },
+      $file_key
+   );
+}
+sub _hmac_key {
+   my $file_key= $_[0]->file_key || croak "Coffer is locked";
+   return Crypt::MultiKey::hkdf(
+      { size => 32, kdf_info => 'Crypt::MultiKey::Coffer/hmac_key', kdf_salt => '' },
+      $file_key
+   );
 }
 
-sub unlocked { defined $_[0]{aes_key} }
+sub unlocked { defined $_[0]{file_key} }
 
-sub _set_aes_key {
+sub _set_file_key {
    my ($self, $val)= @_;
    croak "Not a SecretBuffer"
       unless _isa_secret($val);
-   $self->{aes_key}= $val;
+   $self->{file_key}= $val;
+   $self;
 }
 
 =attribute cipher_data
@@ -162,7 +179,9 @@ True if the cipher_data is defined and contains a ciphertext string
 
 =cut
 
-sub cipher_data { $_[0]{cipher_data}= $_[1] if @_ > 1; $_[0]{cipher_data} }
+sub cipher_data { @_ > 1? shift->_set_cipher_data(@_) : $_[0]{cipher_data} }
+sub _set_cipher_data { $_[0]{cipher_data}= $_[1]; $_[0] }
+
 sub has_ciphertext { defined $_[0]{cipher_data} && defined $_[0]{cipher_data}{ciphertext} }
 
 =attribute content_type
@@ -213,11 +232,12 @@ Coffer knows it needs to re-encrypt the content.
 
 =cut
 
-sub content_type { $_[0]{content_type}= $_[1] if @_ > 1; $_[0]{content_type} }
+sub content_type { @_ > 1? shift->_set_content_type(@_) : $_[0]{content_type} }
+sub _set_content_type { $_[0]{content_type}= $_[1]; $_[0] }
 
 sub content {
    my $self= shift;
-   $self->_set_content($_[0])
+   return $self->_set_content($_[0])
       if @_;
    $self->decrypt
       if !$self->has_content && $self->has_ciphertext;
@@ -228,7 +248,7 @@ sub content {
 
 sub content_kv {
    my $self= shift;
-   $self->_set_content_kv($_[0]) 
+   return $self->_set_content_kv($_[0])
       if @_;
    croak "content_type is not ".KV_CONTENT_TYPE
       unless $self->content_type eq KV_CONTENT_TYPE;
@@ -253,6 +273,7 @@ sub _set_content {
    # discard key/value map, if any
    delete $self->{content_kv};
    $self->content_changed(1);
+   $self;
 }
 
 sub _set_content_kv {
@@ -271,24 +292,28 @@ sub _set_content_kv {
    # discard plain scalar content, if any
    delete $self->{content};
    $self->content_changed(1);
+   $self;
 }
 
 sub _unpack_content_kv {
    my $self= shift;
    my $span= span($self->content);
-   my @kv= $span->parse_lenprefixed(-1)
-      or !$span->len # empty content is not an error
-      or croak "Failed to parse Key/Value pairs: ".$span->last_error;
+   # parse_lenprefixed(-1) attempts to consume all bytes of the span as a list of variable-int
+   # length followed by that many bytes.  It fails and returns an empty list if the final
+   # lenprefixed string does not end exactly at the end of the span.
+   my @kv= $span->parse_lenprefixed(-1);
+   croak "Failed to parse Key/Value pairs: ".$span->last_error
+      if !@kv && $span->len; # empty content is not an error
    croak "Failed to parse Key/Value pairs: odd number of strings"
       if @kv & 1;
-   # unmask keys
-   for (0 .. ($#kv>>1)) {
+   # All strings are currently SecreetBuffer objects.  Unmask the keys.
+   for (0 .. ($#kv-1)/2) {
       my $k;
       $kv[$_*2]->copy_to($k);
       $kv[$_*2]= $k;
    }
    my %kv= @kv;
-   delete $self->{content};
+   delete $self->{content}; # content_kv is the official value, now
    $self->{content_kv}= \%kv;
 }
 
@@ -310,18 +335,16 @@ restricting it.
 
 A lock always operates on public/private keys.  The private half must be present to open a lock,
 but only the public half is needed to create the lock.  This means the coffer can be encrypted
-with a new C<aes_key> even when the private half of the keys are not available.
+with a new C<file_key> even when the private half of the keys are not available.
 
-Each lock is an encryption of the Coffer's C<aes_key> using a symmetric key derived from the
+Each lock is an encryption of the Coffer's C<file_key> using a symmetric key derived from the
 public half of the keys.  See L<Crypt::MultiKey::PKey/generate_key_material>.
 
   [
     { cipher        => 'AES-256-GCM',
       ciphertext    => $encrypted_bytes,
-      kdf_salt      => $salt_bytes,
       tumblers      => [
-        { key_fingerprint    => $hex_colon_notation,
-          pubkey             => $pubkey_bytes,
+        { key_fingerprint    => $hashname_and_base64,
           ephemeral_pubkey   => $pubkey_bytes,
           rsa_key_ciphertext => $encrypted_bytes,
         },
@@ -333,12 +356,37 @@ public half of the keys.  See L<Crypt::MultiKey::PKey/generate_key_material>.
 
 =cut
 
-sub locks {
-   if (@_ > 1) {
-      $_[0]->_validate_locks($_[1]);
-      $_[0]{locks}= $_[1];
-   }
-   $_[0]{locks}
+sub locks { @_ > 1? shift->_set_locks(@_) : $_[0]{locks} }
+sub _set_locks {
+   $_[0]->_validate_locks($_[1]);
+   $_[0]{locks}= $_[1];
+   $_[0];
+}
+
+=attribute authentication
+
+When loaded from an external source (currently just PEM files), this attribute gets initialized
+to an arrayref of the canonical message (PEM headers) and the HMAC-SHA256 of that text.
+This will be verified during L</unlock> to ensure that the headers were not altered, throwing
+an exception if they don't match.  Beware that until unlocked, you have no guarantee that the
+headers weren't altered by an attacker.  For an example attack, consider what happens if you
+load a Coffer file, assign new content without unlocking the old content, and then re-encrypt
+using the same public keys from the previous locks.  An attacker could inject a bogus lock
+using a key they control, and then your re-encrypted Coffer file would be readable by them!
+Always L</unlock> a Coffer before trusting any attribute of the object.
+
+This attribute will be C<undef> if the Coffer was not loaded from an external source.
+The check during L</unlock> is only performed if this attribute is defined.
+
+=cut
+
+sub authentication { @_ > 1? shift->_set_authentication(@_) : $_[0]{authentication} }
+sub _set_authentication {
+   my ($self, $val)= @_;
+   ref $val eq 'ARRAY' && @$val == 3
+      or croak 'Expected arrayref of [$canonical_message_bytes, $algorithm, $mac]';
+   $self->{authentication}= $val;
+   $self;
 }
 
 =constructor new
@@ -395,7 +443,7 @@ sub load {
    return $class_or_self;
 }
 
-=method generate_aes_key
+=method generate_file_key
 
 Generate a new AES key for the Coffer.  This gets called automatically when initially creating
 a Coffer, but you can call it later to completely re-encrypt a Coffer, so long as
@@ -441,23 +489,18 @@ sub _inflate_lock_keys {
    return $success;
 }
 
-sub generate_aes_key {
+sub generate_file_key {
    my $self= shift;
-   croak "Can't generate_aes_key unless content has been decrypted or overwritten"
+   croak "Can't generate_file_key unless content has been decrypted or overwritten"
       if $self->has_ciphertext && !$self->has_content;
    my @old_locks= @{ $self->locks };
-   croak "Generating a new Coffer aes_key required all existing locks to have public keys present"
+   croak "Generating a new Coffer file_key required all existing locks to have public keys present"
       if @old_locks && !$self->_inflate_lock_keys;
-   # Future compatibility; use same cipher as before.  Currently only AES-256-GCM is supported.
-   my $cipher= $self->{cipher_data} && $self->{cipher_data}{cipher} || 'AES-256-GCM';
-   my $size= $cipher eq 'AES-256-XTS'? 64
-           : $cipher eq 'AES-256-GCM'? 32
-           : croak "Unsupported cipher $cipher";
-   my $new_aes_key= secret(append_random => $size);
+   my $new_file_key= secret(append_random => 64);
    my @new_locks;
    # If any keyslots exist, need to create new tumblers
    if (@old_locks) {
-      local $self->{aes_key}= $new_aes_key;
+      local $self->{file_key}= $new_file_key;
       local $self->{locks}= \@new_locks;
       for (@old_locks) {
          $self->add_access(map $_->{key}, @{ $_->{tumblers} });
@@ -465,7 +508,8 @@ sub generate_aes_key {
    }
    # everything looks good.  Throw away any old ciphertext, and use new values.
    delete $self->{cipher_data}{ciphertext} if $self->{cipher_data};
-   $self->{aes_key}= $new_aes_key;
+   delete $self->{pem_header_mac};
+   $self->{file_key}= $new_file_key;
    @{$self->{locks}}= @new_locks;
    $self;
 }
@@ -484,21 +528,43 @@ are present.
 sub add_access {
    my ($self, @keys)= @_;
    @keys= @{$keys[0]} if @keys == 1 && ref $keys[0] eq 'ARRAY';
-   unless (defined $self->aes_key) {
+   croak "Require one or more PKey objects"
+      unless @keys > 0;
+   unless (defined $self->file_key) {
       croak "Coffer must be unlocked in order to ->add_access"
          if $self->has_ciphertext or @{ $self->locks };
-      # No existing encrypted data, so create a new AES key
-      $self->generate_aes_key;
+      # No existing encrypted data, so create a new key
+      $self->generate_file_key;
    }
    my @tumblers= map +{ key => $_, key_fingerprint => $_->fingerprint }, @keys;
    my $key_material= secret;
    $_->{key}->generate_key_material($_, $key_material) for @tumblers;
-   my %lock= ( tumblers => \@tumblers );
+   # Salt isn't very useful when the tumbers are made from nonces and single-use ephemeral keys
+   my %lock= ( tumblers => \@tumblers, kdf_info => 'cmk-coffer-lock', kdf_salt => '' );
    my $aes_key= Crypt::MultiKey::hkdf(\%lock, $key_material);
+   delete @lock{'kdf_info','kdf_salt'}; # don't bulk up the file unnecessarily
    # Use the keyslot's aes key to encrypt the Coffer's aes key
-   Crypt::MultiKey::symmetric_encrypt(\%lock, $aes_key, $self->aes_key);
+   Crypt::MultiKey::symmetric_encrypt(\%lock, $aes_key, $self->file_key);
    push @{$self->locks}, \%lock;
    return \%lock;
+}
+
+=method lock
+
+Delete the L</file_key> attribute and any attributes holding unencrypted secrets.
+
+=cut
+
+sub lock {
+   my $self= shift;
+   # Make sure there is a way to unlock it!
+   croak "Can't lock Coffer when no locks are defined!  (you would lose your data)"
+      unless @{ $self->locks };
+   # No need to encrypt if the ciphertext exists and the content is not changed
+   $self->encrypt if $self->content_changed || !$self->has_ciphertext;
+   # Delete all secrets
+   delete @{$self}{qw( content content_kv file_key content_changed )};
+   $self;
 }
 
 =method unlock
@@ -506,7 +572,7 @@ sub add_access {
   $coffer->unlock($key1, ... $keyN);
 
 This attempts to find a lock which can be unlocked by this list of keys, or a subset of them.
-If found, the L</aes_key> attribute is set, after which decryption and encryption methods can
+If found, the L</file_key> attribute is set, after which decryption and encryption methods can
 be used.
 
 =cut
@@ -532,30 +598,50 @@ sub unlock {
       my $key_material= secret();
       $keys_in_order[$_]->recreate_key_material($tumblers->[$_], $key_material)
          for 0..$#keys_in_order;
+      local $lock->{kdf_info}= 'cmk-coffer-lock' unless defined $lock->{kdf_info};
+      local $lock->{kdf_salt}= '' unless defined $lock->{kdf_salt};
       my $aes_key= Crypt::MultiKey::hkdf($lock, $key_material);
-      my $coffer_aes_key= Crypt::MultiKey::symmetric_decrypt($lock, $aes_key);
-      $self->aes_key($coffer_aes_key);
+      my $file_key= Crypt::MultiKey::symmetric_decrypt($lock, $aes_key);
+      $self->file_key($file_key);
+      # If 'authentication' is set, it means we need to validate the MAC of the
+      # PEM file headers, which couldn't be done until we know the file_key.
+      $self->authenticate if defined $self->authentication;
       return $self;
    }
    croak "No lock can be opened using the supplied keys";
 }
 
-=method lock
+=method authenticate
 
-Delete the L</aes_key> attribute and any attributes holding unencrypted secrets.
+  $coffer->authenticate($bool_croak);
+
+Validate the L<authentication> attribute using the current L</file_key>, returning boolean.
+Pass a true value to croak on failure instead of returning false.
 
 =cut
 
-sub lock {
-   my $self= shift;
-   # Make sure there is a way to unlock it!
-   croak "Can't lock Coffer when no locks are defined!  (you would lose your data)"
-      unless @{ $self->locks };
-   # No need to encrypt if the ciphertext exists and the content is not changed
-   $self->encrypt if $self->content_changed || !$self->has_ciphertext;
-   # Delete all secrets
-   delete @{$self}{qw( content content_kv aes_key content_changed )};
-   $self;
+sub authenticate {
+   my ($self, $croak)= @_;
+   my $auth= $self->authentication;
+   unless (defined $auth) {
+      croak 'No authentication attribute available' if $croak;
+      return 0;
+   }
+   unless ($self->unlocked) {
+      croak 'No file_key available for authentication' if $croak;
+      return 0;
+   }
+   unless ($auth->[1] eq 'HMAC-SHA256') {
+      croak 'Expected HMAC-SHA256' if $croak;
+      return 0;
+   }
+   my $mac= Crypt::MultiKey::hmac_sha256($self->_hmac_key, $auth->[0]);
+   unless ($mac->memcmp($auth->[2]) == 0) {
+      croak 'Header MAC failed; PEM headers have been modified since Coffer file was written.'
+         if $croak;
+      return 0;
+   }
+   return 1;
 }
 
 =method get
@@ -564,7 +650,7 @@ sub lock {
 
 When L<content_type> is C<< application/crypt-multikey-coffer-kv >>, this method can be used to
 retrieve a secret by name.  If the content is not yet decrypted, it will try decrypting it and
-fail if the L</aes_key> is not loaded.
+fail if the L</file_key> is not loaded.
 
 =cut
 
@@ -582,7 +668,7 @@ sub get {
 
 When L<content_type> is C<< application/crypt-multikey-coffer-kv >>, this method can be used to
 store a secret by name.  Using this method when the content is not yet decrypted triggers it
-to be decrypted, and will fail if the L</aes_key> is not loaded.  Using this method when no
+to be decrypted, and will fail if the L</file_key> is not loaded.  Using this method when no
 content or ciphertext are defined will initialize the content_type to
 C<< application/crypt-multikey-coffer-kv >> and the content_kv attribute to a hashref.
 
@@ -623,6 +709,8 @@ sub save {
    # Make sure there is a way to unlock it!
    croak "Can't save Coffer when no locks are defined!  (you would lose your data)"
       unless @{ $self->locks };
+   $path //= $self->path or croak "No path set";
+   $self->path($path) unless defined $self->path;
    # No need to encrypt if the ciphertext exists and the content is not changed
    $self->encrypt if $self->content_changed || !$self->has_ciphertext;
    # Build PEM object and serialize to file, renaming it into place
@@ -634,7 +722,7 @@ sub save {
 
   $coffer->encrypt;
 
-Regenerate the L</cipher_data> attribute, and use a fresh C<aes_key> if possible.
+Regenerate the L</cipher_data> attribute, and use a fresh C<file_key> if possible.
 The C<content> or C<content_kv> attributes must be initialized.
 
 This is called automatically during L</save> if the Coffer is aware that the L<cipher_data>
@@ -649,15 +737,14 @@ sub encrypt {
       unless $self->has_content;
    # If possible, use a fresh AES key.
    # This requires that all locks have the public key present.
-   $self->generate_aes_key if $self->_inflate_lock_keys;
+   $self->generate_file_key if $self->_inflate_lock_keys;
    # Preserve some encryption parameters from the previous encryption.
    my %cipher_data;
    my $prev_cipher= $self->{cipher_data};
    @cipher_data{'cipher','pad'}= @{$prev_cipher}{'cipher','pad'}
       if defined $prev_cipher;
    # Main encryption routine
-   my $secret= $self->content;
-   Crypt::MultiKey::symmetric_encrypt(\%cipher_data, $self->aes_key, $secret);
+   Crypt::MultiKey::symmetric_encrypt(\%cipher_data, $self->_cipher_key, $self->content);
    $self->{cipher_data}= \%cipher_data;
 }
 
@@ -680,7 +767,7 @@ sub decrypt {
       unless $self->unlocked;
    croak "No ciphertext defined"
       unless $self->has_ciphertext;
-   $self->{content}= Crypt::MultiKey::symmetric_decrypt($self->cipher_data, $self->aes_key);
+   $self->{content}= Crypt::MultiKey::symmetric_decrypt($self->cipher_data, $self->_cipher_key);
 }
 
 our %_importable_attributes= map +($_ => 1),
@@ -688,10 +775,11 @@ our %_importable_attributes= map +($_ => 1),
 # Extract Coffer attributes from a Crypt::SecretBuffer::PEM object
 sub _import_pem {
    my ($self, $pem, $path)= @_;
+   $pem->headers->unicode_keys(1)->unicode_values(1);
    my %h= %{ $pem->headers };
    my %attrs;
 
-   # Version check.  
+   # Version check.
    if (my $min_version= delete $h{version}) {
       $min_version= version->parse($min_version);
       my $writer_version= version->parse(delete $h{writer_version} || 0);
@@ -702,6 +790,23 @@ sub _import_pem {
       carp "No module version found in PEM headers";
    }
    # Even if version problems, try to proceed
+
+   # The final header must be "pem_header_authentication".  We use that to ensure that nothing
+   # has been altered since it was written.  All the headers before that get combined into the
+   # canonical text that we compare to the MAC.
+   my $header_kv= $pem->header_kv;
+   croak "Headers must end with pem_header_mac"
+      unless @$header_kv > 2 && $header_kv->[-2] eq 'pem_header_authentication';
+   # The PEM parser removes any leading or trailing whitespace on attributes and values, but we
+   # also ensured that no leading or trailing whitespace existed when we wrote the file.
+   # Reconstructing the text negates any whitespace damage that may have occurred to the file.
+   my $header_text= '';
+   for (0..$#$header_kv-2) {
+      $header_text .= $header_kv->[$_] . ($_ & 1? "\n" : ": ");
+   }
+   my ($mac_algo,$mac_base64)= split ':', $header_kv->[-1], 2;
+   delete $h{pem_header_authentication};
+   # ...but the MAC can't be validated until we decrypt the coffer.
 
    for my $key (keys %h) {
       my $node_ref= \\%attrs;
@@ -763,6 +868,8 @@ sub _import_pem {
       carp "The following PEM headers cannot be imported: ".join(', ', sort @unauth);
       delete @attrs{@unauth};
    }
+
+   $attrs{authentication}= [ $header_text, $mac_algo, decode_base64($mac_base64) ];
    \%attrs;
 }
 
@@ -795,18 +902,15 @@ sub _struct_to_kv {
 
 sub _export_pem {
    my $self= shift;
-   my $export_pubkey= 1;
-   # Need to remove the key objects from the locks definition before serializing.
-   # Also the user might choose to only export the fingerprint and not the pubkey.
    my @locks_export;
    for (@{ $self->locks }) {
       my %lock= %$_;
       for (@{ delete $lock{tumblers} }) {
          my %tumbler= %$_;
+         # Need to remove the key objects from the locks definition before serializing.
          delete $tumbler{key};
-         delete $tumbler{pubkey} unless $export_pubkey;
          # base64 encode binary fields
-         for (qw( pubkey ephemeral_pubkey rsa_key_ciphertext )) {
+         for (qw( ephemeral_pubkey rsa_key_ciphertext )) {
             $tumbler{$_}= encode_base64($tumbler{$_}, '')
                if defined $tumbler{$_};
          }
@@ -821,6 +925,8 @@ sub _export_pem {
    }
    my %cipher_data_export= %{ $self->cipher_data };
    my $ciphertext= delete $cipher_data_export{ciphertext};
+   delete $cipher_data_export{header_mac};  # old value not relevant
+   delete $cipher_data_export{header_text};
    my @header_kv= (
       version => '0.001',
       writer_version => __PACKAGE__->VERSION,
@@ -835,6 +941,15 @@ sub _export_pem {
       utf8::decode($_); # in case the string was already encoded
       utf8::encode($_);
    }
+   # Build the canonical PEM header text so we can validate it with a MAC.
+   my $header_text= '';
+   for (0..$#header_kv) {
+      $header_text .= $header_kv[$_] . ($_ & 1? "\n" : ": ");
+   }
+   my $header_mac= 'HMAC-SHA256:';
+   Crypt::MultiKey::hmac_sha256($self->_hmac_key, $header_text)
+      ->span->append_to($header_mac, encoding => BASE64);
+   push @header_kv, 'pem_header_authentication' => $header_mac;
    return Crypt::SecretBuffer::PEM->new(
       label     => 'CRYPT MULTIKEY COFFER',
       header_kv => \@header_kv,

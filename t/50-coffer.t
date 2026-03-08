@@ -10,7 +10,7 @@ subtest ctor => sub {
       object {
          call has_content => F;
          call has_ciphertext => F;
-         call aes_key => undef;
+         call file_key => undef;
          call unlocked => F;
          call locks => [];
          call content_type => undef;

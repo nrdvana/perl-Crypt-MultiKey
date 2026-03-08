@@ -1160,12 +1160,12 @@ cmk_hkdf(HV *params, secret_buffer *key_material) {
    if (svp && *svp) {
       /* info may be explicitly set to an empty string or undef */
       if (!SvOK(*svp)) {
-         info = NULL;
+         info = "";
          info_len = 0;
       } else {
          info= (U8*) secret_buffer_SvPVbyte(*svp, &info_len);
          if (info_len == 0)
-            info = NULL;
+            info = "";
       }
    } else {
       info= (U8*) "Crypt::MultiKey";
@@ -1177,12 +1177,12 @@ cmk_hkdf(HV *params, secret_buffer *key_material) {
    if (svp && *svp) {
       /* info may be explicitly set to an empty string or undef */
       if (!SvOK(*svp)) {
-         salt = NULL;
+         salt = "";
          salt_len = 0;
       } else {
          salt = (U8*) secret_buffer_SvPVbyte(*svp, &salt_len);
          if (salt_len == 0)
-            salt = NULL;
+            salt = "";
       }
    } else {
       /* kdf_salt key not present at all ==> generate random salt and store it */

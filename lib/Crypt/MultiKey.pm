@@ -142,7 +142,7 @@ sub _openssl_version {
 }
 
 our @EXPORT_OK= qw(
-   pkey coffer vault hkdf symmetric_encrypt symmetric_decrypt
+   pkey coffer vault sha256 hkdf hmac_sha256 symmetric_encrypt symmetric_decrypt
    lazy_load lazy_loadable
 );
 
@@ -198,6 +198,13 @@ output into a new SecretBuffer object.
 
 Feed one or more strings (which may be SecretBuffers or Spans) into sha256 and return the result
 as a SecretBuffer.  The buffer contains raw bytes, not hex or base64.
+
+=head2 hmac_sha256
+
+  $secret_buffer= hmac_sha256($mac_key, @strings);
+
+Feed one or more strings (which may be SecretBuffers or Spans) into HMAC-SHA256 and return the
+result as a SecretBuffer.  The buffer contains raw bytes, not hex or base64.
 
 =head2 symmetric_encrypt
 
