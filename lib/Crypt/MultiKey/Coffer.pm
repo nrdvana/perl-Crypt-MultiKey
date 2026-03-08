@@ -540,9 +540,8 @@ sub add_access {
    my $key_material= secret;
    $_->{key}->generate_key_material($_, $key_material) for @tumblers;
    # Salt isn't very useful when the tumbers are made from nonces and single-use ephemeral keys
-   my %lock= ( tumblers => \@tumblers, kdf_info => 'cmk-coffer-lock', kdf_salt => '' );
-   my $aes_key= Crypt::MultiKey::hkdf(\%lock, $key_material);
-   delete @lock{'kdf_info','kdf_salt'}; # don't bulk up the file unnecessarily
+   my %lock= ( tumblers => \@tumblers );
+   my $aes_key= $self->_hkdf_for_lock(\%lock, $key_material);
    # Use the keyslot's aes key to encrypt the Coffer's aes key
    Crypt::MultiKey::symmetric_encrypt(\%lock, $aes_key, $self->file_key);
    push @{$self->locks}, \%lock;
@@ -588,6 +587,7 @@ sub unlock {
          unless $pkey->has_private;
       $by_fingerprint{$pkey->fingerprint}= $pkey;
    }
+   my @failures;
    # Look for a slot having these exact keys
    for my $lock (@{ $self->locks }) {
       my $tumblers= $lock->{tumblers};
@@ -595,28 +595,51 @@ sub unlock {
       next if grep !defined, @keys_in_order;
       # All keys are present.  Reconstruct the shared secret key material from
       # the private key and the tumbler of each key in order.
-      my $key_material= secret();
-      $keys_in_order[$_]->recreate_key_material($tumblers->[$_], $key_material)
-         for 0..$#keys_in_order;
-      local $lock->{kdf_info}= 'cmk-coffer-lock' unless defined $lock->{kdf_info};
-      local $lock->{kdf_salt}= '' unless defined $lock->{kdf_salt};
-      my $aes_key= Crypt::MultiKey::hkdf($lock, $key_material);
-      my $file_key= Crypt::MultiKey::symmetric_decrypt($lock, $aes_key);
-      $self->file_key($file_key);
-      # If 'authentication' is set, it means we need to validate the MAC of the
-      # PEM file headers, which couldn't be done until we know the file_key.
-      $self->authenticate if defined $self->authentication;
-      return $self;
+      if (eval {
+         my $key_material= secret();
+         $keys_in_order[$_]->recreate_key_material($tumblers->[$_], $key_material)
+            for 0..$#keys_in_order;
+         my $aes_key= $self->_hkdf_for_lock($lock, $key_material);
+         my $file_key= Crypt::MultiKey::symmetric_decrypt($lock, $aes_key);
+         $self->file_key($file_key);
+         1;
+      }) {
+         # If this lock succeeded but others failed, the user should know about that.
+         # A lock with all keys present should always succeed, unless perhaps a subclass
+         # adds an interactive feature to recreate_key_material...
+         carp scalar(@failures)." locks failed to decrypt even though the supplied keys matched"
+            if @failures;
+         # If 'authentication' is set, it means we need to validate the MAC of the
+         # PEM file headers, which couldn't be done until we know the file_key.
+         $self->authenticate if defined $self->authentication;
+         return $self;
+      } else {
+         push @failures, $@;
+      }
+   }
+   if (@failures) {
+      chomp(@failures);
+      croak join "\n  ", scalar(@failures)." matching locks failed to open using the supplied keys:",
+         @failures;
    }
    croak "No lock can be opened using the supplied keys";
 }
 
+sub _hkdf_for_lock {
+   my ($self, $lock, $key_material)= @_;
+   # Use local to set defaults temporarily so they don't get exported.
+   local $lock->{kdf_info}= 'Crypt::MultiKey::Coffer/lock' unless defined $lock->{kdf_info};
+   local $lock->{kdf_salt}= '' unless defined $lock->{kdf_salt};
+   return Crypt::MultiKey::hkdf($lock, $key_material);
+}
+
 =method authenticate
 
-  $coffer->authenticate($bool_croak);
+  $bool= $coffer->authenticate;
+  $coffer->authenticate(1); # automatic croak
 
 Validate the L<authentication> attribute using the current L</file_key>, returning boolean.
-Pass a true value to croak on failure instead of returning false.
+Pass a true value to have it croak on failure instead of returning false.
 
 =cut
 
@@ -691,6 +714,7 @@ sub set {
       delete $kv->{$key};
       $self->content_changed(1);
    }
+   $self;
 }
 
 =method save
@@ -746,14 +770,17 @@ sub encrypt {
    # Main encryption routine
    Crypt::MultiKey::symmetric_encrypt(\%cipher_data, $self->_cipher_key, $self->content);
    $self->{cipher_data}= \%cipher_data;
+   $self->content_changed(0);
+   $self;
 }
 
 =method decrypt
 
   $coffer->decrypt;
 
-Regenerate the C<content> attribute from the C<cipher_data> attribute.  The L</cipher_data>
-attribute must be initialized and the correct L</aes_key> must be loaded.
+Regenerate the C<content> attribute from the C<cipher_data> attribute.  Returns C<$coffer> for
+chaining.  The L</cipher_data> attribute must be initialized and the correct L</file_key> must
+be loaded.
 
 This is called automatically when accessing an uninitialized C<content> or C<content_kv> if the
 Coffer is unlocked.
@@ -768,6 +795,7 @@ sub decrypt {
    croak "No ciphertext defined"
       unless $self->has_ciphertext;
    $self->{content}= Crypt::MultiKey::symmetric_decrypt($self->cipher_data, $self->_cipher_key);
+   $self;
 }
 
 our %_importable_attributes= map +($_ => 1),
