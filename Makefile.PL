@@ -13,7 +13,7 @@ BEGIN {
    %PREREQ_PM= (
       #'ExtUtils::Depends' => '0.405',
       'ExtUtils::CBuilder' => '0.2800',
-      'Crypt::SecretBuffer' => '0.018',
+      'Crypt::SecretBuffer' => '0.020',
    );
    # If the prereqs for this script are missing,
    # write out a Makefile that tells CPAN to install them
@@ -66,7 +66,7 @@ my %WriteMakefileArgs = (
   "ABSTRACT" => "Encrypt secrets with multiple keys, where any key can unlock them",
   "AUTHOR" => "Michael Conrad <mike\@nrdvana.net>",
   "CONFIGURE_REQUIRES" => {
-    "Crypt::SecretBuffer" => "0.018",
+    "Crypt::SecretBuffer" => "0.020",
     "ExtUtils::CBuilder" => "0.2800",
     "ExtUtils::MakeMaker" => 0
   },
@@ -75,10 +75,11 @@ my %WriteMakefileArgs = (
   "NAME" => "Crypt::MultiKey",
   "PREREQ_PM" => {
     "Carp" => 0,
-    "Crypt::SecretBuffer" => "0.016",
-    "Crypt::SecretBuffer::PEM" => 0,
+    "Crypt::SecretBuffer" => "0.020",
+    "Crypt::SecretBuffer::PEM" => "0.020",
     "Digest::SHA" => 0,
     "DynaLoader" => 0,
+    "Exporter" => 0,
     "MIME::Base64" => 0,
     "Scalar::Util" => 0,
     "constant" => 0,
@@ -109,10 +110,11 @@ my %WriteMakefileArgs = (
 
 my %FallbackPrereqs = (
   "Carp" => 0,
-  "Crypt::SecretBuffer" => "0.016",
-  "Crypt::SecretBuffer::PEM" => 0,
+  "Crypt::SecretBuffer" => "0.020",
+  "Crypt::SecretBuffer::PEM" => "0.020",
   "Digest::SHA" => 0,
   "DynaLoader" => 0,
+  "Exporter" => 0,
   "File::Temp" => 0,
   "FindBin" => 0,
   "IO::Handle" => 0,

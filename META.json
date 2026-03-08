@@ -16,7 +16,7 @@
    "prereqs" : {
       "configure" : {
          "requires" : {
-            "Crypt::SecretBuffer" : "0.018",
+            "Crypt::SecretBuffer" : "0.020",
             "ExtUtils::CBuilder" : "0.2800",
             "ExtUtils::MakeMaker" : "0"
          }
@@ -33,10 +33,11 @@
       "runtime" : {
          "requires" : {
             "Carp" : "0",
-            "Crypt::SecretBuffer" : "0.016",
-            "Crypt::SecretBuffer::PEM" : "0",
+            "Crypt::SecretBuffer" : "0.020",
+            "Crypt::SecretBuffer::PEM" : "0.020",
             "Digest::SHA" : "0",
             "DynaLoader" : "0",
+            "Exporter" : "0",
             "MIME::Base64" : "0",
             "Scalar::Util" : "0",
             "constant" : "0",
