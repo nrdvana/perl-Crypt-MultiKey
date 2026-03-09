@@ -111,21 +111,12 @@ expect them to be useful in the future.
 
 ## TESTING
 
-This is an XS module, so it needs to be built before tests can be run.  There is a helper
-script `./dzil-prove` which compiles the module and then runs `prove`.  You can also pass a
-test name to that like `./dzil-prove t/10-substr.t`.
-
-This process is using `dzil build` to create a directory `./Crypt-MultiKey-$VERSION` and
-then `perl Makefile.PL` inside that directory to build several source files including
-`CryptMultiKey.c`.  It then runs `make` to compile, and then `prove -lvb` to set up the perl
-module path to include the generated .so file.
-
-You can inspect those generated files, but remember that any changes need to be made to the
-files in the root of the project, then regenerate the generated files per the recipe above.
+This is an XS module, so it needs to be built before tests can be run.  While it is normally
+built with Dist::Zilla, the generated Makefile.PL has been added to the repo so that you can
+run "perl Makefile.PL" and "make" and "prove -lvb" without needing all the dependencies of dzil.
 
 Any common functions useful in more than one test can be added to t/lib/Test2AndUtils.pm
 
 Perl doesn't enable C warnings by default.  If you want to look for C compiler warnings, you
-need to `dzil build` to get the `./Crypt-MultiKey-(VERSION)` directory, then enter that
-directory and `perl Makefile.PL`, then edit the `Makefile` and add `-Wall` to the `CCFLAGS`
-variable, then compile and observe the warnings.
+need to edit the `Makefile` and add `-Wall` to the `CCFLAGS` variable, then compile and observe
+the warnings.
