@@ -5,6 +5,7 @@ package Crypt::MultiKey::PKey;
 use strict;
 use warnings;
 use Carp;
+use mro 'c3';
 use Scalar::Util qw/ blessed /;
 use MIME::Base64;
 use Digest::SHA qw/ sha256_base64 /;
@@ -325,7 +326,7 @@ sub _import_key {
    my ($self, $input, %options)= @_;
    my $is_pem= $input->isa("Crypt::SecretBuffer::PEM");
    delete $self->{fingerprint}; # clear cache
-   my $pass= defined $options{password}? $options{password} : $_ctor_password;
+   my $pass= $options{password} // $_ctor_password;
    # Does it look like PEM?
    if ($is_pem || span($input)->scan("-----BEGIN ")) {
       # This could be called on an existing object.  In case a key was already loaded, we need
@@ -556,10 +557,10 @@ sub _export_pem_headers {
 
 sub save {
    my ($self, $path)= @_;
-   $path= $self->path unless defined $path;
-   defined $path or croak "No 'path' specified for saving key";
+   $path //= $self->path // croak "No 'path' specified for saving key";
    $self->export->save_file($path, "rename");
    $self->path($path) if !defined $self->path;
+   $self;
 }
 
 =method encrypt_private
@@ -620,11 +621,9 @@ sub decrypt_private {
    # private_encrypted can either be pure base64 which is pkcs8, or it can be a
    # PEM block that needs format-detection.
    if ($self->{private_encrypted} =~ m|^[A-Za-z0-9+/]+=*\z|) {
-#      print "decrypting from base64 PKCS#8\n";
       my $raw= decode_base64($self->{private_encrypted});
       $self->_import_pkcs8($raw, $_[0]);
    } else {
-#      print "decrypting from foreign format\n";
       $self->_import_key(span($self->{private_encrypted}), password => $_[0])
          or croak "Unknown key format in private_encrypted";
    }

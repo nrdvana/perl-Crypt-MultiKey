@@ -425,7 +425,7 @@ sub new {
 
 sub load {
    my ($class_or_self, $path)= @_;
-   $path= $class_or_self->path if ref $class_or_self && !defined $path;
+   $path //= $class_or_self->path if ref $class_or_self;
    my $sbuf= secret(load_file => $path);
    my $span= $sbuf->span;
    my $pem;
@@ -733,8 +733,7 @@ sub save {
    # Make sure there is a way to unlock it!
    croak "Can't save Coffer when no locks are defined!  (you would lose your data)"
       unless @{ $self->locks };
-   $path= $self->path unless defined $path;
-   defined $path or croak "No path set";
+   $path //= $self->path // croak "No path set";
    $self->path($path) unless defined $self->path;
    # No need to encrypt if the ciphertext exists and the content is not changed
    $self->encrypt if $self->content_changed || !$self->has_ciphertext;

@@ -94,7 +94,7 @@ a fast and foolproof way to tie C structures to perl objects, and ensure a prope
 
 ### Perl Code
 
-Try to write code compatible with Perl 5.8.  Try to keep down the total number of dependencies
+Try to write code compatible with Perl 5.10.  Try to keep down the total number of dependencies
 for the project, unless some non-core module provides a valuable function that can't easily be
 substituted.  Try to keep the code "tight" but not terse or golfed.  Add a comment on any line
 that isn't quickly obvious to a perl programmer.
