@@ -5,6 +5,9 @@ package Crypt::MultiKey::PKey::SSHAgentSignature;
 use strict;
 use warnings;
 use Carp;
+use Digest::SHA qw( sha256_base64 );
+use MIME::Base64 qw( encode_base64 decode_base64 );
+use Crypt::SecretBuffer qw( secret );
 use parent 'Crypt::MultiKey::PKey';
 
 =head1 DESCRIPTION
@@ -54,7 +57,7 @@ sub agent {
 
 our %usable_type= ( map +($_ => 1), qw( ssh-rsa ssh-dsa ssh-ed25519 ) );
 sub usable_agent_keys {
-   my $class= shift;
+   my $self= shift;
    grep $usable_type{$_->{type}}, @{ $self->agent->get_key_list };
 }
 
@@ -108,7 +111,7 @@ sub obtain_private {
       kdf_info => 'Crypt::MultiKey::PKey::SSHAgentSignature',
       kdf_salt => $self->kdf_salt,
    );
-   my $to_be_signed= Crypt::MultiKey::hkdf(\%kdf_params, $raw_pubkey_bytes);
+   my $to_be_signed= Crypt::MultiKey::hkdf(\%kdf_params, secret($raw_pubkey_bytes));
    my $signed= $self->agent->sign($self->agent_pubkey, $to_be_signed);
    my $pw= Crypt::MultiKey::hkdf(\%kdf_params, $signed);
    $self->decrypt_private($pw);
@@ -127,13 +130,67 @@ parameter you specify indicates which of the Agent's public keys to use.
 =cut
 
 sub encrypt_private {
-   ...
+   my ($self, $selector)= @_;
+   my @keys= $self->usable_agent_keys;
+   croak "No usable SSH agent keys found"
+      unless @keys;
+
+   my @selected;
+   if (!defined $selector) {
+      @selected= ($keys[0]);
+   }
+   elsif (ref $selector eq 'Regexp') {
+      @selected= grep(
+         defined $_->{comment} && $_->{comment} =~ $selector,
+         @keys
+      );
+   }
+   elsif (ref $selector eq 'HASH') {
+      my $want_b64= $selector->{pubkey_base64};
+      croak "Hash selector must contain pubkey_base64"
+         unless defined $want_b64;
+      @selected= grep $_->{pubkey_base64} eq $want_b64, @keys;
+   }
+   else {
+      @selected= grep(
+         $_->{pubkey_base64} eq $selector
+         || ('SHA256:'.sha256_base64(decode_base64($_->{pubkey_base64}))) eq $selector,
+         @keys
+      );
+   }
+
+   croak "No SSH agent key matched selector"
+      unless @selected;
+   croak "Selector matched multiple SSH agent keys"
+      if @selected > 1;
+
+   my $key= $selected[0];
+   $self->agent_pubkey($key->{pubkey_base64});
+
+   my $rand= Crypt::MultiKey::sha256(rand().$$.time()."".{});
+   my $salt_bytes;
+   $rand->unmask_to(sub { $salt_bytes= $_[0] });
+   $self->kdf_salt(encode_base64($salt_bytes, ''));
+
+   $self->_export_spki(my $raw_pubkey_bytes);
+   my %kdf_params= (
+      size => 32,
+      kdf_info => 'Crypt::MultiKey::PKey::SSHAgentSignature',
+      kdf_salt => $self->kdf_salt,
+   );
+   my $to_be_signed= Crypt::MultiKey::hkdf(\%kdf_params, secret($raw_pubkey_bytes));
+   my $signed= $self->agent->sign($key, $to_be_signed);
+   my $pw= Crypt::MultiKey::hkdf(\%kdf_params, $signed);
+
+   $self->next::method($pw, 0);
 }
 
 # When parent class loads PEM file, capture additional attributes
 sub _import_pem_headers {
    my ($self, $pem)= @_;
+   $self->next::method($pem);
    $self->agent_pubkey($pem->headers->{cmk_agent_pubkey});
+   $self->kdf_salt($pem->headers->{cmk_kdf_salt});
 }
 
 sub _export_pem_headers {
@@ -143,9 +200,11 @@ sub _export_pem_headers {
    croak "Cannot export ::PKey::SSHAgentSignature without selecting agent_pubkey"
       unless defined $self->agent_pubkey;
    croak "Cannot export ::PKey::SSHAgentSignature without first encrypting the private half"
-      unless defined $self->encrypted_private;
+      unless defined $self->private_encrypted;
    $self->next::method($pem);
    $pem->headers->append(cmk_agent_pubkey => $self->agent_pubkey);
+   $pem->headers->append(cmk_kdf_salt => $self->kdf_salt)
+      if defined $self->kdf_salt;
 }
 
 1;
