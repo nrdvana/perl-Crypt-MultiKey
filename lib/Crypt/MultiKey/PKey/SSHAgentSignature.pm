@@ -6,7 +6,6 @@ use strict;
 use warnings;
 use Carp;
 use parent 'Crypt::MultiKey::PKey';
-use IPC::Run;
 
 =head1 DESCRIPTION
 
@@ -32,48 +31,87 @@ ECDSA signing adds random salt to each signature, making it unusable as a passwo
 
 sub mechanism { 'SSHAgentSignature' }
 
-=attribute agent_key
+=attribute agent
+
+Lazy-built instance of L<Crypt::MultiKey::SSHAgentClient>.  You can use this object to specify
+a custom SSH socket or path to the ssh-add and ssh-keygen commands.
+
+=over
+
+=item usable_agent_keys
+
+Call C<< ->agent->get_key_list >> and filter for key types with a deterministic signature
+algorithm. (ssh-rsa, ssh-dsa, ssh-ed25519)
+
+=back
+
+=cut
+
+sub agent {
+   require Crypt::MultiKey::SSHAgentClient;
+   $_[0]{agent} ||= Crypt::MultiKey::SSHAgentClient->new;
+}
+
+our %usable_type= ( map +($_ => 1), qw( ssh-rsa ssh-dsa ssh-ed25519 ) );
+sub usable_agent_keys {
+   my $class= shift;
+   grep $usable_type{$_->{type}}, @{ $self->agent->get_key_list };
+}
+
+=attribute agent_pubkey
 
 Specifies which SSH public key (as a string of the Base64 of the OpenSSH public key format)
 was used to encrypt the private half of this PKey.  This is assigned during L</encrypt_private>
 and used during L</decrypt_private>.
 
-=cut
+=attribute kdf_salt
 
-sub agent_key {
-   $_[0]{agent_key}= $_[1] if @_ > 1;
-   $_[0]{agent_key};
-}
-
-=attribute agent_challenge
-
-Specifies a portion of the string to be signed by the agent, as Base64.
+A string of random salt (base64) which is combined with the public half of this PKey and used
+as the data to be signed by the SSH agent.  (the signature from the agent is then combined with
+this salt again to produce the password for decryption)
 
 =cut
 
-sub agent_challenge {
-   $_[0]{agent_challenge}= $_[1] if @_ > 1;
-   $_[0]{agent_challenge};
-}
+sub agent_pubkey { @_ > 1? shift->_set_agent_pubkey(@_) : $_[0]{agent_pubkey} }
+sub _set_agent_pubkey { $_[0]{agent_pubkey}= $_[1] }
 
-sub _import_pem_headers {
-   my ($self, $pem)= @_;
-   $self->agent_key($pem->headers->{cmk_agent_key});
-   $self->agent_challenge($pem->headers->{cmk_agent_challenge});
-}
+sub kdf_salt { @_ > 1? shift->_set_kdf_salt(@_) : $_[0]{kdf_salt} }
+sub _set_kdf_salt { $_[0]{kdf_salt}= $_[1] }
 
-=head2 is_key_available
+=method can_obtain_private
 
-Returns a boolean whether the L</agent_key> attribute is found among the current keys in the
-ssh agent.
+Returns true if the resources needed for obtaining the private half of the PKey are available.
+For SSHAgentSignature, this means that the SSH agent is available and C<< "ssh-add -L" >>
+includes the L</agent_pubkey>.
 
 =cut
 
-sub is_key_available {
+sub can_obtain_private {
    my $self= shift;
-   my $key= $self->public_key;
-   $key= $2 if $key =~ /^(\S+) (\S+)/;
-   return scalar grep $_->{public_key} eq $key, eval { $self->list_usable_keys };
+   my $key= $self->agent_pubkey;
+   return scalar grep $_->{pubkey_base64} eq $key, eval { $self->usable_agent_keys };
+}
+
+=method obtain_private
+
+Attempts to contact the agent and ask it to repeat the signature that is used as the password
+for decrypting the private half of this PKey.  It either decrypts the private half of this key,
+or croaks.
+
+=cut
+
+sub obtain_private {
+   my $self= shift;
+   $self->_export_spki(my $raw_pubkey_bytes);
+   my %kdf_params= (
+      size => 32,
+      kdf_info => 'Crypt::MultiKey::PKey::SSHAgentSignature',
+      kdf_salt => $self->kdf_salt,
+   );
+   my $to_be_signed= Crypt::MultiKey::hkdf(\%kdf_params, $raw_pubkey_bytes);
+   my $signed= $self->agent->sign($self->agent_pubkey, $to_be_signed);
+   my $pw= Crypt::MultiKey::hkdf(\%kdf_params, $signed);
+   $self->decrypt_private($pw);
 }
 
 =method encrypt_private
@@ -92,106 +130,22 @@ sub encrypt_private {
    ...
 }
 
-=method decrypt_private
-
-  $pkey->decrypt_private;
-
-This differs from the base class in that the SSH Agent must be available, and there is no
-password parameter.
-
-=cut
-
-sub decrypt_private {
-   ...
+# When parent class loads PEM file, capture additional attributes
+sub _import_pem_headers {
+   my ($self, $pem)= @_;
+   $self->agent_pubkey($pem->headers->{cmk_agent_pubkey});
 }
 
-sub _get_agent_signature {
-   my $self= shift;
-   my $key= $self->public_key;
-   my @cmd= ( 'ssh-keygen', -Y => 'sign', -n => 'Crypt::MultiKey::PKey', '-q', -f => "/dev/fd/3" );
-   my $signed= capture_cmd_with_fds([$message, undef, undef, $key], @cmd);
-   IPC::Run::run(\@cmd, '0<', \$key, '1>', \my $out, '2>', \my $err, '3<', $key)
-      or die "Failed running ssh-keygen: $err";
-   return sha256($out);
-}
-
-=head1 CLASS METHODS
-
-=head2 check_dependencies
-
-  $bool_found= $class->check_dependencies();
-  $bool_found= $class->check_dependencies(\%details_out);
-
-This checks the host environment for an ssh-agent and whether ssh-keygen supports signing.
-
-It returns a boolean whether everything was detected.  You may pass C<%details_out> to receive
-details about each thing that was or wasn't found.
-
-=head2 list_available_keys
-
-  @available= $class->list_available_keys;
-
-This is basically a wrapper around C<< ssh-add -l >>, but parses the type, public_key, and
-comment fields, returning them in hash keys.  It also includes a 'usable' flag to indicate which
-keys deliver a consistent signature usable by this module.  If there was an error accessing the
-agent, this throws an exception.  Otherwise it returns a list (not arrayref) of hashrefs,
-possibly empty.
-
-=head2 list_usable_keys
-
-  @usable= $class->list_usable_keys;
-
-Like list_available_keys, but filters out ecdsa keys which are not usable.
-
-=cut
-
-sub list_available_keys {
-   my $class= shift;
-   return @{ $class->_run_ssh_add_list };
-}
-
-sub list_usable_keys {
-   my $class= shift;
-   grep $_->{usable}, @{ $class->_run_ssh_add_list };
-}
-
-sub check_dependencies {
-   my ($self, $details)= @_;
-   $details //= {};
-   local $@;
-   my $success= 1;
-   my ($out, $err);
-   unless (eval { $self->_run_ssh_add_list; 1 }) {
-      $details->{ssh_agent}= $@;
-      $success= 0;
-   }
-   if (eval { IPC::Run::run([qw( ssh-keygen -? )], \'', \$out, \$err); 1 }) {
-      if ($? != 1<<8) {
-         $details->{ssh_keygen}= 'unexpected result running ssh-keygen: '.$err;
-         $success= 0;
-      } elsif ($err !~ /ssh-keygen\s+-Y\s+sign/) {
-         $details->{ssh_keygen}= 'ssh-keygen does not support "-Y sign" option';
-         $success= 0;
-      }
-   } else {
-      $details->{ssh_keygen}= $@;
-      $success= 0;
-   }
-   return $success;
-}
-
-my %usable_type= ( map +($_ => 1), qw( ssh-rsa ssh-dsa ssh-ed25519 ) );
-
-sub _run_ssh_add_list {
-   my $class= shift;
-   my ($out, $err);
-   IPC::Run::run([qw( ssh-add -L )], \'', \$out, \$err)
-      or die "ssh-add -L failed: $? : $err";
-   my @keys;
-   while ($out =~ /^(\S+) (\S+) (.*)/mg) {
-      push @keys, { type => $1, usable => $usable_type{$1}, public_key => $2, comment => $3 };
-   }
-   return \@keys
+sub _export_pem_headers {
+   my ($self, $pem)= @_;
+   # This type of key may only be exported when the private key has been encrypted with the
+   # agent signature.
+   croak "Cannot export ::PKey::SSHAgentSignature without selecting agent_pubkey"
+      unless defined $self->agent_pubkey;
+   croak "Cannot export ::PKey::SSHAgentSignature without first encrypting the private half"
+      unless defined $self->encrypted_private;
+   $self->next::method($pem);
+   $pem->headers->append(cmk_agent_pubkey => $self->agent_pubkey);
 }
 
 1;
