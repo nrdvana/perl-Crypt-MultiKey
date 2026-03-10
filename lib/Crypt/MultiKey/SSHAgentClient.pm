@@ -24,7 +24,6 @@ use MIME::Base64;
 use File::Spec;
 use File::Temp;
 use IPC::Open3;
-use Symbol;
 
 =constructor new
 
