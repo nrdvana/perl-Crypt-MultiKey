@@ -56,13 +56,17 @@ A disk path from which this key was loaded or to which it will be saved.
 
 =attribute mechanism
 
-The mechanism for decrypting/restoring the private half of the key.  This is used as a class
-name suffix for the PKey object and affects the behavior of the PKey object.  Any key with the
-L</private_encrypted> attribute can be decrypted using L</decrypt_private>, but this attribute
-indicates the I<source> of the password, such as whether it is a human-typed text password, or
-a password generated from a YubiKey's hash function, etc.  Keys with the mechanism 'Password'
-will interactively prompt the user on the console, where keys with the mechanism 'SSHAgent'
-will silently query the SSH agent for whether the required SSH key is available.
+The mechanism for obtaining the private half of the key.  This is used as a class name suffix
+for the PKey object and affects the behavior of the PKey object.  The default is C<undef> (for
+this base class) and prompts the console for a password to use with L<decrypt_private>.
+
+Any key with the L</private_encrypted> attribute can be decrypted using L</decrypt_private>,
+but this attribute indicates the I<source> of the password, such as whether it is a human-typed
+text password, or a password generated from a YubiKey's hash function, etc.  Mechanisms do not
+need to rely on the L</private_encrypted> attribute, and may obtain the private half in other
+ways.
+
+See also: L</obtain_private> and L</can_obtain_private> in this class and subclasses.
 
 =attribute has_public
 
@@ -283,6 +287,8 @@ sub load {
    }
    $self->_import_key($data, %options)
       or croak "Unrecognized key format";
+   $self->path($options{path})
+      if !defined $self->path && defined $options{path};
    return $self;
 }
 
@@ -291,7 +297,7 @@ sub _looks_like_base64 {
    return $span->len >= 4 && !$span->scan(qr{[^A-Za-z0-9+/=\r\n\t ]})
 }
 sub _decode_base64 {
-   return span($_[0])->clone(encoding => BASE64)->copy(encoding => ISO8859_1)->span;
+   return span($_[0], encoding => BASE64)->copy(encoding => ISO8859_1)->span;
 }
 # ASN.1 DER encoding starts with a type code and then a length and then the contents
 # of that type.  The relevant type codes are:
@@ -432,7 +438,7 @@ sub _import_pem_headers {
    my ($self, $pem)= @_;
    # mechanism header can change the class, then might need re-dispatched
    my $mech= $pem->headers->{cmk_mechanism};
-   if ($mech && $mech ne $self->mechanism) {
+   if (defined $mech && $mech ne ($self->mechanism//'')) {
       my $this_sub= $self->can('_import_pem_headers');
       $self->mechanism($mech);
       # guard against infinite loop
@@ -616,8 +622,8 @@ The password must be bytes, not wide characters.
 
 sub decrypt_private {
    my $self= shift;
-   defined $_[0] or die "Missing password";
-   defined $self->{private_encrypted} or die "Can't decrypt an empty private_encrypted attribute";
+   defined $_[0] or croak "Missing password";
+   defined $self->{private_encrypted} or croak "Can't decrypt an empty private_encrypted attribute";
    # private_encrypted can either be pure base64 which is pkcs8, or it can be a
    # PEM block that needs format-detection.
    if ($self->{private_encrypted} =~ m|^[A-Za-z0-9+/]+=*\z|) {
@@ -628,6 +634,41 @@ sub decrypt_private {
          or croak "Unknown key format in private_encrypted";
    }
    $self;
+}
+
+=method can_obtain_private
+
+Returns true if the resources needed for obtaining the private half of the PKey are available.
+For the base PKey class, this returns true if STDIN is a console, meaning that it can display
+a password prompt to the user.  This can return false even when the private key was already
+loaded; check L</has_private> first.
+
+=cut
+
+sub can_obtain_private {
+   return -t *main::STDIN;
+}
+
+=method obtain_private
+
+Prompt the user for a password and pass that to L</decrypt_private>.  This is a no-op if the
+private half is already loaded.
+
+=cut
+
+sub obtain_private {
+   my $self= shift;
+   # private already loaded? nothing to do.
+   return $self if $self->has_private;
+   croak "Can't decrypt an empty private_encrypted attribute"
+      unless defined $self->private_encrypted;
+   my $pw= secret;
+   my $name= $self->path // $self->fingerprint;
+   $pw->append_console_line(\*main::STDIN, prompt => "Private key $name is encrypted.\nEnter password: ")
+      or croak "Canceled password prompt";
+   $pw->length
+      or croak "Empty password";
+   $self->decrypt_private($pw);
 }
 
 =method generate_key_material
