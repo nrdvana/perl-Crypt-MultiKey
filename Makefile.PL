@@ -54,7 +54,7 @@ $test->export_deps($dep);
 $dep->install('cmk.h');
 $dep->add_c('cmk.c');
 $dep->add_xs('CryptMultiKey.xs');
-$dep->add_pm(map { my $n= $_; $n =~ s/^lib/\$(INST_LIB)/; $_ => $n } <lib/*/*.pm>, <lib/*/*/*.pm>);
+$dep->add_pm(map { my $n= $_; $n =~ s/^lib/\$(INST_LIB)/; $_ => $n } <lib/*/*.pm>, <lib/*/*/*.pm>, <lib/*/*/*/*.pm>);
 $dep->add_typemaps('typemap');
 $dep->save_config('InstallFiles.pm');
 
