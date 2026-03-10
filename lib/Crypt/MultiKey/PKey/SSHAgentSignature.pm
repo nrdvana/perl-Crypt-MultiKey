@@ -106,14 +106,14 @@ or croaks.
 sub obtain_private {
    my $self= shift;
    $self->_export_spki(my $raw_pubkey_bytes);
+   my $salt_bytes= decode_base64($self->kdf_salt);
+   my $sig= $self->agent->sign($self->agent_pubkey, $salt_bytes . $raw_pubkey_bytes);
    my %kdf_params= (
       size => 32,
       kdf_info => 'Crypt::MultiKey::PKey::SSHAgentSignature',
-      kdf_salt => $self->kdf_salt,
+      kdf_salt => $salt_bytes,
    );
-   my $to_be_signed= Crypt::MultiKey::hkdf(\%kdf_params, secret($raw_pubkey_bytes));
-   my $signed= $self->agent->sign($self->agent_pubkey, $to_be_signed);
-   my $pw= Crypt::MultiKey::hkdf(\%kdf_params, $signed);
+   my $pw= Crypt::MultiKey::hkdf(\%kdf_params, $sig);
    $self->decrypt_private($pw);
 }
 
@@ -166,22 +166,18 @@ sub encrypt_private {
 
    my $key= $selected[0];
    $self->agent_pubkey($key->{pubkey_base64});
-
-   my $rand= Crypt::MultiKey::sha256(rand().$$.time()."".{});
-   my $salt_bytes;
-   $rand->unmask_to(sub { $salt_bytes= $_[0] });
+   secret(append_random => 16)->span
+      ->copy_to(my $salt_bytes);
    $self->kdf_salt(encode_base64($salt_bytes, ''));
 
    $self->_export_spki(my $raw_pubkey_bytes);
+   my $sig= $self->agent->sign($self->agent_pubkey, $salt_bytes . $raw_pubkey_bytes);
    my %kdf_params= (
       size => 32,
       kdf_info => 'Crypt::MultiKey::PKey::SSHAgentSignature',
-      kdf_salt => $self->kdf_salt,
+      kdf_salt => $salt_bytes,
    );
-   my $to_be_signed= Crypt::MultiKey::hkdf(\%kdf_params, secret($raw_pubkey_bytes));
-   my $signed= $self->agent->sign($key, $to_be_signed);
-   my $pw= Crypt::MultiKey::hkdf(\%kdf_params, $signed);
-
+   my $pw= Crypt::MultiKey::hkdf(\%kdf_params, $sig);
    $self->next::method($pw, 0);
 }
 
