@@ -96,6 +96,11 @@ extern void cmk_hmac_sha256(U8 dest[32], const U8 *key, size_t key_len, SV **inp
  * It uses a default HKDF "info" that can be overridden in the encryption params.
  */
 secret_buffer *cmk_hkdf(HV *params, secret_buffer *key_material);
+extern bool cmk_fido2_available(void);
+extern AV *cmk_fido2_list_devices(void);
+extern secret_buffer *cmk_fido2_make_credential(const char *device_path, const char *credential_name);
+extern secret_buffer *cmk_fido2_chalresp(const char *device_path, const U8 *challenge, STRLEN challenge_len,
+   const U8 *cred_id, STRLEN cred_id_len);
 
 /* Perform symmetric encryption using the supplied AES key, storing the ciphertext and parameters
  * into the hash `params`.

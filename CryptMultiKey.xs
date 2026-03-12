@@ -79,6 +79,44 @@ _openssl_version_components()
       XPUSHs(sv_2mortal(newSViv(minor)));
       XPUSHs(sv_2mortal(newSViv(patch)));
 
+bool
+_have_fido2()
+   CODE:
+      RETVAL= cmk_fido2_available();
+   OUTPUT:
+      RETVAL
+
+void
+_fido2_list_devices()
+   PPCODE:
+      AV *ret= cmk_fido2_list_devices();
+      if (!ret)
+         XSRETURN_UNDEF;
+      XPUSHs(sv_2mortal(newRV_noinc((SV*)ret)));
+
+void
+_fido2_chalresp(device_path, challenge)
+   const char *device_path
+   SV *challenge
+   INIT:
+      STRLEN challenge_len;
+      const U8 *challenge_buf= (const U8*) secret_buffer_SvPVbyte(challenge, &challenge_len);
+      const U8 *cred_id_buf= NULL;
+      STRLEN cred_id_len= 0;
+   PPCODE:
+      if (items > 2 && SvOK(ST(2)))
+         cred_id_buf= (const U8*) secret_buffer_SvPVbyte(ST(2), &cred_id_len);
+      PUSHs(sv_2mortal(newRV_inc(cmk_fido2_chalresp(device_path, challenge_buf, challenge_len, cred_id_buf, cred_id_len)->wrapper)));
+
+void
+_fido2_make_credential(device_path, credential_name)
+   const char *device_path
+   const char *credential_name
+   PPCODE:
+      PUSHs(sv_2mortal(newRV_inc(cmk_fido2_make_credential(device_path, credential_name)->wrapper)));
+
+
+
 void
 _generate_uuid_v4()
    PPCODE:

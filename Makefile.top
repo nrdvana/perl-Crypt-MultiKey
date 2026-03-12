@@ -39,6 +39,11 @@ $test->require_feature(HAVE_LIBSSL
                { h => 'openssl/rand.h', pkg_config => ['openssl'] },
                { h => 'openssl/rand.h', -l => [ 'ssl', 'crypto' ] });
 
+$test->feature(HAVE_LIBFIDO2
+               => 'fido_init(0); return 0;',
+               { h => 'fido.h', pkg_config => ['libfido2'] },
+               { h => 'fido.h', -l => [ 'fido2', 'cbor' ] });
+
 $test->write_config_header('CryptMultiKey_config.h');
 $test->export_deps($dep);
 

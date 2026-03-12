@@ -42,6 +42,8 @@
 
 #include "cmk.h"
 
+#include "cmk_fido2.c"
+
 #define STRINGIFY_MACRO(x) #x
 #define GOTO_CLEANUP_CROAK(msg) do { err= msg; goto cleanup; } while(0)
 
