@@ -260,6 +260,8 @@ our %lazy_loadable= map +($_ => 1), qw(
    Crypt::MultiKey::PKey::Unencrypted
    Crypt::MultiKey::PKey::Manual
    Crypt::MultiKey::PKey::Password
+   Crypt::MultiKey::PKey::FIDO2
+   Crypt::MultiKey::PKey::YubiKey
    Crypt::MultiKey::PKey::Yubikey
    Crypt::MultiKey::PKey::SSHAgentSignature
 );
