@@ -113,7 +113,7 @@ expect them to be useful in the future.
 
 This is an XS module, so it needs to be built before tests can be run.  While it is normally
 built with Dist::Zilla, the generated Makefile.PL has been added to the repo so that you can
-run "perl Makefile.PL" and "make" and "prove -lvb" without needing all the dependencies of dzil.
+run `perl Makefile.PL` and `make` and `prove -lvb` without needing all the dependencies of dzil.
 
 Any common functions useful in more than one test can be added to t/lib/Test2AndUtils.pm
 

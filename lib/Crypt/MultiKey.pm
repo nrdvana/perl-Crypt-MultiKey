@@ -17,7 +17,7 @@ package Crypt::MultiKey;
   # If your private key is itself encrypted, prompt for password
   if ($privkey->private_encrypted) {
     my $pasword= secret;
-    $password->append_console_line(STDIN, prompt => 'password: ')
+    $password->append_console_line(prompt => 'password: ')
       or die "require password";
     $privkey->decrypt_private($password);
   }
@@ -26,11 +26,14 @@ package Crypt::MultiKey;
   my $secret= $privkey->decrypt($encrypted);
 
   # Store multiple data strings in a Coffer, locked with a variety of keys
-  my $coffer= coffer(content => "My Secrets");
-  $coffer->add_access($privkey);
+  my $coffer= coffer(content_kv => {
+    secret1 => "REDACTED",
+    secret2 => "REDACTED",
+  });
+  $coffer->add_access($privkey);      # now $privkey can unlock
   my $key2= pkey(generate => 'x25519');
   my $key3= pkey(generate => 'secp256k1');
-  $coffer->add_access($key2, $key3);  # requires both
+  $coffer->add_access($key2, $key3);  # now $key2+$key3 can unlock
   $coffer->save('coffer.pem');
   
   # Open a coffer
@@ -39,13 +42,17 @@ package Crypt::MultiKey;
   # or $coffer->unlock($key2, $key3);
   
   # content of a coffer is a SecretBuffer
-  $coffer->content->unmask_to(sub { say $_[0] });
+  $coffer->content_kv->{secret1}->unmask_to(sub { say $_[0] });
   
 =head1 DESCRIPTION
 
-This module is an implementation of a "key wrapping scheme" (such as done by age or libsodium),
-but with a focus on applying it to specifc workflows rather than being just a generic container
-for data.
+This module collection is an implementation of a "key wrapping scheme" (such as done by
+L<age(1)> or libsodium) packaged as an object resembling a password safe
+(L<Coffer|Crypt::MultiKey::Coffer>) and also as an object representing an encrypted block device
+(L<Vault|Crypt::MultiKey::Vault>, similar to Linux LUKS) and comes with a handy
+L<PKey|Crypt::MultiKey::PKey> object that can load a variety of existing public/private key
+formats and use a variety of methods to decrypt them, such as
+L<::PKey::FIDO2|Crypt::MultiKey::PKey::FIDO2> for using hardware authenticators as passwords.
 
 Since there are so many "secrets" and "keys" involved in this system, I'm using the following
 metaphor to help disambiguate them:
@@ -55,18 +62,19 @@ metaphor to help disambiguate them:
 =item PKey
 
 The L<PKey|Crypt::MultiKey::PKey> objects are wrappers around a public/private key system,
-currently OpenSSL's C<EVP_PKEY>.
-A PKey can either be a public key, private key, or public key with an encrypted private key.
+currently implemented with OpenSSL's C<EVP_PKEY>.
+A PKey can either be a full public/private key, a public key missing the private half, or a
+public key with an encrypted private half.
 Subclasses of C<Crypt::MultiKey::PKey> implement different ways of recovering the private half
 of the key; for example the L<Crypt::MultiKey::PKey::SSHAgentSignature> can use a signature
 from an SSH agent as a password to decrypt the private half of the PKey, and the
-L<Crypt::MultiKey::PKey::YubiKey> uses a challenge/response from a YubiKey as a password to
-unlock the private half.
+L<Crypt::MultiKey::PKey::FIDO2> uses a challenge/response from a FIDO2 hardware authenticator
+(e.g. YubiKey) as a password to unlock the private half.
 
 PKey objects can be loaded from OpenSSL public key PEM files, OpenSSL private key PEM files,
 OpenSSH public keys, and OpenSSH private keys, and in limited cases even encrypted OpenSSH
-private keys.  New keys are saved as OpenSSL format with additional PEM headers to hold the
-attributes of the object.
+private keys.  Newly-generated keys are saved as OpenSSL PEM format with additional headers to
+hold the attributes of the object.
 
 =item Coffer
 
@@ -81,16 +89,15 @@ coffer's keys (with private-half encrypted) bundled in the same file to ensure t
 lost.
 
 Because a Coffer is always locked using public/private key pairs, the coffer can be re-encrypted
-at any time without needing the private halves present/decrypted.
+at any time without needing the private halves available.
 
 =item Vault
 
 A L<Vault|Crypt::MultiKey::Vault> object is a container just like a Coffer but designed for
 compatibility with Linux's dm-crypt implementation.  The Vault can be unlocked and then an
 offset can be bound to a loopback device, and then initialize dm-crypt so that the rest of the
-file can be read/written directly by a Device Mapper block device.  In this case,
-Crypt::MultiKey is really just acting as a substitute for LUKS, but one which is perhaps more
-self-explanatory since the head of the file is PEM plaintext.
+file can be read/written directly by a Linux Device Mapper block device.  In this case,
+Crypt::MultiKey is really just acting as a substitute for LUKS.
 
 =back
 
@@ -118,7 +125,8 @@ can connect and forward their SSH agent to unlock the volumes.  If an admin can'
 remotely or can't be reached, someone on-site with a physically secure Yubikey can retrieve and
 plug in the key and then udev rules automatically trigger to unlock the encrypted volumes.
 If all else fails, someone can go to the safe deposit box and get the sheet of paper where the
-secret is written.
+secret is written and read it to someone over the phone.  Further, any or all of these unlock
+methods can be added or removed without needing to have all the secrets present.
 
 This module collection facilitates all of that.
 
@@ -129,7 +137,6 @@ use warnings;
 use Carp;
 use parent qw( DynaLoader Exporter );
 use Crypt::SecretBuffer 0.020;
-use Crypt::SecretBuffer qw( BASE64 );
 sub dl_load_flags {0x01} # Share extern symbols with other modules
 __PACKAGE__->bootstrap;
 
@@ -146,7 +153,7 @@ our @EXPORT_OK= qw(
    lazy_load lazy_loadable
 );
 
-=head1 Functions
+=head1 FUNCTIONS
 
 All functions can be exported, or called by the full package name.
 They cannot be called as class methods.
@@ -185,26 +192,30 @@ sub vault {
   $secret_buffer= hkdf(\%params, $secret_key_material);
   # %params:
   #   size           - number of bytes to generate
-  #   cipher         - substitute for 'size'; name of a cipher
+  #   cipher         - substitute for 'size'; name of a cipher with known size requirement
   #   kdf_info       - namespace for key derivation
   #   kdf_salt       - salt bytes, will be generated if not provided
 
-This runs OpenSSL's EVP_PKEY_HKDF with EVP_sha256, supplying 'info' and 'salt' and storing the
-output into a new SecretBuffer object.
+This runs OpenSSL's C<EVP_PKEY_HKDF> with C<EVP_sha256>, supplying 'info' and 'salt' and storing
+the output into a new SecretBuffer object.
 
 =head2 sha256
 
   $secret_buffer= sha256(@strings);
 
-Feed one or more strings (which may be SecretBuffers or Spans) into sha256 and return the result
-as a SecretBuffer.  The buffer contains raw bytes, not hex or base64.
+Feed one or more strings
+(which may be L<SecretBuffers|Crypt::SecretBuffer> or L<Spans|Crypt::SecretBuffer::Span>)
+into C<SHA256> and return the result as a L<Crypt::SecretBuffer>.
+The buffer contains raw bytes, not hex or base64.
 
 =head2 hmac_sha256
 
   $secret_buffer= hmac_sha256($mac_key, @strings);
 
-Feed one or more strings (which may be SecretBuffers or Spans) into HMAC-SHA256 and return the
-result as a SecretBuffer.  The buffer contains raw bytes, not hex or base64.
+Feed a key and one or more strings
+(which may be L<SecretBuffers|Crypt::SecretBuffer> or L<Spans|Crypt::SecretBuffer::Span>)
+into C<HMAC-SHA256> and return the result as a C<Crypt::SecretBuffer>.
+The buffer contains raw bytes, not hex or base64.
 
 =head2 symmetric_encrypt
 
@@ -212,7 +223,7 @@ result as a SecretBuffer.  The buffer contains raw bytes, not hex or base64.
   symmetric_encrypt(\%params, $aes_key, $secret);
   # %params:
   #   cipher     - Currently must be AES-256-GCM; will be assigned if unset
-  #   pad        - optionally prefix the secret with random bytes
+  #   pad        - optionally harden the secret with a prefix of random bytes
   #                and pad to specified length.
   #   auth_data  - optional Additional Authenticated Data (AAD) for AES-GCM
   #                to include in the validation tag of the ciphertext.
@@ -221,22 +232,23 @@ result as a SecretBuffer.  The buffer contains raw bytes, not hex or base64.
   #                from an incorrect $aes_key.
   #   ciphertext - set on output to the encrypted bytes of ciphertext
 
-This performs encryption using a cipher (currently always AES-256-GCM) and optional padding
+This performs encryption using a cipher (currently always C<AES-256-GCM>) and optional padding
 to obscure the length of the secret.  The ciphertext is written into a field of C<%params>.
 You must preserve the entire contents of C<%params> to be passed to C<symmetric_decrypt>.
-The C<$aes_key> should be a SecretBuffer object and must be the correct length for the cipher.
-Use L</hkdf> to get a key the correct length.
+The C<$aes_key> should be a L<SecretBuffer|Crypt::SecretBuffer> object and must be the correct
+length for the cipher.  Use L</hkdf> to get a key the correct length.
 
-If you use C<auth_data>, you should *not* serialize that alongside the other parameters, and
+If you use C<auth_data>, you should I<not> serialize that alongside the other parameters, and
 instead reconstruct the C<auth_data> before decryption.
 
 =head2 symmetric_decrypt
 
-  my %params; # previous encryption result
+  my %params= ...;         # previous encryption result hashref
+  $params{auth_data}= ...; # if you used auth_data during encryption
   my $secret= symmetric_decrypt(\%params, $aes_key);
 
 This decrypts the previous result of C<symmetric_encrypt>.  If using C<AES-GCM>, it will also
-verify whether the C<$aes_key> was the correct key.
+verify whether the C<$aes_key> was the correct key, and croak on failure.
 
 =head2 lazy_load
 
@@ -258,11 +270,8 @@ to the list.
 # external configuration.
 our %lazy_loadable= map +($_ => 1), qw(
    Crypt::MultiKey::PKey::Unencrypted
-   Crypt::MultiKey::PKey::Manual
-   Crypt::MultiKey::PKey::Password
    Crypt::MultiKey::PKey::FIDO2
    Crypt::MultiKey::PKey::YubiKey
-   Crypt::MultiKey::PKey::Yubikey
    Crypt::MultiKey::PKey::SSHAgentSignature
 );
 sub lazy_loadable { \%lazy_loadable }
@@ -280,3 +289,26 @@ sub lazy_load {
 require Crypt::MultiKey::PKey;
 
 1;
+__END__
+
+=head1 SEE ALSO
+
+=over
+
+=item L<age|https://age-encryption.org>
+
+"age is a simple, modern and secure file encryption tool, format, and Go library."
+
+This tool can encrypt a secret using one or more public keys, to then be decrypted using any of
+the corresponding private keys.
+
+=item L<libsodium|https://github.com/jedisct1/libsodium>
+
+"Sodium is an easy-to-use software library that provides a wide range of cryptographic
+operations including encryption, decryption, digital signatures, and secure password hashing."
+
+libsodium provides a "box" primitive that is a key-wrapping scheme similar to Coffer.
+
+There are Perl bindings at L<Crypt::Sodium>.
+
+=back
