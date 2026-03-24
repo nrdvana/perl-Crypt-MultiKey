@@ -7,21 +7,34 @@ use warnings;
 use Carp;
 use MIME::Base64 qw( encode_base64 decode_base64 );
 use IPC::Open3 ();
-use Crypt::SecretBuffer qw( secret span HEX ISO8859_1 );
+use Crypt::SecretBuffer qw( secret HEX ISO8859_1 );
 use parent 'Crypt::MultiKey::PKey';
 
 =head1 DESCRIPTION
 
-This mechanism computes a deterministic challenge/response from a configured
-YubiKey slot/challenge-response secret, and then derives a password from that response
-to encrypt/decrypt the private half of a PKey.
+This module uses the YubiKey OTP protocol's challenge/response feature to
+generate a password to unlock the private half of a PKey.  Note that the OTP
+protocol is older and superceeded by the FIDO2 protocol
+(see L<Crypt::MultiKey::PKey::FIDO2>) and some newer YubiKeys don't even support
+the OTP protocol.  This mechanism of challenge/response basically just takes a
+piece of data from the user, a piece of secret data within the yubikey, runs
+them both through SHA-1, and returns a portion of the result.  This mode of
+operation is just making use of the YubiKey as an un-copyable string of bytes
+which can only be hashed when touching the button of the device.  Anyone who can
+see the contents of your PKey PEM file can reconstruct the challenge, and if
+they then have access to the YubiKey (including a button press) they can
+reconstruct the password and decrypt the PKey.
 
-This class always uses C<ykchalresp> for challenge-response so output semantics match
-the YubiKey OTP applet behavior (HMAC-SHA1 challenge-response).  When available,
-libfido2 is only used for optional device discovery metadata.
+In order to use this mechanism, you need tools L<ykinfo(1)> and L<ykchalresp(1)>,
+which on Debian come from C<< apt install yubikey-personalization >>.
 
-The challenge supplied to C<ykchalresp> is derived from this key's public half and a random
-salt.  The challenge must be reproduced exactly in order to get the same YubiKey response.
+The challenge supplied to C<ykchalresp> is derived from this key's public half
+and a random salt.  The salt is saved in attribute L</kdf_salt> and serialized
+to the PKey's PEM file (along with the YubiKey serial number and slot number)
+so that future C<decrypt_private> calls can re-issue the same challenge to the
+same slot of the same key.  Method L</can_obtain_private> will return false
+unless C<ykinfo> can find the matching serial number on one of the available
+devices.
 
 =cut
 
@@ -29,9 +42,12 @@ sub mechanism { 'YubiKey' }
 
 =attribute yubikey_serial
 
-Optional YubiKey serial number to require for this key.  If defined, both encryption and
-password recovery require this serial to be present in the list returned by
-C<< ykman list --serials >>.
+This identifies which YubiKey to issue the challenge to.  You can see a
+YubiKey's serial number (from the OTP protocol) using C<< ykinfo -s >>.
+
+If assigned prior to L</encrypt_private>, it forces that method to use only that
+key for the encryption.  Otherwise, that method uses the first available key and
+assigns this attribute with the serial of whichever one it used.
 
 =cut
 
@@ -43,127 +59,125 @@ sub _set_yubikey_serial {
    if (defined $value) {
       $value =~ /^\d+\z/
          or croak "yubikey_serial must be numeric";
+      $value =~ /[^0]/
+         or croak "YubiKey appears to have the serial number disabled";
    }
    $self->{yubikey_serial}= $value;
+   $self;
+}
+
+=attribute yubikey_slot
+
+Either C<1> or C<2>.  The YubiKey OTP protocol defines two slots which can be
+configured challenge/response.  The default is to attempt them both and record
+which slot was used.
+
+=cut
+
+sub yubikey_slot {
+   @_ > 1? shift->_set_yubikey_slot(@_) : $_[0]{yubikey_slot};
+}
+sub _set_yubikey_slot {
+   my ($self, $val)= @_;
+   !defined $val || $val =~ /^[12]\z/
+      or croak "yubikey_slot must be '1' or '2'";
+   $self->{yubikey_slot}= $val;
+   $self;
 }
 
 =attribute kdf_salt
 
-Random salt (base64) used to build the YubiKey challenge and as HKDF salt.
+Random salt (base64) used to build the YubiKey challenge.
 
 =cut
 
 sub kdf_salt { @_ > 1? shift->_set_kdf_salt(@_) : $_[0]{kdf_salt} }
-sub _set_kdf_salt { $_[0]{kdf_salt}= $_[1] }
-
-=attribute ykchalresp
-
-Path to the C<ykchalresp> executable.  Defaults to C<ykchalresp> in PATH.
-
-=cut
-
-sub ykchalresp {
-   @_ > 1? $_[0]{ykchalresp}= $_[1] : ($_[0]{ykchalresp} || 'ykchalresp');
+sub _set_kdf_salt {
+   my ($self, $val)= @_;
+   $val =~ /^[\/A-Za-z0-9+]+=*\z/
+      or croak "expected base64";
+   $self->{kdf_salt}= $val;
+   $self;
 }
 
-=attribute ykman
-
-Path to the C<ykman> executable.  Defaults to C<ykman> in PATH.
-
-=cut
-
-sub ykman {
-   @_ > 1? $_[0]{ykman}= $_[1] : ($_[0]{ykman} || 'ykman');
-}
-
-sub _have_fido2 {
-   return Crypt::MultiKey::_have_fido2()? 1 : 0;
-}
-
-sub _fido2_list_devices {
-   my $devices= Crypt::MultiKey::_fido2_list_devices();
-   return [] unless ref $devices eq 'ARRAY';
-   return $devices;
+sub _enumerate_devices {
+   my $class= shift;
+   my @devs;
+   my $cmd= $Crypt::MultiKey::command_path{ykinfo} // 'ykinfo';
+   for (my $i= 0; ; ++$i) {
+      my $pid= IPC::Open3::open3(undef, my $out_fh, my $err_fh, $cmd, "-n$i", "-a");
+      waitpid($pid, 0);
+      if ($? == 0) {
+         local $/= undef;
+         chomp(my $info= <$out_fh>);
+         if ($info =~ /^serial: [0-9]+$/m) {
+            my %attrs= ( idx => $i );
+            for (split /\n/, $info) {
+               my ($k, $v)= split /: /;
+               $attrs{$k}= $v if length $k && length $v;
+            }
+            # these are redundant
+            delete @attrs{'serial_hex','serial_modhex'};
+            push @devs, \%attrs;
+         } else {
+            carp "Missing serial number for $i";
+         }
+      } else {
+         # assume end of available keys.  Could check error message, but those
+         # might vary by locale...
+         last;
+      }
+   }
+   \@devs;
 }
 
 sub _update_device_list {
    my $self= shift;
-   my %devices;
-   my @order;
-
-   # When fido2 can identify serials, prefer it and keep its per-device metadata.
-   if ($self->_have_fido2) {
-      my $fido_devices= eval { $self->_fido2_list_devices };
-      if ($fido_devices && @$fido_devices) {
-         for my $dev (@$fido_devices) {
-            my $serial= $dev->{serial};
-            next unless defined $serial && $serial =~ /^\d+\z/;
-            $devices{$serial}= { %$dev };
-            push @order, $serial;
-         }
-      }
-   }
-
-   # Fall back to ykman when fido2 enumeration doesn't provide serial numbers.
-   if (!@order) {
-      my $out= $self->_run_ykman('list', '--serials');
-      for my $serial (grep /^\d+\z/, split /\s+/, $out) {
-         next if $devices{$serial};
-         $devices{$serial}= { serial => $serial };
-         push @order, $serial;
-      }
-   }
-
-   $self->{_devices_by_serial}= \%devices;
-   $self->{_device_serial_order}= \@order;
-   return \%devices;
+   $self->{_device_list}= $self->_enumerate_devices;
 }
 
-=method list_yubikey_serials
+=method list_yubikeys
 
-Return an arrayref of serial numbers detected by C<< ykman list --serials >>.
+Return a list of hashrefs about any connected YubiKeys (limited to those which
+support the OTP protocol)
 
 =cut
 
-sub list_yubikey_serials {
+sub list_yubikeys {
    my $self= shift;
    $self->_update_device_list;
-   return [ @{ $self->{_device_serial_order} || [] } ];
+   return @{ $self->{_device_list} || {} };
 }
 
 =method can_obtain_private
 
-Returns true when the configured YubiKey serial is currently present.
+Returns true if the configured YubiKey serial number is connected.
 
 =cut
 
 sub can_obtain_private {
    my $self= shift;
    my $want= $self->yubikey_serial;
-   return 0 unless defined $want;
-   my $serials= eval { $self->list_yubikey_serials };
-   return 0 unless $serials && @$serials;
-   return $self->_serial_is_present($want, $serials)? 1 : 0;
+   defined $want && grep $_->{serial} eq $want, $self->list_yubikeys
 }
 
 =method obtain_private
 
-Recompute challenge/response from the configured YubiKey and decrypt the private half.
+Pass the challenge to the configured YubiKey, and L</decrypt_private> using the
+response as a password.
 
 =cut
 
 sub obtain_private {
    my $self= shift;
-   return $self if $self->has_private;
-
-   defined $self->private_encrypted
-      or croak "Can't decrypt an empty private_encrypted attribute";
-   defined $self->yubikey_serial
-      or croak "Cannot obtain private key without yubikey_serial";
-   $self->_assert_serial_available;
-
-   my $pw= $self->_derive_password_from_yubikey;
-   $self->decrypt_private($pw);
+   unless ($self->has_private) {
+      defined $self->private_encrypted
+         or croak "Can't decrypt an empty private_encrypted attribute";
+      defined $self->yubikey_serial && defined $self->yubikey_slot
+         or croak "Can't obtain private key without attributes yubikey_serial and yubikey_slot";
+      my $pw= $self->_derive_password_from_yubikey;
+      $self->decrypt_private($pw);
+   }
 }
 
 =method encrypt_private
@@ -179,94 +193,68 @@ If no serial is provided, this picks the first detected key and records its seri
 
 sub encrypt_private {
    my ($self, $selector)= @_;
-   my $serials= $self->list_yubikey_serials;
-   croak "No YubiKeys detected by ykman list --serials"
-      unless @$serials;
-
    my $serial;
    if (defined $selector) {
       $selector =~ /^\d+\z/
          or croak "YubiKey selector must be a numeric serial";
       $serial= $selector;
    }
-   elsif (defined $self->yubikey_serial) {
-      $serial= $self->yubikey_serial;
-   }
-   else {
-      $serial= $serials->[0];
-   }
-
-   $self->_assert_serial_present($serial, $serials);
-
-   $self->yubikey_serial($serial);
-   secret(append_random => 16)->span->copy_to(my $salt_bytes);
-   $self->kdf_salt(encode_base64($salt_bytes, ''));
-
-   my $pw= $self->_derive_password_from_yubikey;
+   my $pw= $self->_derive_password_from_yubikey($serial);
    $self->next::method($pw, 0);
 }
 
+# If serial / slot / salt are not defined, they will be initialized.
+# Subsequent calls will return the same password.
 sub _derive_password_from_yubikey {
-   my $self= shift;
-   my $challenge_bytes= $self->_challenge_bytes;
-   my $response= $self->_run_chalresp($challenge_bytes);
-
-   my %kdf_params= (
-      size => 32,
-      kdf_info => 'Crypt::MultiKey::PKey::YubiKey',
-      kdf_salt => decode_base64($self->kdf_salt),
-   );
-   return Crypt::MultiKey::hkdf(\%kdf_params, $response);
-}
-
-sub _challenge_bytes {
-   my $self= shift;
-   defined $self->kdf_salt
-      or croak "Missing kdf_salt";
+   my ($self, $serial, $slot)= @_;
+   my ($bytes, $salt);
+   if (defined $self->kdf_salt) {
+      $salt= decode_base64($self->kdf_salt);
+   } else {
+      secret(append_random => 16)->span->copy_to($salt);
+      $self->kdf_salt(encode_base64($salt, ''));
+   }
    $self->_export_spki(my $raw_pubkey_bytes);
-   my $salt_bytes= decode_base64($self->kdf_salt);
-   return $salt_bytes . $raw_pubkey_bytes;
-}
-
-sub _assert_serial_available {
-   my $self= shift;
-   my $serial= $self->yubikey_serial;
-   defined $serial
-      or croak "Cannot obtain private key without yubikey_serial";
-   my $serials= $self->list_yubikey_serials;
-   $self->_assert_serial_present($serial, $serials);
-   return 1;
-}
-
-sub _serial_is_present {
-   my ($self, $serial, $serials)= @_;
-   return scalar grep $_ eq $serial, @$serials;
-}
-
-sub _assert_serial_present {
-   my ($self, $serial, $serials)= @_;
-   $self->_serial_is_present($serial, $serials)
-      or croak "YubiKey serial $serial is not currently connected";
-   return 1;
+   $bytes= $salt . $raw_pubkey_bytes;
+   $serial //= $self->yubikey_serial;
+   $slot //= $self->yubikey_slot;
+   for my $device (@{ $self->_update_device_list }) {
+      next if defined $serial and $device->{serial} ne $serial;
+      next unless $device->{serial} =~ /[^0]/;
+      my $response= defined $slot? $self->_run_chalresp($device, $slot, $bytes)
+         : eval { $slot= 1; $self->_run_chalresp($device, 1, $bytes) }
+           // eval { $slot= 2; $self->_run_chalresp($device, 2, $bytes) }
+           // do { carp "Neither slot of $device->{serial} supports chalresp"; next; };
+      $self->yubikey_serial($device->{serial});
+      $self->yubikey_slot($slot);
+      my %kdf_params= (
+         size => 32,
+         kdf_info => 'Crypt::MultiKey::PKey::YubiKey',
+         kdf_salt => $salt,
+      );
+      return Crypt::MultiKey::hkdf(\%kdf_params, $response);
+   }
+   croak "Required YubiKey ($serial) is not connected" if defined $serial;
+   croak "No YubiKey supporting OTP is connected";
 }
 
 sub _run_chalresp {
-   my ($self, $challenge_bytes)= @_;
-
-   # Always use ykchalresp here so password derivation is identical to OTP applet C/R mode.
-   return $self->_run_ykchalresp('-x', unpack('H*', $challenge_bytes));
+   my ($self, $device, $slot, $challenge_bytes)= @_;
+   my $out= $self->_run_ykchalresp('-n'.$device->{idx}, "-$slot",
+      '-x', unpack('H*', $challenge_bytes));
+   $out->unmask_to(sub {print "# out='$_[0]'\n" });
+   return eval { $out->span(encoding => HEX)->copy(encoding => ISO8859_1) }
+      // croak "ykchalresp returned non-hex response $@";
 }
 
 sub _run_ykchalresp {
    my ($self, @args)= @_;
-   my $cmd= $self->ykchalresp;
-   my $full= join(' ', $cmd, @args);
-   my $pid= IPC::Open3::open3(undef, my $out_fh, my $err_fh, $cmd, @args);
-
+   my $cmd= $Crypt::MultiKey::command_path{ykchalresp} // 'ykchalresp';
    my $out= secret;
    my $err= '';
+   my $pid= IPC::Open3::open3(undef, my $out_fh, my $err_fh, $cmd, @args);
 
-   # Read stdout into a SecretBuffer so challenge-response material avoids plain scalars.
+   # Read stdout into a SecretBuffer, since this is being used as a password.
    while (1) {
       my $n= $out->append_sysread($out_fh, 4096);
       last unless defined $n && $n > 0;
@@ -280,26 +268,8 @@ sub _run_ykchalresp {
    }
 
    waitpid($pid, 0);
-   my $exit= $? >> 8;
-   $exit == 0
-      or croak "$full failed: $err";
-
-   my $response_hex= '';
-   $out->span->copy_to($response_hex);
-   $response_hex =~ s/\s+//g;
-   my $decoded= eval { span($response_hex, encoding => HEX)->copy(encoding => ISO8859_1) };
-   $@ and croak "Challenge-response command returned non-hex response";
-   return $decoded;
-}
-
-sub _run_ykman {
-   my ($self, @args)= @_;
-   my $cmd= $self->ykman;
-   my $full= join(' ', $cmd, @args);
-   my $out= qx{$cmd @args 2>&1};
-   my $exit= $? >> 8;
-   $exit == 0
-      or croak "$full failed: $out";
+   $? == 0
+      or croak join(' ', $cmd, @args, "failed ($?):", $err);
    return $out;
 }
 
@@ -308,19 +278,42 @@ sub _import_pem_headers {
    my ($self, $pem)= @_;
    $self->next::method($pem);
    $self->yubikey_serial($pem->headers->{cmk_yubikey_serial});
+   $self->yubikey_slot($pem->headers->{cmk_yubikey_slot});
    $self->kdf_salt($pem->headers->{cmk_kdf_salt});
 }
 
 sub _export_pem_headers {
    my ($self, $pem)= @_;
-   croak "Cannot export ::PKey::YubiKey without selecting yubikey_serial"
-      unless defined $self->yubikey_serial;
+   croak "Cannot export ::PKey::YubiKey without selecting yubikey_serial and yubikey_slot"
+      unless defined $self->yubikey_serial && defined $self->yubikey_slot;
    croak "Cannot export ::PKey::YubiKey without first encrypting the private half"
       unless defined $self->private_encrypted;
    $self->next::method($pem);
    $pem->headers->append(cmk_yubikey_serial => $self->yubikey_serial);
-   $pem->headers->append(cmk_kdf_salt => $self->kdf_salt)
-      if defined $self->kdf_salt;
+   $pem->headers->append(cmk_yubikey_slot => $self->yubikey_slot);
+   $pem->headers->append(cmk_kdf_salt => $self->kdf_salt);
 }
+
+=head1 CONFIGURATION
+
+You can specify the paths to the exeutables used by this module with the
+C<< %Crypt::MultiKey::command_path >> global variable:
+
+=over
+
+=item ykinfo
+
+C<< $Crypt::MultiKey::command_path{ykinfo} >>
+
+=item ykchalresp
+
+C<< $Crypt::MultiKey::command_path{ykchalresp} >>.
+
+=back
+
+For security, these are not configurable from an environment variable.
+
+=cut
+
 
 1;

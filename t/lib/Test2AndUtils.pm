@@ -9,7 +9,7 @@ use parent 'Test2::V0';
 our @EXPORT= (
    @Test2::V0::EXPORT,
    qw( explain unindent pipe_with_data escape_nonprintable unescape_nonprintable
-      pack_msg unpack_msg setup_tty_helper )
+      pack_msg unpack_msg setup_tty_helper mkfile slurp hexdump )
 );
 
 # Test2 runs async by default, which messes up the relation between warnings and the test
@@ -33,6 +33,35 @@ sub unindent {
    my ($indent)= ($_[0] =~ /^(\s+)/);
    (my $x= $_[0]) =~ s/^$indent//mg;
    $x;
+}
+
+sub mkfile {
+   my ($name, $data, $mode)= @_;
+   open my $fh, '>:raw', $name or die "open(>$name): $!";
+   $fh->print($data) or die "write($name): $!";
+   $fh->close or die "close($name): $!";
+   chmod $mode, $name or die "chmod($name, $mode): $!"
+      if defined $mode;
+   1;
+}
+
+sub slurp {
+   my ($name)= @_;
+   open my $fh, '<:raw', $name or die "open(<$name): $!";
+   local $/;
+   my $ret= scalar <$fh>;
+   defined $ret && close $fh or die "close($name): $!";
+   $ret;
+}
+
+# Equivalent of unix command 'hexdump -C'
+# https://www.perlmonks.org/?node_id=11166492
+sub hexdump {
+   my ($data)= @_;
+   $data =~ s/\G(.{1,16})(\1+)?/
+      sprintf "%08x  %-50s|%s|\n%s", $-[0], "@{[unpack q{(H2)8a0(H2)8},$1]}",
+         $1 =~ y{ -~}{.}cr, "*\n"x!!$+[2]
+   /segr . sprintf "%08x", $+[0]
 }
 
 # Useful for preparing a pipe with data already loaded in it, and where the write handle
