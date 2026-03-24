@@ -59,9 +59,11 @@ sub slurp {
 sub hexdump {
    my ($data)= @_;
    $data =~ s/\G(.{1,16})(\1+)?/
-      sprintf "%08x  %-50s|%s|\n%s", $-[0], "@{[unpack q{(H2)8a0(H2)8},$1]}",
-         $1 =~ y{ -~}{.}cr, "*\n"x!!$+[2]
-   /segr . sprintf "%08x", $+[0]
+      (my $ascii= $1) =~ y{ -~}{.}c;
+      sprintf "%08x  %-50s|%s|\n%s", $-[0], join(' ', unpack q{(H2)8a0(H2)8},$1),
+         $ascii, "*\n"x!!$+[2]
+   /seg;
+   sprintf "%s%08x", $data, $+[0]
 }
 
 # Useful for preparing a pipe with data already loaded in it, and where the write handle
