@@ -5,6 +5,7 @@ package Crypt::MultiKey::PKey::YKChalResp;
 use strict;
 use warnings;
 use Carp;
+use Symbol ();
 use MIME::Base64 qw( encode_base64 decode_base64 );
 use IPC::Open3 ();
 use Crypt::SecretBuffer qw( secret HEX ISO8859_1 );
@@ -106,21 +107,26 @@ sub _enumerate_devices {
    my @devs;
    my $cmd= $Crypt::MultiKey::command_path{ykinfo} // 'ykinfo';
    for (my $i= 0; ; ++$i) {
-      my $pid= IPC::Open3::open3(undef, my $out_fh, my $err_fh, $cmd, "-n$i", "-a");
+      my $pid= IPC::Open3::open3(undef, my $out_fh, my $err_fh=Symbol::gensym(), $cmd, "-n$i", "-a");
       waitpid($pid, 0);
+      local $/= undef;
+      chomp(my $info= <$out_fh>);
+      chomp(my $err= <$err_fh>);
       if ($? == 0) {
-         local $/= undef;
-         chomp(my $info= <$out_fh>);
-         if ($info =~ /^serial: [0-9]+$/m) {
+         if ($info =~ /^serial:\s*[0-9]+\s*$/m) {
             my %attrs= ( idx => $i );
-            for (split /\n/, $info) {
-               my ($k, $v)= split /: /;
+            for (split /\s*?\n/, $info) {
+               my ($k, $v)= split /:\s*/;
                $attrs{$k}= $v if length $k && length $v;
             }
             # these are redundant
             delete @attrs{'serial_hex','serial_modhex'};
             push @devs, \%attrs;
          } else {
+            if (length $err) {
+               $err .= "\n" unless $err =~ /\n\z/;
+               print STDERR $err;
+            }
             carp "Missing serial number for $i";
          }
       } else {

@@ -6,46 +6,15 @@ use File::Spec;
 use Crypt::SecretBuffer qw( secret );
 use Crypt::MultiKey::PKey::YKChalResp;
 
-my $tmp= tempdir(CLEANUP => 0);
-my $fname= File::Spec->catdir($tmp, 'ykinfo');
-$Crypt::MultiKey::command_path{ykinfo}= $fname;
-note "Writing mock ykinfo to $fname";
-mkfile($fname, <<PL, 0777);
-#! $^X
-# Simulate having 3 YubiKeys where the first has serial number disabled,
-# the second uses slot 2 for chalresp, and the third uses slot 1.
-use strict;
-
-my \$serial= 0;
-my %opts;
-for (\@ARGV) {
-   if (/^-n(\\d+)\\z/) {
-      \$serial += \$1 * 10000000 + \$1;
-      if (\$1 > 2) {
-         print STDERR "Yubikey core error: no yubikey present\n";
-         exit 1;
-      }
-   }
-   elsif (/^-([asHmvtp12iI])\\z/) {
-      \$opts{\$1}++;
-   }
-   else {
-      print STDERR "unsupported option\n";
-      exit 1;
-   }
+# Export as an envionment variable for external command wrappers to use
+$ENV{TEST_PERL_INTERPRETER}= $^X;
+# Need wrappers on the commands in order to set the perl interpreter to the same as used for
+# running this test.  (or perform voodoo on the Makefile.PL to rewrite the test scripts, but
+# lets not do that)
+for (qw( ykinfo ykchalresp )) {
+   my $wrapper= $^O eq 'MSWin32'? "mock-$_.bat" : "mock-$_.sh";
+   $Crypt::MultiKey::command_path{$_} = File::Spec->catfile($FindBin::Bin, 'bin', $wrapper);
 }
-printf "serial: %08d\\n", \$serial     if \$opts{a} || \$opts{s};
-printf "serial_hex: %06x\\n", \$serial if \$opts{a} || \$opts{H};
-printf "serial_modhex: xxxxxx\\n"      if \$opts{a} || \$opts{m};
-printf "version: 5.4.3\\n"             if \$opts{a} || \$opts{v};
-printf "touch_level: 775\\n"           if \$opts{a} || \$opts{t};
-printf "programming_sequence: 3\\n"    if \$opts{a} || \$opts{p};
-printf "slot1_status: 1\\n"            if \$opts{a} || \$opts{1};
-printf "slot2_status: 1\\n"            if \$opts{a} || \$opts{2};
-printf "vendor_id: 1050\\n"            if \$opts{a} || \$opts{i};
-printf "product_id: 407\\n"            if \$opts{a} || \$opts{I};
-exit 0;
-PL
 
 is(
    Crypt::MultiKey::PKey::YKChalResp->_enumerate_devices,
@@ -65,53 +34,6 @@ is(
    ],
    'enumerate_devices'
 );
-
-$fname= File::Spec->catdir($tmp, 'ykchalresp');
-note "Writing mock ykchalresp to $fname";
-$Crypt::MultiKey::command_path{ykchalresp}= $fname;
-mkfile($fname, <<PL, 0777);
-#! $^X
-# Simulate having 3 YubiKeys where the first has serial number disabled,
-# the second uses slot 2 for chalresp, and the third uses slot 1.
-use strict;
-use Digest::SHA "sha1";
-
-my \$serial= 0;
-my %secret= (
-   '0,1' => "112233445566778899aabbccddeeff0011223344",
-   '0,2' => "2233445566778899aabbccddeeff001122334455",
-   '10000001,2' => "33445566778899aabbccddeeff00112233445566",
-   '20000002,1' => "445566778899aabbccddeeff0011223344556677",
-);
-my %opts;
-my \$challenge= pop \@ARGV;
-for (\@ARGV) {
-   if (/^-n(\\d+)\\z/) {
-      \$serial += \$1 * 10000000 + \$1;
-      if (\$1 > 2) {
-         print STDERR "Yubikey core error: no yubikey present\\n";
-         exit 1;
-      }
-   }
-   elsif (/^-([12HYxt])\\z/) {
-      \$opts{\$1}++;
-   }
-   else {
-      print STDERR "unsupported option \$_\\n";
-      exit 1;
-   }
-}
-my \$slot= \$opts{2}? 2 : 1;
-my \$secret= \$secret{"\$serial,\$slot"};
-if (\$secret) {
-   \$challenge= pack("H*", \$challenge) if \$opts{x};
-   print unpack('H*', sha1(\$secret . \$challenge))."\\n";
-   exit 0;
-} else {
-   print STDERR "Yubikey core error: timeout \$serial \$slot\\n";
-   exit 1;
-}
-PL
 
 sub round_trip {
    my ($selector, $expect_serial, $expect_slot)= @_;
