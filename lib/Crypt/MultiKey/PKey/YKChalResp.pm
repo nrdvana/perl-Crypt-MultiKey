@@ -1,6 +1,6 @@
-package Crypt::MultiKey::PKey::YubiKey;
+package Crypt::MultiKey::PKey::YKChalResp;
 # VERSION
-# ABSTRACT: use challenge/response from ykchalresp to unlock a private key
+# ABSTRACT: use YubKey challenge/response to unlock a private key
 
 use strict;
 use warnings;
@@ -38,7 +38,7 @@ devices.
 
 =cut
 
-sub mechanism { 'YubiKey' }
+sub mechanism { 'YKChalResp' }
 
 =attribute yubikey_serial
 
@@ -229,7 +229,7 @@ sub _derive_password_from_yubikey {
       $self->yubikey_slot($slot);
       my %kdf_params= (
          size => 32,
-         kdf_info => 'Crypt::MultiKey::PKey::YubiKey',
+         kdf_info => 'Crypt::MultiKey::PKey::YKChalResp',
          kdf_salt => $salt,
       );
       return Crypt::MultiKey::hkdf(\%kdf_params, $response);
@@ -284,9 +284,9 @@ sub _import_pem_headers {
 
 sub _export_pem_headers {
    my ($self, $pem)= @_;
-   croak "Cannot export ::PKey::YubiKey without selecting yubikey_serial and yubikey_slot"
+   croak "Cannot export ::PKey::YKChalResp without selecting yubikey_serial and yubikey_slot"
       unless defined $self->yubikey_serial && defined $self->yubikey_slot;
-   croak "Cannot export ::PKey::YubiKey without first encrypting the private half"
+   croak "Cannot export ::PKey::YKChalResp without first encrypting the private half"
       unless defined $self->private_encrypted;
    $self->next::method($pem);
    $pem->headers->append(cmk_yubikey_serial => $self->yubikey_serial);

@@ -4,7 +4,7 @@ use Test2AndUtils;
 use File::Temp qw( tempdir );
 use File::Spec;
 use Crypt::SecretBuffer qw( secret );
-use Crypt::MultiKey::PKey::YubiKey;
+use Crypt::MultiKey::PKey::YKChalResp;
 
 my $tmp= tempdir(CLEANUP => 0);
 my $fname= File::Spec->catdir($tmp, 'ykinfo');
@@ -48,7 +48,7 @@ exit 0;
 PL
 
 is(
-   Crypt::MultiKey::PKey::YubiKey->_enumerate_devices,
+   Crypt::MultiKey::PKey::YKChalResp->_enumerate_devices,
    [
       { serial => '00000000', version => '5.4.3', touch_level => '775',
         programming_sequence => 3, slot1_status => 1, slot2_status => 1,
@@ -115,7 +115,7 @@ PL
 
 sub round_trip {
    my ($selector, $expect_serial, $expect_slot)= @_;
-   my $key= Crypt::MultiKey::PKey->generate('x25519')->mechanism('YubiKey');
+   my $key= Crypt::MultiKey::PKey->generate('x25519')->mechanism('YKChalResp');
 
    defined $selector? $key->encrypt_private($selector) : $key->encrypt_private;
    is($key->yubikey_serial, $expect_serial, 'selected expected yubikey serial');
@@ -142,14 +142,14 @@ round_trip(undef, '10000001', 2);
 round_trip('10000001', '10000001', 2);
 round_trip('20000002', '20000002', 1);
 
-my $missing= Crypt::MultiKey::PKey->generate('x25519')->mechanism('YubiKey');
+my $missing= Crypt::MultiKey::PKey->generate('x25519')->mechanism('YKChalResp');
 like(
    dies { $missing->encrypt_private('99999999') },
    qr/Required YubiKey.*?not connected/,
    'dies for unknown yubikey serial selector',
 );
 
-my $unset= Crypt::MultiKey::PKey->generate('x25519')->mechanism('YubiKey');
+my $unset= Crypt::MultiKey::PKey->generate('x25519')->mechanism('YKChalResp');
 $unset->clear_private;
 $unset->private_encrypted('AAAA');
 like(
@@ -158,7 +158,7 @@ like(
    'obtain_private requires yubikey_serial',
 );
 
-my $without_serial= Crypt::MultiKey::PKey->generate('x25519')->mechanism('YubiKey');
+my $without_serial= Crypt::MultiKey::PKey->generate('x25519')->mechanism('YKChalResp');
 ok(!$without_serial->can_obtain_private, 'can_obtain_private is false when yubikey_serial is unset');
 
 done_testing;

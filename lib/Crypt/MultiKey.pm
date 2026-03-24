@@ -271,7 +271,7 @@ to the list.
 our %lazy_loadable= map +($_ => 1), qw(
    Crypt::MultiKey::PKey::Unencrypted
    Crypt::MultiKey::PKey::FIDO2
-   Crypt::MultiKey::PKey::YubiKey
+   Crypt::MultiKey::PKey::YKChalResp
    Crypt::MultiKey::PKey::SSHAgentSignature
 );
 sub lazy_loadable { \%lazy_loadable }
