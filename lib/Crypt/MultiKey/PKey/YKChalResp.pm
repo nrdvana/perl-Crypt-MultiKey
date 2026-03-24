@@ -8,6 +8,7 @@ use Carp;
 use MIME::Base64 qw( encode_base64 decode_base64 );
 use IPC::Open3 ();
 use Crypt::SecretBuffer qw( secret HEX ISO8859_1 );
+use Crypt::MultiKey ();
 use parent 'Crypt::MultiKey::PKey';
 
 =head1 DESCRIPTION
@@ -60,7 +61,7 @@ sub _set_yubikey_serial {
       $value =~ /^\d+\z/
          or croak "yubikey_serial must be numeric";
       $value =~ /[^0]/
-         or croak "YubiKey appears to have the serial number disabled";
+         or warn "yubikey_serial is zero, which means we won't know if the correct key is present\n";
    }
    $self->{yubikey_serial}= $value;
    $self;
@@ -214,17 +215,23 @@ sub _derive_password_from_yubikey {
       secret(append_random => 16)->span->copy_to($salt);
       $self->kdf_salt(encode_base64($salt, ''));
    }
+   # ykchalresp challenge is a max of 64 bytes.  The salt ensures a unique
+   # challenge per PKey (in case PKey was used for something else).  Including
+   # the public key ensures that we aren't just feeding a literal value
+   # into the yubikey that may have been tampered with as some sort of attack.
+   length($salt) == 16 or croak "Salt must be 16 bytes";
    $self->_export_spki(my $raw_pubkey_bytes);
-   $bytes= $salt . $raw_pubkey_bytes;
+   $bytes= Crypt::MultiKey::sha256($raw_pubkey_bytes, $salt);
+   # Search for the required YubiKey, or if this is the first time, look for a
+   # usable slot on a YubiKey.
    $serial //= $self->yubikey_serial;
    $slot //= $self->yubikey_slot;
    for my $device (@{ $self->_update_device_list }) {
-      next if defined $serial and $device->{serial} ne $serial;
-      next unless $device->{serial} =~ /[^0]/;
+      next if defined $serial && $device->{serial} ne $serial;
       my $response= defined $slot? $self->_run_chalresp($device, $slot, $bytes)
          : eval { $slot= 1; $self->_run_chalresp($device, 1, $bytes) }
            // eval { $slot= 2; $self->_run_chalresp($device, 2, $bytes) }
-           // do { carp "Neither slot of $device->{serial} supports chalresp"; next; };
+           // do { carp "Neither slot of $device->{serial} supports OTP chalresp"; next; };
       $self->yubikey_serial($device->{serial});
       $self->yubikey_slot($slot);
       my %kdf_params= (

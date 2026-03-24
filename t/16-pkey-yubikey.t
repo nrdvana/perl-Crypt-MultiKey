@@ -138,7 +138,7 @@ sub round_trip {
    is($decrypted, $msg, 'decrypted ciphertext after obtain_private');
 }
 
-round_trip(undef, '10000001', 2);
+round_trip(undef, '00000000', 1);
 round_trip('10000001', '10000001', 2);
 round_trip('20000002', '20000002', 1);
 
