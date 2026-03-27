@@ -44,6 +44,14 @@ $test->feature(HAVE_LIBFIDO2
                { h => 'fido.h', pkg_config => ['libfido2'] },
                { h => 'fido.h', -l => [ 'fido2', 'cbor' ] });
 
+$test->feature(HAVE_LINUX_HIDRAW
+               => q{struct hidraw_devinfo info;
+                   /* don't actually want it to succeed, just ensure it compiled */
+                   ioctl(0, HIDIOCGRAWINFO, &info);
+                   return 0;
+                  },
+               { h => [ 'linux/hidraw.h', 'sys/ioctl.h' ] });
+
 $test->write_config_header('CryptMultiKey_config.h');
 $test->export_deps($dep);
 

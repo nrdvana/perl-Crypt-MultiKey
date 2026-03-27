@@ -80,6 +80,38 @@ _openssl_version_components()
       XPUSHs(sv_2mortal(newSViv(patch)));
 
 bool
+_have_yubico_otp()
+   CODE:
+      RETVAL= cmk_yubico_otp_available();
+   OUTPUT:
+      RETVAL
+
+HV*
+_yubico_otp_ykinfo(fd)
+   int fd
+   CODE:
+      RETVAL= cmk_yubico_otp_ykinfo(fd);
+   OUTPUT:
+      RETVAL
+
+void
+_yubico_otp_ykchalresp(fd, slot, timeout, challenge)
+   int fd
+   int slot
+   NV timeout
+   secret_buffer *challenge
+   INIT:
+      SV *secret_buffer_ref= NULL;
+      secret_buffer *response= secret_buffer_new(0, &secret_buffer_ref);
+   PPCODE:
+      switch(cmk_yubico_otp_ykchalresp(fd, slot, (int)(timeout*1000), challenge, response)) {
+      case  0: ST(0)= secret_buffer_ref; XSRETURN(1); break;
+      case -1: XSRETURN(0); break;
+      case -2: XSRETURN_UNDEF; break;
+      default: croak("BUG");
+      }
+
+bool
 _have_fido2()
    CODE:
       RETVAL= cmk_fido2_available();

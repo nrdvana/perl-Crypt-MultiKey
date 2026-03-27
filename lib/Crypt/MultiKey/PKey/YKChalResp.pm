@@ -105,34 +105,49 @@ sub _set_kdf_salt {
 sub _enumerate_devices {
    my $class= shift;
    my @devs;
-   my $cmd= $Crypt::MultiKey::command_path{ykinfo} // 'ykinfo';
-   for (my $i= 0; ; ++$i) {
-      my $pid= IPC::Open3::open3(undef, my $out_fh, my $err_fh=Symbol::gensym(), $cmd, "-n$i", "-a");
-      waitpid($pid, 0);
-      local $/= undef;
-      chomp(my $info= <$out_fh>);
-      chomp(my $err= <$err_fh>);
-      if ($? == 0) {
-         if ($info =~ /^serial:\s*[0-9]+\s*$/m) {
-            my %attrs= ( idx => $i );
-            for (split /\s*?\n/, $info) {
-               my ($k, $v)= split /:\s*/;
-               $attrs{$k}= $v if length $k && length $v;
+   my $cmd= $Crypt::MultiKey::command_path{ykinfo};
+   if (!defined $cmd && Crypt::MultiKey::_have_yubico_otp()) {
+      for (</dev/hidraw*>) {
+         open my $fh, '+<', $_
+            or next;
+         my $info= Crypt::MultiKey::_yubico_otp_ykinfo(fileno $fh)
+            or next;
+         $info->{path}= $_;
+         push @devs, $info;
+      }
+   }
+   else {
+      $cmd //= 'ykinfo';
+      for (my $i= 0; ; ++$i) {
+         my $pid= IPC::Open3::open3(undef, my $out_fh, my $err_fh=Symbol::gensym(), $cmd, "-n$i", "-a");
+         waitpid($pid, 0);
+         local $/= undef;
+         chomp(my $info= <$out_fh>);
+         chomp(my $err= <$err_fh>);
+         if ($? == 0) {
+            if ($info =~ /^serial:\s*[0-9]+\s*$/m) {
+               my %attrs= ( idx => $i );
+               for (split /\s*?\n/, $info) {
+                  my ($k, $v)= split /:\s*/;
+                  $attrs{$k}= $v if length $k && length $v;
+               }
+               # these are redundant
+               delete @attrs{'serial_hex','serial_modhex'};
+               # these are in hex but could look like decimal, so just make them integers
+               $attrs{$_}= hex $attrs{$_} for qw( vendor_id product_id );
+               push @devs, \%attrs;
+            } else {
+               if (length $err) {
+                  $err .= "\n" unless $err =~ /\n\z/;
+                  print STDERR $err;
+               }
+               carp "Missing serial number for $i";
             }
-            # these are redundant
-            delete @attrs{'serial_hex','serial_modhex'};
-            push @devs, \%attrs;
          } else {
-            if (length $err) {
-               $err .= "\n" unless $err =~ /\n\z/;
-               print STDERR $err;
-            }
-            carp "Missing serial number for $i";
+            # assume end of available keys.  Could check error message, but those
+            # might vary by locale...
+            last;
          }
-      } else {
-         # assume end of available keys.  Could check error message, but those
-         # might vary by locale...
-         last;
       }
    }
    \@devs;

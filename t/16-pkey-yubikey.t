@@ -21,15 +21,15 @@ is(
    [
       { serial => '00000000', version => '5.4.3', touch_level => '775',
         programming_sequence => 3, slot1_status => 1, slot2_status => 1,
-        vendor_id => 1050, product_id => 407, idx => 0,
+        vendor_id => 4176, product_id => 1031, idx => 0,
       },
       { serial => '10000001', version => '5.4.3', touch_level => '775',
         programming_sequence => 3, slot1_status => 1, slot2_status => 1,
-        vendor_id => 1050, product_id => 407, idx => 1,
+        vendor_id => 4176, product_id => 1031, idx => 1,
       },
       { serial => '20000002', version => '5.4.3', touch_level => '775',
         programming_sequence => 3, slot1_status => 1, slot2_status => 1,
-        vendor_id => 1050, product_id => 407, idx => 2,
+        vendor_id => 4176, product_id => 1031, idx => 2,
       },
    ],
    'enumerate_devices'
