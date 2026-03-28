@@ -96,6 +96,17 @@ extern void cmk_hmac_sha256(U8 dest[32], const U8 *key, size_t key_len, SV **inp
  * It uses a default HKDF "info" that can be overridden in the encryption params.
  */
 secret_buffer *cmk_hkdf(HV *params, secret_buffer *key_material);
+
+/* Return boolean whether support for Yubico OTP was compiled into Crypt::MultiKey */
+extern bool cmk_yubico_otp_available();
+
+/* Run rough equivalent of the 'ykinfo' command over the Yubico OTP API */
+extern HV *cmk_yubico_otp_ykinfo(int fd);
+
+/* Run rough equivalent of the 'ykchalresp' command over the Yubico OTP API */
+extern int cmk_yubico_otp_ykchalresp(int fd, int slot, int timeout_ms, SV *chal, secret_buffer *resp);
+
+/* Return boolean whether support for libfido2 was compiled into Crypt::MultiKey */
 extern bool cmk_fido2_available(void);
 extern AV *cmk_fido2_list_devices(void);
 extern secret_buffer *cmk_fido2_make_credential(const char *device_path, const char *credential_name);

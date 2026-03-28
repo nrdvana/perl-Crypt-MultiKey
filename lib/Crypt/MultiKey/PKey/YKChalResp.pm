@@ -113,6 +113,7 @@ sub _enumerate_devices {
          my $info= Crypt::MultiKey::_yubico_otp_ykinfo(fileno $fh)
             or next;
          $info->{path}= $_;
+         $info->{handle}= $fh;
          push @devs, $info;
       }
    }
@@ -268,11 +269,17 @@ sub _derive_password_from_yubikey {
 
 sub _run_chalresp {
    my ($self, $device, $slot, $challenge_bytes)= @_;
-   my $out= $self->_run_ykchalresp('-n'.$device->{idx}, "-$slot",
-      '-x', unpack('H*', $challenge_bytes));
-   $out->unmask_to(sub {print "# out='$_[0]'\n" });
-   return eval { $out->span(encoding => HEX)->copy(encoding => ISO8859_1) }
-      // croak "ykchalresp returned non-hex response $@";
+   if (defined $device->{handle} && Crypt::MultiKey::_have_yubico_otp()) {
+      my (@ret)= Crypt::MultiKey::_yubico_otp_ykchalresp(fileno $device->{handle}, $slot, 5, $challenge_bytes);
+      @ret or croak "ykchalresp failed: $!";
+      return $ret[0] // croak "ykchalresp timed out waiting for touch";
+   } else {
+      my $out= $self->_run_ykchalresp('-n'.$device->{idx}, "-$slot",
+         '-x', unpack('H*', $challenge_bytes));
+      $out->unmask_to(sub {print "# out='$_[0]'\n" });
+      return eval { $out->span(encoding => HEX)->copy(encoding => ISO8859_1) }
+         // croak "ykchalresp returned non-hex response $@";
+   }
 }
 
 sub _run_ykchalresp {

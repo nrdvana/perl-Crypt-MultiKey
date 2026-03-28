@@ -86,20 +86,23 @@ _have_yubico_otp()
    OUTPUT:
       RETVAL
 
-HV*
+void
 _yubico_otp_ykinfo(fd)
    int fd
-   CODE:
-      RETVAL= cmk_yubico_otp_ykinfo(fd);
-   OUTPUT:
-      RETVAL
+   INIT:
+      HV *ret;
+   PPCODE:
+      if ((ret= cmk_yubico_otp_ykinfo(fd)))
+         XPUSHs(newRV_noinc((SV*)ret));
+      else
+         XSRETURN_UNDEF;
 
 void
 _yubico_otp_ykchalresp(fd, slot, timeout, challenge)
    int fd
    int slot
    NV timeout
-   secret_buffer *challenge
+   SV *challenge
    INIT:
       SV *secret_buffer_ref= NULL;
       secret_buffer *response= secret_buffer_new(0, &secret_buffer_ref);
