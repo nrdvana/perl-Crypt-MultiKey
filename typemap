@@ -4,14 +4,18 @@ auto_cmk_pkey*             O_CMK_PKEY
 maybe_cmk_pkey*            O_CMK_PKEY
 cmk_pubkey*                O_CMK_PUBKEY
 cmk_privkey*               O_CMK_PRIVKEY
+fido_dev_t*                O_CMK_FIDO2_DEV
 
 INPUT
 O_CMK_PKEY
-   if (!sv_isobject($arg)) croak(\"Not a ::PKey object\");
-   $var= cmk_pkey_from_magic(SvRV($arg), @{[ $type =~ /^auto/? q{CMK_MAGIC_AUTOCREATE} : $type =~ /^maybe/? 0 : q{CMK_MAGIC_OR_DIE} ]});
+   $var= cmk_pkey_from_magic($arg, @{[ $type =~ /^maybe/? q{CMK_MAGIC_UNDEF_OK} : $type =~ /^auto/? q{CMK_MAGIC_OR_DIE | CMK_MAGIC_AUTOCREATE} : q{CMK_MAGIC_OR_DIE} ]});
 
 O_CMK_PUBKEY
    $var= cmk_get_pubkey($arg);
 
 O_CMK_PRIVKEY
    $var= cmk_get_privkey($arg);
+
+INPUT
+O_CMK_FIDO2_DEV
+   $var= cmk_fido2_dev_from_magic($arg, CMK_MAGIC_OR_DIE @{[ $type =~ /^maybe/? q{| CMK_MAGIC_UNDEF_OK} : $type =~ /^auto/? q{| CMK_MAGIC_AUTOCREATE} : q{} ]});

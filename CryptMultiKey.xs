@@ -15,6 +15,11 @@
 #include <openssl/rand.h>
 #include "cmk.h"
 
+#ifdef HAVE_LIBFIDO2
+  #include "cmk_fido2.h"
+#endif
+
+
 /**********************************************************************************************\
 * XS Utils
 \**********************************************************************************************/
@@ -29,38 +34,7 @@ static SV * new_enum_dualvar(pTHX_ IV ival, SV *name) {
    return name;
 }
 
-#if 0
-#define AUTOCREATE CMK_MAGIC_AUTOCREATE
-#define OR_DIE     CMK_MAGIC_OR_DIE
-#define UNDEF_OK   CMK_MAGIC_UNDEF_OK
-static void * X_from_magic(SV *obj, int flags, MGVTBL *vtbl, const char * struct_name, size_t struct_size) {
-   SV *sv;
-   MAGIC *magic;
-   char *p;
-
-   if ((!obj || !SvOK(obj)) && (flags & CMK_MAGIC_UNDEF_OK))
-      return NULL;
-
-   if (!sv_isobject(obj)) {
-      if (flags & CMK_MAGIC_OR_DIE)
-         croak("Not an object");
-      return NULL;
-   }
-   sv = SvRV(obj);
-   if (SvMAGICAL(sv) && (magic = mg_findext(sv, PERL_MAGIC_ext, vtbl)))
-      return magic->mg_ptr;
-
-   if (flags & CMK_MAGIC_AUTOCREATE) {
-      Newxz(p, struct_size, char);
-      magic = sv_magicext(sv, NULL, PERL_MAGIC_ext, vtbl, p, 0);
-      SET_MGf_DUP_FLAG(mg);
-      return p;
-   }
-   if (flags & CMK_MAGIC_OR_DIE)
-      croak("Object lacks '%s' magic", struct_name);
-   return NULL;
-}
-#endif
+extern MAGIC* cmk_get_X_magic(pTHX_ SV *obj, int flags, const MGVTBL *mg_vtbl, const char *mg_desc);
 
 /* Aliases for typemap, to give useful errors when key state is wrong */
 typedef cmk_pkey cmk_pubkey, cmk_privkey, maybe_cmk_pkey, auto_cmk_pkey;
@@ -113,44 +87,6 @@ _yubico_otp_ykchalresp(fd, slot, timeout, challenge)
       case -2: XSRETURN_UNDEF; break;
       default: croak("BUG");
       }
-
-bool
-_have_fido2()
-   CODE:
-      RETVAL= cmk_fido2_available();
-   OUTPUT:
-      RETVAL
-
-void
-_fido2_list_devices()
-   PPCODE:
-      AV *ret= cmk_fido2_list_devices();
-      if (!ret)
-         XSRETURN_UNDEF;
-      XPUSHs(sv_2mortal(newRV_noinc((SV*)ret)));
-
-void
-_fido2_chalresp(device_path, challenge)
-   const char *device_path
-   SV *challenge
-   INIT:
-      STRLEN challenge_len;
-      const U8 *challenge_buf= (const U8*) secret_buffer_SvPVbyte(challenge, &challenge_len);
-      const U8 *cred_id_buf= NULL;
-      STRLEN cred_id_len= 0;
-   PPCODE:
-      if (items > 2 && SvOK(ST(2)))
-         cred_id_buf= (const U8*) secret_buffer_SvPVbyte(ST(2), &cred_id_len);
-      PUSHs(sv_2mortal(newRV_inc(cmk_fido2_chalresp(device_path, challenge_buf, challenge_len, cred_id_buf, cred_id_len)->wrapper)));
-
-void
-_fido2_make_credential(device_path, credential_name)
-   const char *device_path
-   const char *credential_name
-   PPCODE:
-      PUSHs(sv_2mortal(newRV_inc(cmk_fido2_make_credential(device_path, credential_name)->wrapper)));
-
-
 
 void
 _generate_uuid_v4()
@@ -213,6 +149,11 @@ symmetric_decrypt(params, aes_key, secret_out=NULL)
       cmk_symmetric_decrypt(params, aes_key, secret_out);
       XSRETURN(1); /* return buffer of secret */
 
+#ifdef HAVE_LIBFIDO2
+INCLUDE: lib/Crypt/MultiKey/FIDO2.xs
+INCLUDE: lib/Crypt/MultiKey/FIDO2/Device.xs
+#endif
+      
 MODULE = Crypt::MultiKey                PACKAGE = Crypt::MultiKey::PKey
 
 void

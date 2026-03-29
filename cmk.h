@@ -106,13 +106,6 @@ extern HV *cmk_yubico_otp_ykinfo(int fd);
 /* Run rough equivalent of the 'ykchalresp' command over the Yubico OTP API */
 extern int cmk_yubico_otp_ykchalresp(int fd, int slot, int timeout_ms, SV *chal, secret_buffer *resp);
 
-/* Return boolean whether support for libfido2 was compiled into Crypt::MultiKey */
-extern bool cmk_fido2_available(void);
-extern AV *cmk_fido2_list_devices(void);
-extern secret_buffer *cmk_fido2_make_credential(const char *device_path, const char *credential_name);
-extern secret_buffer *cmk_fido2_chalresp(const char *device_path, const U8 *challenge, STRLEN challenge_len,
-   const U8 *cred_id, STRLEN cred_id_len);
-
 /* Perform symmetric encryption using the supplied AES key, storing the ciphertext and parameters
  * into the hash `params`.
  */

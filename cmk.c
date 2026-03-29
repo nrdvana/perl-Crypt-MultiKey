@@ -42,9 +42,6 @@
 
 #include "cmk.h"
 
-#include "cmk_fido2.c"
-#include "cmk_yubico_otp.c"
-
 #define STRINGIFY_MACRO(x) #x
 #define GOTO_CLEANUP_CROAK(msg) do { err= msg; goto cleanup; } while(0)
 
@@ -55,6 +52,33 @@
 #define CMK_PBKDF2_SALT_LEN 16
 #define CMK_KDF_SALT_LEN 32
 #define CMK_RSA_KEYMATERIAL_LEN 32
+
+extern MAGIC* cmk_get_X_magic(pTHX_ SV *obj, int flags, const MGVTBL *mg_vtbl, const char *mg_desc) {
+   SV *sv;
+   MAGIC *magic;
+
+   if ((!obj || !SvOK(obj)) && (flags & CMK_MAGIC_UNDEF_OK))
+      return NULL;
+
+   if (!sv_isobject(obj)) {
+      if (flags & CMK_MAGIC_OR_DIE)
+         croak("Not an object");
+   }
+   sv = SvRV(obj);
+   if (SvMAGICAL(sv) && (magic = mg_findext(sv, PERL_MAGIC_ext, mg_vtbl)))
+      return magic;
+
+   if (flags & CMK_MAGIC_AUTOCREATE) {
+      magic = sv_magicext(sv, NULL, PERL_MAGIC_ext, mg_vtbl, NULL, 0);
+#ifdef USE_ITHREADS
+      magic->mg_flags |= MGf_DUP;
+#endif
+      return magic;
+   }
+   if (flags & CMK_MAGIC_OR_DIE)
+      croak("Object lacks '%s' magic", mg_desc);
+   return NULL;
+}
 
 /* I am only using foldEQ as a cross-platform stricmp for parsing user parameters,
  * so this should be fine for Perl < 5.14 */
@@ -99,6 +123,8 @@ static size_t round_up_to_pow2(size_t n) {
    n |= n >> 32;
    return n+1;
 }
+
+#include "cmk_yubico_otp.c"
 
 /* Generate a version 4 (random) UUID into the provided SV.
  * UUID v4 format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
@@ -607,25 +633,20 @@ static MGVTBL cmk_pkey_magic_vtbl = {
  * If EVP_PKEY magic doesn't exist, it gets created with a pointer that is initially NULL.
  */
 cmk_pkey*
-cmk_pkey_from_magic(SV *sv, int flags) {
-   if (!sv) {
-      if (flags & (CMK_MAGIC_OR_DIE|CMK_MAGIC_AUTOCREATE) && !(flags & CMK_MAGIC_UNDEF_OK))
-         croak("Invalid object");
-      return NULL;
-   }
-   MAGIC *magic= SvMAGICAL(sv)? mg_findext(sv, PERL_MAGIC_ext, &cmk_pkey_magic_vtbl) : NULL;
-   if (!magic && (flags & CMK_MAGIC_AUTOCREATE)) {
-      magic= sv_magicext(sv, NULL, PERL_MAGIC_ext, &cmk_pkey_magic_vtbl, NULL, 0);
-      SET_MGf_DUP_FLAG(magic);
-   }
-   if (!magic) {
-      if (flags & CMK_MAGIC_OR_DIE)
-         croak("Object lacks PKey MAGIC");
-      return NULL;
-   }
+cmk_pkey_from_magic(SV *objref, int flags) {
+   dTHX;
+   MAGIC *magic= cmk_get_X_magic(aTHX_ objref, flags, &cmk_pkey_magic_vtbl, "cmk_pkey");
+   /*
+   warn("cmk_pkey_from_magic sv=%s flags=%s%s%s magic=%p magic->mg_ptr=%p\n",
+      (!objref? "NULL" : SvROK(objref)? "REF" : "undef"),
+      (flags & CMK_MAGIC_AUTOCREATE)? "AUTOCREATE ":" ",
+      (flags & CMK_MAGIC_OR_DIE)? "OR_DIE ":" ",
+      (flags & CMK_MAGIC_UNDEF_OK)? "UNDEF_OK":"",
+      magic, (magic? magic->mg_ptr : NULL));
+   */
    /* currently the cmk_pkey is an alias for EVP_PKEY*, so the address of magic pointer itself
     * becomes the return value */
-   return (cmk_pkey*) &magic->mg_ptr;
+   return magic? (cmk_pkey*) &magic->mg_ptr : NULL;
 }
 
 /* Handy accessors for public and private key which check the type of key actually
@@ -633,10 +654,7 @@ cmk_pkey_from_magic(SV *sv, int flags) {
 
 cmk_pkey*
 cmk_get_pubkey(SV *objref) {
-   cmk_pkey *pk;
-   if (!sv_isobject(objref))
-      croak("Not an object");
-   pk= cmk_pkey_from_magic(SvRV(objref), false);
+   cmk_pkey *pk= cmk_pkey_from_magic(objref, 0);
    if (!pk || !*pk)
       croak("No public/private key loaded");
    return pk;
@@ -644,11 +662,7 @@ cmk_get_pubkey(SV *objref) {
 
 cmk_pkey*
 cmk_get_privkey(SV *objref) {
-   cmk_pkey *pk;
-   SV **field;
-   if (!sv_isobject(objref))
-      croak("Not an object");
-   pk= cmk_pkey_from_magic(SvRV(objref), false);
+   cmk_pkey *pk= cmk_pkey_from_magic(objref, 0);
    if (!pk || !*pk)
       croak("No public/private key loaded");
    if (!cmk_pkey_has_private(pk))
