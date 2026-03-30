@@ -203,10 +203,15 @@ sub compile_and_run {
 
 =method header
 
-  $test->header(MACRO_NAME => 'some_header.h');
+  $test->header('some_header.h', @test_inc_paths);
 
-Attempt to compile a simple C program that includes the named header.  If it exists, define the
-macro in the config header and also include the header into the config header.
+Attempt to compile a simple C program that includes the named header.  If it exists, append to
+the generated config header:
+
+  #include "some_header.h"
+  #define HAVE_SOME_HEADER_H
+
+This means all future tests will automatically have this header loaded, if it exists.
 
 Returns boolean in case you want to branch off of it.
 
@@ -231,7 +236,7 @@ END_C
          push @{$self->{include_dirs}}, $path if defined $path;
          $self->{config_headers} .= "#include <$header>\n";
          $self->{config_header_set}{$header}= 1;
-         (my $macro= 'HAVE_'.uc($header)) =~ s/\W/_/;
+         (my $macro= 'HAVE_'.uc($header)) =~ s/\W/_/g;
          $self->{config_macros} .= "#define $macro\n";
          return 1;
       }
