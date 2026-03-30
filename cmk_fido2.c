@@ -536,7 +536,7 @@ cleanup:
    if (err) {
       if (rc != FIDO_OK) {
          cmk_fido2_set_last_err(dev_objref, rc);
-         croak("%s: %s", err, cmk_fido2_err_name(rc));
+         croak("%s: %s", err, fido_strerr(rc));
       }
       croak("%s", err);
    }

@@ -129,18 +129,8 @@ An arrayref of supported CTAP/U2F protocol version strings.
 
 =cut
 
-sub _format_guid {
-   my ($bytes) = @_;
-   return undef unless defined $bytes;
-   croak "Wrong length for GUID (".length($bytes).", expected 16)"
-      unless length($bytes) == 16;
-
-   sprintf('%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x',
-      unpack('C16', $bytes));
-}
-
-sub aaguid_bytes       { shift->_cbor_attrs->{aaguid} }
-sub aaguid             { _format_guid(shift->_cbor_attrs->{aaguid}) }
+sub aaguid             { shift->_cbor_attrs->{aaguid} }
+sub aaguid_hex         { Crypt::MultiKey::FIDO2::_format_guid(shift->_cbor_attrs->{aaguid}) }
 sub algorithms         { shift->_cbor_attrs->{algorithms} }
 sub certifications     { shift->_cbor_attrs->{certifications} }
 sub extensions         { shift->_cbor_attrs->{extensions} }
@@ -254,10 +244,10 @@ sub make_hmac_secret_credential {
 
   ($resp, $cred)= $device->assert_hmac_secret(%options);
   # %options:
-  #  credential        => $cred_or_arrayref,  # one or more credentials to test
-  #  challenge         => $salt_bytes,        # the value to HMAC
-  #  rp_domain         => $str,               # must match value used during make_credential
-  #  pin               => $pin_password,
+  #  credential => $cred_or_arrayref,  # one or more credentials to test
+  #  challenge  => $message,           # string whose sha256 will become HMAC salt
+  #  rp_domain  => $domain_name,       # must match value used during make_credential
+  #  pin        => $pin_password,      # only for authenticators that require it
 
 Assert that the device posesses one of the credentials, and compute hmac-secret on 'challenge'
 using that credential.  The response (HMAC bytes) and which credential was used are returned as
@@ -277,8 +267,10 @@ sub assert_hmac_secret {
       if keys %options;
    $credential= [ $credential ]
       unless ref $credential eq 'ARRAY';
+   length $challenge == 32
+      or croak "Expected challenge of 32 bytes";
    my ($idx, $resp)= $self->_assert_hmac_secret($pin,
-      $rp_domain // 'crypt-multikey.local', $credential, $challenge);
+      $rp_domain // 'crypt-multikey.local', $credential, Crypt::MultiKey::sha256($challenge));
    if (defined $idx) {
       return ($resp, $credential->[$idx]);
    } else {

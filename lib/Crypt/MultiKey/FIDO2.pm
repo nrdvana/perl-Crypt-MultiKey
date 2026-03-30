@@ -19,6 +19,10 @@ by checking C<< Crypt::MultiKey::FIDO2->can("list_devices") >>.
 
 =head1 FUNCTIONS
 
+=head2 enabled
+
+Whether libfido2 support was enabled during the installation of Crypt::MultiKey.
+
 =head2 list_devices
 
 Return a list of L<Crypt::MultiKey::FIDO2::Device> objects for each connected authenticator
@@ -45,19 +49,20 @@ use warnings;
 use Time::HiRes qw( time sleep );
 use Carp qw( croak );
 
-sub available {
+sub enabled {
    defined \&Crypt::MultiKey::FIDO2::_list_devices;
 }
 
 sub list_devices {
    defined \&Crypt::MultiKey::FIDO2::_list_devices
-      or croak "libfido2 not available; install it and then reinstall Crypt::MultiKey";
+      or croak "libfido2 support not enabled; install libfido2 and then reinstall Crypt::MultiKey";
    @{ Crypt::MultiKey::FIDO2::_list_devices() }
 }
 
 sub select_device {
    my ($timeout, $devices)= @_;
-   $devices ||= [ Crypt::MultiKey::FIDO2::list_devices() ];
+   $timeout //= 7;
+   $devices //= [ Crypt::MultiKey::FIDO2::list_devices() ];
    my $end_t= time + $timeout;
    return undef if !@$devices;
    return $devices->[0] if @$devices == 1;
@@ -65,7 +70,7 @@ sub select_device {
    # Start touch request on all devices
    my $winner;
    my @active= grep $_->get_touch_begin, @$devices;
-   while (@active > 1 && !defined $winner) {
+   while (@active > 1 && !defined $winner && time < $end_t) {
       sleep .2;
       for (@active) {
          my $touched= $_->get_touch_status(0);
@@ -80,5 +85,26 @@ sub select_device {
    return $winner;
 }
 
+# The FIDO2 GUIDs are "string order" or "big-endian", not the Microsoft little-endian format
+sub _format_guid {
+   my $bytes= shift;
+   return undef unless defined $bytes;
+   croak "Wrong length for GUID (".length($bytes).", expected 16)"
+      unless length($bytes) == 16;
+
+   sprintf('%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x',
+      unpack('C16', $bytes));
+}
+sub _parse_guid {
+   my $str= shift;
+   return undef unless defined $str;
+   $str =~ /^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}\z/
+      or croak "Input does not match GUID notation";
+   $str =~ s/-//g;
+   pack('H*', $str);
+}
+
 require Crypt::MultiKey::FIDO2::Device;
+# avoid dependency on namespace::clean
+delete @{Crypt::MultiKey::FIDO2::}{qw( croak )};
 1;
