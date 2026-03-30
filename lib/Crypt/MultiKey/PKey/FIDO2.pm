@@ -96,6 +96,7 @@ credential_id.
 use strict;
 use warnings;
 use Carp;
+use Scalar::Util qw( blessed );
 use MIME::Base64 qw( encode_base64 decode_base64 );
 use Crypt::SecretBuffer qw( secret );
 use Crypt::MultiKey::FIDO2;
@@ -156,7 +157,7 @@ sub fido2_aaguid {
 sub _set_fido2_aaguid {
    my ($self, $val)= @_;
    length $val eq 16 or croak "guid must be 16 bytes (not hex)";
-   $self->{fido2_credential_id}= $val;
+   $self->{fido2_aaguid}= $val;
 }
 
 sub fido2_aaguid_hex {
@@ -287,9 +288,9 @@ sub obtain_private {
 }
 
 sub _get_hmac_secret {
-   my $self= shift;
+   my ($self, $devices)= @_;
    my @params= ( credential => $self->fido2_credential, challenge => $self->challenge );
-   for (@_) {
+   for (@$devices) {
       my ($secret, $cred_used)= $_->assert_hmac_secret(@params);
       return $secret if defined $secret;
    }
@@ -348,11 +349,12 @@ sub _export_pem_headers {
           && defined $self->kdf_salt;
    $self->next::method($pem);
    $pem->headers->append(cmk_fido2_aaguid => $self->fido2_aaguid_hex);
-   $pem->headers->append(cmk_fido2_credential_id => base64_encode($cred->{id}, ''));
-   $pem->headers->append(cmk_fido2_credential_pubkey => base64_encode($cred->{pubkey}, ''));
+   $pem->headers->append(cmk_fido2_credential_id => encode_base64($cred->{id}, ''));
+   $pem->headers->append(cmk_fido2_credential_pubkey => encode_base64($cred->{pubkey}, ''));
    $pem->headers->append(cmk_fido2_credential_cose_alg => $cred->{cose_alg})
       if defined $cred->{cose_alg};
    $pem->headers->append(cmk_challenge => _maybe_b64encode($self->challenge));
+   $pem->headers->append(cmk_kdf_salt => encode_base64($self->kdf_salt, ''));
 }
 
 1;

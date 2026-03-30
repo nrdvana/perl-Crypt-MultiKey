@@ -98,7 +98,7 @@ sub _format_guid {
 sub _parse_guid {
    my $str= shift;
    return undef unless defined $str;
-   $str =~ /^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}\z/
+   $str =~ /^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}\z/i
       or croak "Input does not match GUID notation";
    $str =~ s/-//g;
    pack('H*', $str);
