@@ -37,21 +37,34 @@ my $dep= ExtUtils::Depends->new('Crypt::MultiKey', 'Crypt::SecretBuffer');
 my $test= ExtUtils::CFeatureTest->new;
 
 $test->header('stdbool.h');
-$test->feature(HAVE_BOOL      => 'bool x= true; return x == false;');
+$test->feature(HAVE_BOOL => 'bool x= true; return x == false;');
+
 $test->header('stdint.h');
-$test->feature(HAVE_ENDIAN_H => 'uint32_t le= htole32(0x12345678); return le > 0? 0 : 1;',
-               { h => 'endian.h' });
+$test->feature(HAVE_ENDIAN_H
+   => 'uint32_t le= htole32(0x12345678); return le > 0? 0 : 1;',
+   { h => 'endian.h' }
+);
 
 $test->require_feature(HAVE_LIBSSL
-               => 'unsigned char buf[1]; return RAND_bytes(buf, 1) == 1? 0 : 1;',
-               { h => 'openssl/rand.h', pkg_config => ['libressl'] },
-               { h => 'openssl/rand.h', pkg_config => ['openssl'] },
-               { h => 'openssl/rand.h', -l => [ 'ssl', 'crypto' ] });
+   => 'unsigned char buf[1]; return RAND_bytes(buf, 1) == 1? 0 : 1;',
+   { h => 'openssl/rand.h', pkg_config => ['libressl'] },
+   { h => 'openssl/rand.h', pkg_config => ['openssl'] },
+   { h => 'openssl/rand.h', -l => [ 'ssl', 'crypto' ] }
+);
 
-$test->feature(HAVE_LIBFIDO2
-               => 'fido_init(0); return 0;',
-               { h => 'fido.h', pkg_config => ['libfido2'] },
-               { h => 'fido.h', -l => [ 'fido2', 'cbor' ] });
+if ($test->feature(HAVE_LIBFIDO2
+      => 'fido_init(0); return 0;',
+      { h => [ 'fido.h', 'fido/es256.h' ], pkg_config => ['libfido2'] },
+      { h => [ 'fido.h', 'fido/es256.h' ], -l => [ 'fido2', 'cbor' ] }
+)) {
+   $dep->add_c("cmk_fido2.c");
+}
+
+$test->feature(HAVE_LINUX_HIDRAW
+   # don't actually want ioctl to succeed, just ensure it compiled and linked
+   => 'struct hidraw_devinfo info; ioctl(0, HIDIOCGRAWINFO, &info); return 0;',
+   { h => [ 'linux/hidraw.h', 'sys/ioctl.h' ] }
+);
 
 $test->write_config_header('CryptMultiKey_config.h');
 $test->export_deps($dep);
@@ -91,6 +104,8 @@ my %WriteMakefileArgs = (
     "IPC::Open3" => 0,
     "MIME::Base64" => 0,
     "Scalar::Util" => 0,
+    "Symbol" => 0,
+    "Time::HiRes" => 0,
     "constant" => 0,
     "mro" => 0,
     "parent" => 0,
@@ -132,9 +147,11 @@ my %FallbackPrereqs = (
   "IPC::Open3" => 0,
   "MIME::Base64" => 0,
   "Scalar::Util" => 0,
+  "Symbol" => 0,
   "Test2::Suite" => "0.000139",
   "Test2::Tools::Subtest" => 0,
   "Test2::V0" => 0,
+  "Time::HiRes" => 0,
   "constant" => 0,
   "lib" => 0,
   "mro" => 0,
