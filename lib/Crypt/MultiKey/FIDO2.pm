@@ -50,7 +50,7 @@ use Time::HiRes qw( time sleep );
 use Carp qw( croak );
 
 sub enabled {
-   defined \&Crypt::MultiKey::FIDO2::_list_devices;
+   !!Crypt::MultiKey::FIDO2->can('_list_devices');
 }
 
 sub list_devices {
