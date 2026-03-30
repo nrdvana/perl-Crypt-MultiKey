@@ -117,7 +117,7 @@ cmk_yubico_otp_ykchalresp(
    U8 cmd;
    U8 *dest;
    STRLEN chal_len;
-   U8 *chal_ptr= secret_buffer_SvPVbyte(chal, &chal_len);
+   const U8 *chal_ptr= secret_buffer_SvPVbyte(chal, &chal_len);
    bool may_block;
 
    if (!chal_ptr || !chal_len || !resp) {
