@@ -40,7 +40,7 @@ use Crypt::MultiKey;
 
 C<Crypt::MultiKey::PKey> is a public/private key pair where the public half is always available,
 but the private half can be encrypted or removed.  The PKey can always L</encrypt> data, but the
-private half must be avalable to L</decrypt> that data again.
+private half must be available to L</decrypt> that data again.
 
 =attribute algorithm
 

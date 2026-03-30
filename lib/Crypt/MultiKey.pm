@@ -12,11 +12,11 @@ package Crypt::MultiKey;
   my $encrypted= $pubkey->encrypt("secret data");
   
   # Load your private key
-  my $privkey= pkey(load => '~/.ssh/is_rsa');
+  my $privkey= pkey(load => '~/.ssh/id_rsa');
   
   # If your private key is itself encrypted, prompt for password
   if ($privkey->private_encrypted) {
-    my $pasword= secret;
+    my $password= secret;
     $password->append_console_line(prompt => 'password: ')
       or die "require password";
     $privkey->decrypt_private($password);
@@ -103,16 +103,16 @@ Crypt::MultiKey is really just acting as a substitute for LUKS.
 
 =head2 Motivation
 
-The use case this module was designed to solve was to allow encryped volumes on a server to be
+The use case this module was designed to solve was to allow encrypted volumes on a server to be
 unlocked with more than one method:
 
 =over
 
 =item * A key server, using SSL certs for authentication
 
-=item * A SSH private key from the Agent of a logged-in user
+=item * An SSH private key from the Agent of a logged-in user
 
-=item * A Yubikey
+=item * A YubiKey
 
 =item * A very secure password stored offline
 
@@ -122,7 +122,7 @@ Every time the server boots, it needs the encrypted volumes unlocked.  If it is 
 contacts the central key server and the key server is able to send a response that allows the
 activation of that key.   If the key server is offline or unavailable, an admin with a SSH key
 can connect and forward their SSH agent to unlock the volumes.  If an admin can't connect
-remotely or can't be reached, someone on-site with a physically secure Yubikey can retrieve and
+remotely or can't be reached, someone on-site with a physically secure YubiKey can retrieve and
 plug in the key and then udev rules automatically trigger to unlock the encrypted volumes.
 If all else fails, someone can go to the safe deposit box and get the sheet of paper where the
 secret is written and read it to someone over the phone.  Further, any or all of these unlock

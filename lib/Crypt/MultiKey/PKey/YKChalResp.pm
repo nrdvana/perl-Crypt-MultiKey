@@ -16,10 +16,10 @@ use parent 'Crypt::MultiKey::PKey';
 
 This module uses the YubiKey OTP protocol's challenge/response feature to
 generate a password to unlock the private half of a PKey.  Note that the OTP
-protocol is older and superceeded by the FIDO2 protocol
+protocol is older and superseded by the FIDO2 protocol
 (see L<Crypt::MultiKey::PKey::FIDO2>) and some newer YubiKeys don't even support
 the OTP protocol.  This mechanism of challenge/response basically just takes a
-piece of data from the user, a piece of secret data within the yubikey, runs
+piece of data from the user, a piece of secret data within the YubiKey, runs
 them both through SHA-1, and returns a portion of the result.  This mode of
 operation is just making use of the YubiKey as an un-copyable string of bytes
 which can only be hashed when touching the button of the device.  Anyone who can
