@@ -4,8 +4,8 @@ use Test2AndUtils;
 use Crypt::MultiKey::FIDO2;
 use Crypt::MultiKey::FIDO2::Device;
 
-plan skip_all => 'libfido2 not found'
-   unless Crypt::MultiKey::FIDO2->can('list_devices');
+plan skip_all => 'libfido2 not available'
+   unless Crypt::MultiKey::FIDO2::enabled();
 
 my @devices;
 ok( eval { @devices= Crypt::MultiKey::FIDO2::list_devices(); 1; }, 'list_devices' )
