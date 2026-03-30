@@ -73,7 +73,7 @@ like C<can_obtain_private> can't attempt that.
 =item Decrypt
 
 Call L</obtain_private> to issue an assertion request against each connected authenticator with
-a AAGUID matching the one seen during the Enroll step.  If the authenticator posesses the
+an AAGUID matching the one seen during the Enroll step.  If the authenticator possesses the
 L</fido2_credential_id>, after a button press (or biometric scan, etc) it will return the HMAC
 result and this module will proceed to decrypt the private half of the PKey.
 

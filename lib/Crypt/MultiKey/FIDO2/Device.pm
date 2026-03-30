@@ -249,7 +249,7 @@ sub make_hmac_secret_credential {
   #  rp_domain  => $domain_name,       # must match value used during make_credential
   #  pin        => $pin_password,      # only for authenticators that require it
 
-Assert that the device posesses one of the credentials, and compute hmac-secret on 'challenge'
+Assert that the device possesses one of the credentials, and compute hmac-secret on 'challenge'
 using that credential.  The response (HMAC bytes) and which credential was used are returned as
 a list.  This method croaks on errors *unless* the only error was that none of the credentials
 exist on the device, in which case it returns an empty list.
