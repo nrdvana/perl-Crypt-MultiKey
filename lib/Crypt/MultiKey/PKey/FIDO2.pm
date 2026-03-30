@@ -311,7 +311,7 @@ sub _derive_password {
 sub _maybe_b64encode {
    my $val= shift;
    # Test for anything that might not parse well in a PEM header value
-   if ($val =~ /[^-a-zA-Z0-9_ :+-[\]{}()<>,.~!@\$\%^&*]/
+   if ($val =~ /[^-a-zA-Z0-9_ :+[\]\/{}()<>,.~!@\$\%^&*]/
       or $val =~ /^[=\s]/ or $val =~ /\s\z/
    ) {
       return '='.encode_base64($val, '');
