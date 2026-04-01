@@ -443,6 +443,46 @@ sub load {
    return $class_or_self;
 }
 
+=method insert_keys
+
+  (\@complete_locks, \@incomplete_locks)= $coffer->insert_keys(@pkeys);
+
+When deserialized from a PEM file, the tumblers of the L</locks> attribute reference keys by
+their C<SHA-256> fingerprint.  Those need upgraded to L<PKey objects|Crypt::MultiKey::PKey>
+before the C<Coffer> can be unlocked.
+This method adds references to PKey objects based on a matching fingerprint.
+The references persist in the L</locks> attribute, allowing you to call C<insert_keys> multiple
+times if desired to populate additional tumblers.
+If a tumbler already contains a C<PKey> object, it will be replaced by the new object in this
+list unless the previous included the private half and the new one lacks the private half.
+
+The return value is a pair of arrayrefs, one with the locks which have all PKeys inserted, and
+the other of any locks still lacking a PKey object.  This is unrelated to whether the PKey
+objects include their private half, needed for L</unlock>.
+
+=cut
+
+sub insert_keys {
+   my ($self, @keys)= @_;
+   my %by_fingerprint= map +($_->fingerprint => $_), @keys;
+   my (@complete, @incomplete);
+   for (@{ $self->locks }) {
+      my $dest= \@complete;
+      for (@{ $_->{tumblers} }) {
+         if (my $k= $by_fingerprint{$_->{key_fingerprint}}) {
+            # prefer an existing key if it has a private half and the new one does not
+            next if $_->{key} && !$k->has_private && $_->{key}->has_private;
+            $_->{key}= $k;
+         }
+         elsif (!$_->{key}) {
+            $dest= \@incomplete;
+         }
+      }
+      push @$dest, $_;
+   }
+   return (\@complete, \@incomplete);
+}
+ 
 =method generate_file_key
 
 Generate a new AES key for the Coffer.  This gets called automatically when initially creating
@@ -462,40 +502,13 @@ all current L</locks> have all their public keys available
 
 =cut
 
-# Try to find a PKey object for each key of each lock.  This can either decode the public
-# key from BASE64, or find the key with matching fingerprint from a supplied collection.
-# Returns true if all keys are present as PKey objects at the end.
-sub _inflate_lock_keys {
-   my ($self, $keys, $missing_out)= @_;
-   # User can provide an arrayref or hashref of keys
-   my %by_fingerprint= ref $keys eq 'ARRAY'? (map +($_->fingerprint => $_), @$keys)
-                     : ref $keys eq 'HASH' ? (map +($_->fingerprint => $_), values %$keys)
-                     : ();
-   my $success= !!1;
-   for (@{ $self->locks }) {
-      for (@{ $_->{tumblers} }) {
-         next if defined $_->{key}; # key object already loaded
-         if (my $k= $by_fingerprint{$_->{key_fingerprint}}) {
-            $_->{key}= $k;
-         } elsif (defined $_->{pubkey}) {
-            $_->{key}= Crypt::MultiKey::PKey->new(public => $_->{pubkey});
-         } else {
-            push @$missing_out, $_->{key_fingerprint}
-               if $missing_out;
-            $success= !!0;
-         }
-      }
-   }
-   return $success;
-}
-
 sub generate_file_key {
    my $self= shift;
    croak "Can't generate_file_key unless content has been decrypted or overwritten"
       if $self->has_ciphertext && !$self->has_content;
    my @old_locks= @{ $self->locks };
-   croak "Generating a new Coffer file_key required all existing locks to have public keys present"
-      if @old_locks && !$self->_inflate_lock_keys;
+   croak "Generating a new Coffer file_key requires all existing locks to have public keys inserted"
+      if @old_locks && @{($self->insert_keys)[1]};
    my $new_file_key= secret(append_random => 64);
    my @new_locks;
    # If any keyslots exist, need to create new tumblers
@@ -761,7 +774,7 @@ sub encrypt {
       unless $self->has_content;
    # If possible, use a fresh AES key.
    # This requires that all locks have the public key present.
-   $self->generate_file_key if $self->_inflate_lock_keys;
+   $self->generate_file_key unless @{($self->insert_keys)[1]};
    # Preserve some encryption parameters from the previous encryption.
    my %cipher_data;
    my $prev_cipher= $self->{cipher_data};
