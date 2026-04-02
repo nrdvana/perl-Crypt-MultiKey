@@ -483,6 +483,8 @@ our %type_alias= (
    rsa2048   => 'RSA:bits=2048',
    rsa4096   => 'RSA:bits=4096',
    secp256k1 => 'EC:curve=secp256k1',
+   mlkem     => 'ML-KEM-768',
+   'ml-kem'  => 'ML-KEM-768',
 );
 sub generate {
    my ($self, $type)= @_;

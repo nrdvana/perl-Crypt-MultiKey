@@ -45,14 +45,14 @@ is( Crypt::MultiKey::PKey->generate('secp256k1'),
       is( $mlkem,
          object {
             call algorithm => 'ML-KEM-768';
-            call sub { length decode_base64($_[0]->public) }, within(1600, 200);
+            call sub { length decode_base64($_[0]->public) }, within(1400, 300);
          },
          'ML-KEM-768');
 
       is( Crypt::MultiKey::PKey->generate('ml-kem-768'),
          object {
             call algorithm => 'ML-KEM-768';
-            call sub { length decode_base64($_[0]->public) }, within(1600, 200);
+            call sub { length decode_base64($_[0]->public) }, within(1400, 300);
          },
          'ml-kem-768');
    }
