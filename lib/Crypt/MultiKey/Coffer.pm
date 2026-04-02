@@ -93,15 +93,39 @@ that can be combined with the private half of a public/private key to generate A
 
 Filesystem path from which to load and save the Coffer.
 
+=attribute bundled_keys
+
+  $coffer->bundled_keys(1);        # $coffer->save will also export referenced PKeys
+  $coffer->bundled_keys('public'); # coffer PEM will have OpenSSL 'PUBLIC KEY' PEM appended
+
+The L</locks> attribute references the keys that can unlock it by the key fingerprint.  The keys
+can be saved separately to be loaded by the application and added with L</insert_keys>, or they
+can be appended to the Coffer to be loaded automatically when loading the Coffer, to keep
+everything together in one place.  When this option is set to a true value, the L</export>
+method will write out the Coffer PEM block followed by the PEM serializations of each of the
+L<PKey objects|Crypt::SecretBuffer::PKey/export>.  (They serialize as either public-only or
+encrypted-private PEM blocks with PKey metadata included.  Obviously it would defeat the purpose
+of the Coffer to serialize unencrypted private keys to the same file)
+
+You can set this option to C<'public'> to write only the public key in the standard OpenSSL
+format without any of the PKey metadata.  Having the full public key present allows a new Coffer
+to be written that is decryptable by all the same PKeys as the current one, while not giving any
+advantage to an attacker by showing them the PKey metadata.
+
 =attribute user_meta
 
-An arbitrary hashref of name/value strings that will be added to the PEM as
-C<< u.$name = $value >>.  Because PEM has no escaping system, the names and values may not
-contain control characters or begin or end with space characters.  The names also may not
-contain '.' or be purely numeric, because these are used for encoding the structure of the data.
+An arbitrary hashref of name/value strings that will be added to the exported PEM as headers
+of the form C<< user_meta.$name = $value >>.  Note that headers are B<plaintext>.
+If you wish to store secret user metadata it needs to be part of L</content>, which can be
+accomplished conveniently using L</content_kv>.
 
-Warning: the authenticity of C<user_meta> does not get checked until you have L</unlock>ed the
-coffer.  Never trust L<user_meta> on a locked Coffer unless the file was stored securely.
+Because PEM has no escaping system, the names and values may not contain control characters or
+begin or end with space characters.  The names also may not contain '.' or be purely numeric,
+because these are used for encoding the structure of the data.
+
+Warning: the authenticity of C<user_meta> does not get checked until you have
+L<unlocked|/unlock> the coffer.  Never trust C<user_meta> on a locked Coffer unless the file
+was stored securely.
 
 =attribute name
 
@@ -112,6 +136,16 @@ for the file indicating its purpose or contents.  This defaults to the basename 
 
 sub path { @_ > 1? shift->_set_path(@_) : $_[0]{path} }
 sub _set_path { $_[0]{path}= $_[1]; $_[0] }
+
+sub bundled_keys { @_ > 1? shift->_set_bundled_keys(@_) : $_[0]{bundled_keys} }
+sub _set_bundled_keys {
+   my ($self, $val)= @_;
+   # coerce to either 1, 0, or 'public'
+   $val= !$val? 0
+       : $val eq 'public'? 'public'
+       : 1;
+   $_[0]{bundled_keys}= $val;
+}
 
 sub user_meta { @_ > 1? shift->_set_user_meta(@_) : ($_[0]{user_meta} ||= {}) }
 sub _set_user_meta { $_[0]{user_meta}= $_[1]; $_[0] }
@@ -397,9 +431,30 @@ Construct a new Coffer.  The attributes are applied to the object as method call
 
 =constructor load
 
-  $coffer= Crypt::MultiKey::Coffer->load($filename);
+  # as a constructor
+  $coffer= Crypt::MultiKey::Coffer->load($source, %options);
+  # as a method
+  $coffer->load($source, %options);
+  # $source may be:
+  #   $file_path
+  #   \$buffer
+  #   Crypt::SecretBuffer
+  #   Crypt::SecretBuffer::Span
+  #   Crypt::SecretBuffer::PEM
+  # options:
+  #   path         => $file_path   # value for 'path' attribute when using a buffer
+  #   bundled_keys => $bool        # whether to process PKey PEM blocks found in buffer
 
-Load a Coffer from a file.  This does not decrypt the data.  See L</unlock>.
+Load a Coffer from a file or buffer or L<PEM object|Crypt::SecretBuffer::PEM>.  This does not
+decrypt the data.  See L</unlock>.
+
+When loading from a file or buffer, the PEM encoding of the Coffer may be followed by PEM
+encodings of the PKey objects.  If you request C<bundled_keys>, they will be inflated to
+L<PKey objects|Crypt::SecretBuffer::PKey> and passed to L</insert_keys>.  This will also
+initialize the L</bundled_keys> attribute of the created object.
+
+Neither 'path' nor 'bundled_keys' attributes are serialized in the Coffer PEM, for security
+reasons.  They must be specified / requested by the caller.
 
 =cut
 
@@ -424,23 +479,59 @@ sub new {
 }
 
 sub load {
-   my ($class_or_self, $path)= @_;
-   $path //= $class_or_self->path if ref $class_or_self;
-   my $sbuf= secret(load_file => $path);
-   my $span= $sbuf->span;
-   my $pem;
-   while (1) {
-      $pem= Crypt::SecretBuffer::PEM->parse($span)
-         or croak "No CRYPT MULTIKEY COFFER block found in file '$path'";
-      last if $pem->label eq 'CRYPT MULTIKEY COFFER';
+   my ($class_or_self, $path_or_data_or_pem, %options)= @_;
+   # If called as a method on an object, default to loading the ->path attribute
+   $path_or_data_or_pem //= $class_or_self->path
+      if ref $class_or_self;
+   
+   # There should be exactly one COFFER pem block and any number of ENCRYPTED PRIVATE KEY or
+   # PUBLIC KEY blocks.
+   my ($coffer_pem, @pkey_pem);
+   for (Crypt::MultiKey::_extract_pems_from_something($path_or_data_or_pem, \%options)) {
+      if ($_->label eq 'CRYPT MULTIKEY COFFER') {
+         croak "More than one CRYPT MULTIKEY COFFER pem block in file"
+            if defined $coffer_pem;
+         $coffer_pem= $_;
+      }
+      elsif ($options{bundled_keys} and (
+         $_->label eq 'ENCRYPTED PRIVATE KEY'
+         || $_->label eq 'PUBLIC KEY'
+      )) {
+         push @pkey_pem, $_;
+      }
+      else {
+         carp "Ignoring PEM block ".$_->label;
+      }
    }
-   my $attrs= $class_or_self->_import_pem($pem, $path);
-   $attrs->{path}= $path;
-   # If called as a class method, return a new object
-   return $class_or_self->new($attrs) unless ref $class_or_self;
-   # Replace contents of object otherwise
-   %$class_or_self= %$attrs;
-   return $class_or_self;
+   croak "No CRYPT MULTIKEY COFFER pem block in file"
+      unless defined $coffer_pem;
+   my $attrs= $class_or_self->_attrs_from_pem($coffer_pem, $options{path});
+   $attrs->{path}= $options{path};
+   $attrs->{bundled_keys}= $options{bundled_keys};
+   my $self;
+   if (ref $class_or_self) {
+      # Called on existing object. Replace attributes.
+      $self= $class_or_self;
+      %$self= ();
+      # Hook for subclasses to process attributes
+      $self->_init($attrs) if $self->can('_init');
+      # Every remaining attribute must have a writable accessor
+      $self->$_($attrs->{$_})
+         for sort { ($_attr_pri{$a}||0) <=> ($_attr_pri{$b}||0) } keys %$attrs;
+   } else {
+      # If called as a class method, return a new object
+      $self= $class_or_self->new($attrs);
+   }
+   my @pkeys;
+   for my $pk_pem (@pkey_pem) {
+      # If a key can't be laoded, it shouldn't be a fatal error, because the coffer could
+      # still be unlockable by other keys, or copies of the keys saved elsewhere.
+      # But, it's a big enough problem to warrant writing stderr.
+      eval { push @pkeys, Crypt::MultiKey::PKey->load($pk_pem) }
+         or carp "Warning: failed to load PKey found alongside Coffer: $@";
+   }
+   $self->insert_keys(@pkeys) if @pkeys;
+   return $self;
 }
 
 =method insert_keys
@@ -482,7 +573,7 @@ sub insert_keys {
    }
    return (\@complete, \@incomplete);
 }
- 
+
 =method generate_file_key
 
 Generate a new AES key for the Coffer.  This gets called automatically when initially creating
@@ -730,10 +821,16 @@ sub set {
    $self;
 }
 
+=method export
+
+  $buf= $coffer->export;
+
+Serialize the Coffer to a buffer, in PEM format.
+
 =method save
 
-  $coffer->save;         # saves to ->path
-  $coffer->save($path);  # save to specific path, and initialize path attribute
+  $coffer->save;           # saves to ->path
+  $coffer->save($path);    # save to specific path, and initialize path attribute
 
 Save changes to disk.  If you specify the C<$path> and the path attribute is not already set,
 this initializes it.  This writes a new file and then renames it into place to ensure it doesn't
@@ -741,17 +838,41 @@ corrupt the existing file.
 
 =cut
 
-sub save {
-   my ($self, $path)= @_;
+sub export {
+   my ($self)= @_;
    # Make sure there is a way to unlock it!
    croak "Can't save Coffer when no locks are defined!  (you would lose your data)"
       unless @{ $self->locks };
-   $path //= $self->path // croak "No path set";
-   $self->path($path) unless defined $self->path;
    # No need to encrypt if the ciphertext exists and the content is not changed
    $self->encrypt if $self->content_changed || !$self->has_ciphertext;
-   # Build PEM object and serialize to file, renaming it into place
-   $self->_export_pem->serialize->save_file($path, 'rename');
+   # Build PEM object and serialize to buffer
+   my $buf= $self->_export_pem->serialize;
+   if ($self->bundled_keys) {
+      my $method= $self->bundled_keys eq 'public'? 'export_pem_openssl_pubkey' : 'export_pem';
+      my %keys;
+      my $n_missing= 0;
+      for (@{ $self->locks }) {
+         for (@{ $_->{tumblers} }) {
+            if (defined $_->{key}) {
+               $keys{$_->{key}->fingerprint}= $_->{key};
+            } else {
+               ++$n_missing;
+            }
+         }
+      }
+      carp "Exporting 'bundled_keys' but $n_missing tumblers lack a PKey object"
+         if $n_missing;
+      $buf->append($_->$method->serialize)
+         for map $keys{$_}, sort keys %keys; # export in a stable order
+   }
+   return $buf;
+}
+
+sub save {
+   my ($self, $path)= @_;
+   $path //= $self->path // croak "No path set";
+   $self->export->save_file($path, "rename");
+   $self->path($path) unless defined $self->path;
    $self;
 }
 
@@ -814,7 +935,7 @@ sub decrypt {
 our %_importable_attributes= map +($_ => 1),
    qw( locks user_meta cipher_data content_type );
 # Extract Coffer attributes from a Crypt::SecretBuffer::PEM object
-sub _import_pem {
+sub _attrs_from_pem {
    my ($self, $pem, $path)= @_;
    $pem->headers->unicode_keys(1)->unicode_values(1);
    my %h= %{ $pem->headers };

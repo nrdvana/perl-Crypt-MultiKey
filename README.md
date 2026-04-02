@@ -4,7 +4,7 @@ Crypt::MultiKey
 ### About
 
 This module facilitates encrypting secrets with one or more public keys or
-combinations of public keys, which can then by decrypted by the corresponding
+combinations of public keys, which can then be decrypted by the corresponding
 private keys.  It's kind of like an enhanced 'age' tool in library form that
 doubles as a password safe.  It also provides various ways of interacting with
 public/private keys and decrypting the private half using a variety of means.

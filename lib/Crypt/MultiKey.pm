@@ -135,8 +135,10 @@ This module collection facilitates all of that.
 use strict;
 use warnings;
 use Carp;
+use Scalar::Util qw( blessed );
 use parent qw( DynaLoader Exporter );
 use Crypt::SecretBuffer 0.020;
+use Crypt::SecretBuffer qw( secret span );
 sub dl_load_flags {0x01} # Share extern symbols with other modules
 __PACKAGE__->bootstrap;
 
@@ -287,6 +289,29 @@ sub lazy_load {
 
 # Can't do anything useful without PKey, so load it automatically
 require Crypt::MultiKey::PKey;
+
+# Helper function to get a list of PEM objects from whatever input the user gave us
+sub _extract_pems_from_something {
+   my ($something, $options)= @_;
+   return ( $something )
+      if blessed($something) && $something->isa('Crypt::SecretBuffer::PEM');
+   return map _extract_pems_from_something($_), @$something
+      if ref $something eq 'ARRAY';
+   # is it a path name? could be an object that stringifies to a path.
+   unless (ref $something eq 'SCALAR'
+           or blessed($something) && (
+              $something->isa('Crypt::SecretBuffer::Span')
+              || $something->isa('Crypt::SecretBuffer')
+           )
+   ) {
+      $options->{path} //= "$something" if defined $options;
+      $something= secret(load_file => $something);
+   }
+   # Now load all PEM blocks from that buffer
+   my @pems= Crypt::SecretBuffer::PEM->parse_all(span($something))
+      or croak "No complete PEM records found";
+   return @pems;
+}
 
 1;
 __END__

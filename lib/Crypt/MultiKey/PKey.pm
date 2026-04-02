@@ -498,16 +498,27 @@ sub generate {
 
 =method export
 
+  $pkey->export->save_file($filename);
+
 Export the PKey as a L<SecretBuffer|Crypt::SecretBuffer> object containing OpenSSL PEM text of
 PKCS#8 format data, but also with PEM headers that preserve the value of object attributes.
 The specific attributes exported depend on the L</mechanism>, but the private half of the key
 will never be serialized unencrypted unless L</mechanism> is C<'Unencrypted'>.
 
-  $pkey->export->save_file($filename);
-
 =method export_pem
 
-Export the PKey as a L<Crypt::SecretBuffer::PEM> object.
+If the PKey has an encrypted private half, this exports as a L<PEM object|Crypt::SecretBuffer::PEM>
+of PKCS#8 data (OpenSSL C<BEGIN ENCRYPTED PRIVATE KEY> format).  If the PKey does not have an
+encrypted private half, this exports only the public key as SubjectPublicKeyInfo data
+(OpenSSL C<BEGIN PUBLIC KEY> format).
+
+In both cases, PEM headers are added to hold relevant PKey object attributes.  This makes the
+files unreadable by OpenSSL, unless you delete the headers.
+
+=method export_pem_openssl_pubkey
+
+Export the PKey as a L<PEM object|Crypt::SecretBuffer::PEM> of SubjectPublicKeyInfo data
+(OpenSSL C<BEGIN PUBLIC KEY> format) without any PEM headers.
 
 =method save
 
@@ -544,14 +555,16 @@ sub export_pem {
    }
    # Export as a public key only
    else {
-      $self->_export_spki(my $content);
-      $pem= Crypt::SecretBuffer::PEM->new(
-         label => 'PUBLIC KEY',
-         content => $content
-      );
+      $pem= $self->export_pem_pubkey;
    }
    $self->_export_pem_headers($pem);
    $pem;
+}
+
+sub export_pem_openssl_pubkey {
+   my $self= shift;
+   $self->_export_spki(my $content);
+   return Crypt::SecretBuffer::PEM->new(label => 'PUBLIC KEY', content => $content);
 }
 
 sub _export_pem_headers {
@@ -559,13 +572,14 @@ sub _export_pem_headers {
    # export the 'mechanism' (indicating subclass) if it is defined
    push @{ $pem->header_kv }, cmk_mechanism => $self->mechanism
       if defined $self->mechanism;
+   # subclasses override this to export additional headers
 }
 
 sub save {
    my ($self, $path)= @_;
    $path //= $self->path // croak "No 'path' specified for saving key";
    $self->export->save_file($path, "rename");
-   $self->path($path) if !defined $self->path;
+   $self->path($path) unless defined $self->path;
    $self;
 }
 
