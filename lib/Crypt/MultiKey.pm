@@ -135,10 +135,12 @@ This module collection facilitates all of that.
 use strict;
 use warnings;
 use Carp;
-use Scalar::Util qw( blessed );
+use Scalar::Util qw( blessed looks_like_number );
 use parent qw( DynaLoader Exporter );
+use MIME::Base64 qw/ encode_base64 decode_base64 /;
 use Crypt::SecretBuffer 0.020;
 use Crypt::SecretBuffer qw( secret span );
+use Encode ();
 sub dl_load_flags {0x01} # Share extern symbols with other modules
 __PACKAGE__->bootstrap;
 
@@ -311,6 +313,80 @@ sub _extract_pems_from_something {
    my @pems= Crypt::SecretBuffer::PEM->parse_all(span($something))
       or croak "No complete PEM records found";
    return @pems;
+}
+
+# Helper to flatten structured data into PEM header text.
+# All keys and values are exported as UTF-8.  Keys and values must meet the restrictions of
+# the PEM encoder, such as no leading or trailing whitespace, no control characters, etc.
+# I debated adding an automatic escaping system for "problematic" values, but that just makes
+# everything more complicated and there's a large degree of uncertainty about whether a perl
+# scalar should be treated as text or bytes, which would introduce all sorts of edge cases.
+# It's better to just require that the values be "clean" text.
+# The downside is that the caller needs to base64-encode byte strings on a field-by-field basis.
+sub _flatten_to_pem_header_kv {
+   my @ret;
+   while (@_) {
+      my ($prefix, $node)= splice(@_, 0, 2);
+      if (!ref $node) {
+         push @ret, Encode::encode('UTF-8', $prefix, Encode::FB_CROAK),
+                    Encode::encode('UTF-8', $node, Encode::FB_CROAK);
+      }
+      elsif (ref $node eq 'ARRAY') {
+         for (0 .. $#$node) {
+            push @ret, _flatten_to_pem_header_kv($prefix.'.'.$_ => $node->[$_]);
+         }
+      }
+      elsif (ref $node eq 'HASH') {
+         for (sort keys %$node) {
+            /^[^\x00-\x1F\x7F .:0-9][^\x00-\x1F\x7F .:]*\z/
+               or croak "Invalid hash key for export as PEM header: '$_' at $prefix";
+            push @ret, _flatten_to_pem_header_kv($prefix.'.'.$_ => $node->{$_});
+         }
+      }
+      else {
+         croak "Can't flatten type ".ref($node)." into PEM headers";
+      }
+   }
+   return @ret;
+}
+
+# This should only be processing PEM headers that we wrote from this module, so it should be
+# safe to assume that we are decoding UTF-8.
+sub _inflate_pem_header_kv {
+   my %attrs;
+   for (my $i= 0; $i < @_; $i += 2) {
+      my ($k, $v)= @_[$i,$i+1];
+      $k= Encode::decode('UTF-8', $k, Encode::FB_CROAK) if $k =~ /[\x80-\xFF]/;
+      $v= Encode::decode('UTF-8', $v, Encode::FB_CROAK) if $v =~ /[\x80-\xFF]/;
+      my $node_ref= \\%attrs;
+      for (split /\./, $k) {
+         # A pure decimal element becomes an array index
+         if (looks_like_number($_) && /^[0-9]+\z/) {
+            if (!defined $$node_ref) {
+               $$node_ref ||= [];
+            }
+            elsif (ref $$node_ref ne 'ARRAY') {
+               croak "Can't assign to $k, not an array ref";
+            }
+            # Array elements must be listed in sequential order
+            exists $$node_ref->[$_] or $_ == @$$node_ref
+               or croak "Can't assign to $k, $_ is not the next element in the array";
+            $node_ref= \$$node_ref->[$_];
+         }
+         else {
+            if (!defined $$node_ref) {
+               $$node_ref ||= {};
+            }
+            elsif (ref $$node_ref ne 'HASH') {
+               croak "Can't assign to $k, not a hash ref at '$_'";
+            }
+            $node_ref= \$$node_ref->{$_};
+         }
+      }
+      croak "Attempt to overwrite $k" if defined $$node_ref;
+      $$node_ref= $v;
+   }
+   return \%attrs;
 }
 
 1;

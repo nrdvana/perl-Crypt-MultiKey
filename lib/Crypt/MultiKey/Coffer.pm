@@ -937,27 +937,21 @@ our %_importable_attributes= map +($_ => 1),
 # Extract Coffer attributes from a Crypt::SecretBuffer::PEM object
 sub _attrs_from_pem {
    my ($self, $pem, $path)= @_;
-   $pem->headers->unicode_keys(1)->unicode_values(1);
-   my %h= %{ $pem->headers };
-   my %attrs;
+   my $header_kv= $pem->header_kv;
 
-   # Version check.
-   if (my $min_version= delete $h{version}) {
-      $min_version= version->parse($min_version);
-      my $writer_version= version->parse(delete $h{writer_version} || 0);
-      carp "'$path' requires version $min_version of Crypt::MultiKey::Coffer"
-         ." but this is only version ".__PACKAGE__->VERSION
-         if $min_version > __PACKAGE__->VERSION;
-   } else {
-      carp "No module version found in PEM headers";
-   }
+   # The first two headers must be version and writer_version.
+   croak "Headers must start with version and writer_version"
+      unless @$header_kv > 4 && $header_kv->[0] eq 'version' && $header_kv->[2] eq 'writer_version';
+   my $min_version= version->parse($header_kv->[1]);
+   carp "'$path' requires version $min_version of Crypt::MultiKey::Coffer"
+      ." but this is only version ".__PACKAGE__->VERSION
+      if $min_version > __PACKAGE__->VERSION;
    # Even if version problems, try to proceed
 
    # The final header must be "pem_header_authentication".  We use that to ensure that nothing
    # has been altered since it was written.  All the headers before that get combined into the
    # canonical text that we compare to the MAC.
-   my $header_kv= $pem->header_kv;
-   croak "Headers must end with pem_header_mac"
+   croak "Headers must end with pem_header_authentication"
       unless @$header_kv > 2 && $header_kv->[-2] eq 'pem_header_authentication';
    # The PEM parser removes any leading or trailing whitespace on attributes and values, but we
    # also ensured that no leading or trailing whitespace existed when we wrote the file.
@@ -967,44 +961,15 @@ sub _attrs_from_pem {
       $header_text .= $header_kv->[$_] . ($_ & 1? "\n" : ": ");
    }
    my ($mac_algo,$mac_base64)= split ':', $header_kv->[-1], 2;
-   delete $h{pem_header_authentication};
    # ...but the MAC can't be validated until we decrypt the coffer.
 
-   for my $key (keys %h) {
-      my $node_ref= \\%attrs;
-      for (split /\./, $key) {
-         # A pure decimal element becomes an array index
-         if (looks_like_number($_) && /^[0-9]+\z/) {
-            # Prevent a malicious file from exhausting memory with an insane array index
-            croak "Array index '$_' out of bounds" if $_ > keys %h;
-            if (!defined $$node_ref) {
-               $$node_ref ||= [];
-            }
-            elsif (ref $$node_ref ne 'ARRAY') {
-               croak "Can't assign to $key, not an array ref at '$_'";
-            }
-            $node_ref= \$$node_ref->[$_];
-         }
-         else {
-            if (!defined $$node_ref) {
-               $$node_ref ||= {};
-            }
-            elsif (ref $$node_ref ne 'HASH') {
-               croak "Can't assign to $key, not a hash ref at '$_'";
-            }
-            $node_ref= \$$node_ref->{$_};
-         }
-      }
-      croak "Attempt to overwrite $key" if defined $$node_ref;
-      $$node_ref= $h{$key};
-   }
-
+   my $attrs= Crypt::MultiKey::_inflate_pem_header_kv(@{$header_kv}[4..($#$header_kv-2)]);
    # Ensure structure of locks is valid
-   $self->_validate_locks($attrs{locks});
-   # base64 decode the binary fields
-   for my $lock (@{ $attrs{locks} }) {
+   $self->_validate_locks($attrs->{locks});
+   # base64-decode the byte strings
+   for my $lock (@{ $attrs->{locks} }) {
       for my $tmbl (@{ $lock->{tumblers} }) {
-         for (qw( pubkey ephemeral_pubkey rsa_key_ciphertext )) {
+         for (qw( ephemeral_pubkey rsa_key_ciphertext kem_ciphertext )) {
             $tmbl->{$_}= decode_base64($tmbl->{$_})
                if defined $tmbl->{$_};
          }
@@ -1023,86 +988,47 @@ sub _attrs_from_pem {
       $ciphertext->copy_to($buf, encoding => ISO8859_1);
       $ciphertext= $buf;
    }
-   $attrs{cipher_data}{ciphertext}= $ciphertext;
+   $attrs->{cipher_data}{ciphertext}= $ciphertext;
 
    # validate all attributes to make sure constructor doesn't call methods
-   if (my @unauth= grep !$_importable_attributes{$_}, keys %attrs) {
+   if (my @unauth= grep !$_importable_attributes{$_}, keys %$attrs) {
       carp "The following PEM headers cannot be imported: ".join(', ', sort @unauth);
-      delete @attrs{@unauth};
+      delete @$attrs{@unauth};
    }
 
-   $attrs{authentication}= [ $header_text, $mac_algo, decode_base64($mac_base64) ];
-   \%attrs;
-}
-
-# Utility to flatten Perl structured data into plain key/value appropriate for PEM headers
-sub _struct_to_kv {
-   my ($prefix, $node)= @_;
-   if (!ref $node) {
-      # The value may not start or end with whitespace or contain any control characters.
-      # It may contain unicode, in which case we helpfully encode that.
-      croak "Value at $prefix may not contain control characters" if $node =~ /[\x00-\x1F\x7F]/;
-      croak "Value at $prefix may not begin or end with whitespace" if $node =~ /(^\s|\s\z)/;
-      return ( $prefix => $node );
-   }
-   elsif (ref $node eq 'ARRAY') {
-      return map _struct_to_kv($prefix.'.'.$_ => $node->[$_]), 0 .. $#$node;
-   }
-   elsif (ref $node eq 'HASH') {
-      my @ret;
-      for (sort keys %$node) {
-         /^[^\x00-\x1F\x7F .:0-9][^\x00-\x1F\x7F .:]*\z/
-            or croak "Invalid hash key for export as PEM header: '$_'";
-         push @ret, _struct_to_kv($prefix.'.'.$_ => $node->{$_});
-      }
-      return @ret;
-   }
-   else {
-      croak "Can't flatten type ".ref($node)." into PEM headers";
-   }
+   $attrs->{authentication}= [ $header_text, $mac_algo, decode_base64($mac_base64) ];
+   return $attrs;
 }
 
 sub _export_pem {
    my $self= shift;
-   my @locks_export;
-   for (@{ $self->locks }) {
-      my %lock= %$_;
-      for (@{ delete $lock{tumblers} }) {
-         my %tumbler= %$_;
-         # Need to remove the key objects from the locks definition before serializing.
-         delete $tumbler{key};
-         # base64 encode binary fields
-         for (qw( ephemeral_pubkey rsa_key_ciphertext )) {
-            $tumbler{$_}= encode_base64($tumbler{$_}, '')
-               if defined $tumbler{$_};
-         }
-         push @{ $lock{tumblers} }, \%tumbler;
-      }
-      # base64 encode binary fields
+   my @locks_export= @{ $self->locks };
+   for my $lock (@locks_export) {
+      $lock= { %$lock };
       for (qw( kdf_salt ciphertext )) {
-         $lock{$_}= encode_base64($lock{$_}, '')
-            if defined $lock{$_};
+         $lock->{$_}= encode_base64($lock->{$_}, '')
+            if defined $lock->{$_};
       }
-      push @locks_export, \%lock;
+      for my $tmbl (@{ $lock->{tumblers}= [ @{$lock->{tumblers}} ] }) {
+         $tmbl= { %$tmbl };
+         # Need to remove the key objects from the locks definition before serializing.
+         delete $tmbl->{key};
+         for (qw( ephemeral_pubkey rsa_key_ciphertext kem_ciphertext )) {
+            $tmbl->{$_}= encode_base64($tmbl->{$_}, '')
+               if defined $tmbl->{$_};
+         }
+      }
    }
    my %cipher_data_export= %{ $self->cipher_data };
    my $ciphertext= delete $cipher_data_export{ciphertext};
-   delete $cipher_data_export{header_mac};  # old value not relevant
-   delete $cipher_data_export{header_text};
-   my @header_kv= (
-      version => '0.001',
+   my @header_kv= Crypt::MultiKey::_flatten_to_pem_header_kv(
+      version        => '0.001',
       writer_version => __PACKAGE__->VERSION,
-      _struct_to_kv(user_meta => $self->user_meta),
-      _struct_to_kv(locks     => \@locks_export),
-      content_type => $self->content_type,
-      _struct_to_kv(cipher_data => \%cipher_data_export),
+      user_meta      => $self->user_meta,
+      locks          => \@locks_export,
+      content_type   => $self->content_type,
+      cipher_data    => \%cipher_data_export,
    );
-   # PEM doesn't define a character encoding for headers, but for this use of PEM, UTF-8 seems
-   # to be the most sensible encoding.  Try to coerce things to UTF-8 so that it "just works".
-   for (grep defined && /[^\x00-\x7F]/, @header_kv) {
-      utf8::decode($_); # in case the string was already encoded
-      utf8::encode($_);
-   }
    # Build the canonical PEM header text so we can validate it with a MAC.
    my $header_text= '';
    for (0..$#header_kv) {
@@ -1122,7 +1048,7 @@ sub _export_pem {
 our %_known_lock_fields= map +($_ => 1),
    qw( cipher kdf_salt ciphertext tumblers );
 our %_known_tumbler_fields= map +($_ => 1),
-   qw( key key_fingerprint pubkey ephemeral_pubkey rsa_key_ciphertext );
+   qw( key key_fingerprint pubkey ephemeral_pubkey rsa_key_ciphertext kem_ciphertext );
 sub _validate_locks {
    my ($self, $locks)= @_;
    croak "locks must be an arrayref"
@@ -1142,8 +1068,10 @@ sub _validate_locks {
          croak "No key details for tumbler $tmbl_i"
             unless defined $tmbl->{key} || defined $tmbl->{key_fingerprint} || defined $tmbl->{pubkey};
          # Need either ephemeral_pubkey or rsa_key_ciphertext
-         croak "tumbler $tmbl_i must have rsa_key_ciphertext or ephemeral_pubkey"
-            unless defined $tmbl->{rsa_key_ciphertext} xor defined $tmbl->{ephemeral_pubkey};
+         croak "tumbler $tmbl_i must have rsa_key_ciphertext or ephemeral_pubkey or kem_ciphertext"
+            unless 1 == defined($tmbl->{rsa_key_ciphertext})
+                      + defined($tmbl->{ephemeral_pubkey})
+                      + defined($tmbl->{kem_ciphertext});
          @unknown= grep !$_known_tumbler_fields{$_}, keys %$tmbl;
          carp "Unknown tumbler[$tmbl_i] attributes: ".join(', ', @unknown)
             if @unknown;
