@@ -39,4 +39,31 @@ is( Crypt::MultiKey::PKey->generate('secp256k1'),
    },
    'secp256k1');
 
+{
+   my $mlkem = eval { Crypt::MultiKey::PKey->generate('ML-KEM-768') };
+   if ($mlkem) {
+      is( $mlkem,
+         object {
+            call algorithm => 'ML-KEM-768';
+            call sub { length decode_base64($_[0]->public) }, within(1600, 200);
+         },
+         'ML-KEM-768');
+
+      is( Crypt::MultiKey::PKey->generate('ml-kem-768'),
+         object {
+            call algorithm => 'ML-KEM-768';
+            call sub { length decode_base64($_[0]->public) }, within(1600, 200);
+         },
+         'ml-kem-768');
+   }
+   else {
+      like( dies { Crypt::MultiKey::PKey->generate('ML-KEM-768') },
+         qr/OpenSSL 3\.5 or newer/i,
+         'ML-KEM-768 reports OpenSSL requirement when unsupported');
+      like( dies { Crypt::MultiKey::PKey->generate('ml-kem-768') },
+         qr/OpenSSL 3\.5 or newer/i,
+         'ml-kem-768 reports OpenSSL requirement when unsupported');
+   }
+}
+
 done_testing;

@@ -42,4 +42,25 @@ subtest rsa => sub {
    is($decrypted, 'Test');
 };
 
+subtest 'ML-KEM-768' => sub {
+   my $key= eval { Crypt::MultiKey::PKey->generate('ML-KEM-768') };
+   SKIP: {
+      skip "ML-KEM unsupported in this OpenSSL build", 2 unless $key;
+
+      my $fields= $key->encrypt("Test");
+      is($fields,
+         {
+            cipher         => 'AES-256-GCM',
+            ciphertext     => D,
+            kem_ciphertext => D,
+            kdf_salt       => str_of_len(32),
+         },
+         'encrypted fields' );
+      my $secret= $key->decrypt($fields);
+      my $decrypted;
+      $secret->span->copy_to($decrypted);
+      is($decrypted, 'Test');
+   }
+};
+
 done_testing;
