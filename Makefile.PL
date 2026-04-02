@@ -66,6 +66,23 @@ $test->feature(HAVE_LINUX_HIDRAW
    { h => [ 'linux/hidraw.h', 'sys/ioctl.h' ] }
 );
 
+$test->feature(HAVE_EVP_PKEY_ENCAPSULATE
+   => 'EVP_PKEY_CTX *ctx = 0; EVP_PKEY_encapsulate_init(ctx, 0); EVP_PKEY_decapsulate_init(ctx, 0); return 0;',
+   { h => 'openssl/evp.h' }
+);
+
+$test->feature(HAVE_MLKEM_KEYGEN
+   => 'EVP_PKEY_CTX *ctx = EVP_PKEY_CTX_new_from_name(0, "ML-KEM-768", 0);'
+      . 'OSSL_PARAM p[2]; unsigned char seed[64] = {0};'
+      . 'p[0] = OSSL_PARAM_construct_octet_string(OSSL_PKEY_PARAM_ML_KEM_SEED, seed, sizeof(seed));'
+      . 'p[1] = OSSL_PARAM_construct_end();'
+      . 'if (ctx) EVP_PKEY_CTX_set_params(ctx, p);'
+      . 'if (!ctx) return 1;'
+      . 'EVP_PKEY_CTX_free(ctx);'
+      . 'return 0;',
+   { h => [ 'openssl/evp.h', 'openssl/params.h', 'openssl/core_names.h' ] }
+);
+
 $test->write_config_header('CryptMultiKey_config.h');
 $test->export_deps($dep);
 

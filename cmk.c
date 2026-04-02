@@ -200,6 +200,30 @@ cmk_decode_base64(const U8 *text, STRLEN text_len) {
    return out;
 }
 
+/* Return true if the requested key type is one of the ML-KEM names.
+ */
+static bool
+cmk_is_mlkem_keytype_name(const char *type) {
+   int type_len= strlen(type);
+   return (type_len == 10 && foldEQ(type, "ML-KEM-512", 10))
+       || (type_len == 10 && foldEQ(type, "ML-KEM-768", 10))
+       || (type_len == 11 && foldEQ(type, "ML-KEM-1024", 11));
+}
+
+/* Return canonical OpenSSL name for ML-KEM type strings, or NULL if not ML-KEM.
+ */
+static const char *
+cmk_mlkem_canonical_name(const char *type) {
+   int type_len= strlen(type);
+   if (type_len == 10 && foldEQ(type, "ML-KEM-512", 10))
+      return "ML-KEM-512";
+   if (type_len == 10 && foldEQ(type, "ML-KEM-768", 10))
+      return "ML-KEM-768";
+   if (type_len == 11 && foldEQ(type, "ML-KEM-1024", 11))
+      return "ML-KEM-1024";
+   return NULL;
+}
+
 /* Return whether cmk_pkey pointer has a public key.
  * Currently, cmk_pkey is a typedef for EVP_PKEY*, and a non-null EVP_PKEY implies it has at
  * least a public key, so just check that it points to something.
@@ -415,6 +439,7 @@ cmk_pkey_keygen_params(cmk_pkey *pk, const char *type, const char **params, int 
    EVP_PKEY_CTX *ctx= NULL;
    EVP_PKEY *pkey= NULL;
    BIGNUM *bignum= NULL;
+   secret_buffer *seed= NULL;
 #if !CMK_HAVE_EVP_RSA_KEYGEN_CTRLS
    RSA *rsa= NULL;
 #endif
@@ -538,7 +563,46 @@ cmk_pkey_keygen_params(cmk_pkey *pk, const char *type, const char **params, int 
          }
       }
    }
+#if defined(HAVE_MLKEM_KEYGEN)
+   else if (cmk_is_mlkem_keytype_name(type)) {
+      int i;
+      const char *mlkem_type= cmk_mlkem_canonical_name(type);
+      OSSL_PARAM keygen_params[2];
+      keygen_params[0]= OSSL_PARAM_construct_end();
+      keygen_params[1]= OSSL_PARAM_construct_end();
+      if (!mlkem_type)
+         GOTO_CLEANUP_CROAK("Unknown ML-KEM type");
+
+      ctx = EVP_PKEY_CTX_new_from_name(NULL, mlkem_type, NULL);
+      if (!ctx || EVP_PKEY_keygen_init(ctx) <= 0)
+         GOTO_CLEANUP_CROAK("keygen init (ML-KEM) failed");
+
+      /* Parse optional ML-KEM keygen params from Perl strings. */
+      for (i= 0; i < param_count; i++) {
+         const char *p = params[i];
+         const char *eq = strchr(p, '=');
+         int len= eq? eq - p : strlen(p);
+         const char *value= eq? eq + 1 : "";
+
+         if (len == 11 && memcmp(p, "seed_base64", 11) == 0) {
+            if (seed)
+               GOTO_CLEANUP_CROAK("Duplicate ML-KEM parameter 'seed_base64'");
+            seed= cmk_decode_base64((const U8*) value, strlen(value));
+            keygen_params[0]= OSSL_PARAM_construct_octet_string(
+               OSSL_PKEY_PARAM_ML_KEM_SEED, seed->data, seed->len);
+            keygen_params[1]= OSSL_PARAM_construct_end();
+         }
+         else
+            GOTO_CLEANUP_CROAK("Unknown ML-KEM parameter");
+      }
+
+      if (keygen_params[0].key && EVP_PKEY_CTX_set_params(ctx, keygen_params) <= 0)
+         GOTO_CLEANUP_CROAK("set_params (ML-KEM) failed");
+   }
+#endif
    else {
+      if (cmk_is_mlkem_keytype_name(type))
+         croak("key type '%s' requires OpenSSL 3.5 or newer", type);
       croak("unknown key type '%s'", type);
    }
    if (EVP_PKEY_keygen(ctx, &pkey) <= 0)
@@ -844,7 +908,6 @@ cmk_pkey_generate_key_material(cmk_pkey *pubkey, HV *tumbler, secret_buffer *ske
    EVP_PKEY *ephemeral = NULL;
    EVP_PKEY_CTX *pctx = NULL;
    EVP_PKEY_CTX *ctx = NULL;
-   EVP_PKEY_CTX *rsa_ctx = NULL;
    SV *sv= NULL;
    int type= EVP_PKEY_base_id(*pubkey);
 
@@ -922,19 +985,19 @@ cmk_pkey_generate_key_material(cmk_pkey *pubkey, HV *tumbler, secret_buffer *ske
       skey_buf->len += CMK_RSA_KEYMATERIAL_LEN;
 
       /* 2. RSA-OAEP encrypt wrap key with public_key */
-      rsa_ctx = EVP_PKEY_CTX_new(*pubkey, NULL);
-      if (!rsa_ctx
-         || EVP_PKEY_encrypt_init(rsa_ctx) <= 0
-         || EVP_PKEY_CTX_set_rsa_padding(rsa_ctx, RSA_PKCS1_OAEP_PADDING) <= 0
-         || EVP_PKEY_CTX_set_rsa_oaep_md(rsa_ctx, EVP_sha256()) <= 0
-         || EVP_PKEY_CTX_set_rsa_mgf1_md(rsa_ctx, EVP_sha256()) <= 0)
+      ctx = EVP_PKEY_CTX_new(*pubkey, NULL);
+      if (!ctx
+         || EVP_PKEY_encrypt_init(ctx) <= 0
+         || EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_OAEP_PADDING) <= 0
+         || EVP_PKEY_CTX_set_rsa_oaep_md(ctx, EVP_sha256()) <= 0
+         || EVP_PKEY_CTX_set_rsa_mgf1_md(ctx, EVP_sha256()) <= 0)
          GOTO_CLEANUP_CROAK("RSA encrypt init failed");
 
-      if (EVP_PKEY_encrypt(rsa_ctx, NULL, &rsa_ct_len, buf_pos, CMK_RSA_KEYMATERIAL_LEN) <= 0
+      if (EVP_PKEY_encrypt(ctx, NULL, &rsa_ct_len, buf_pos, CMK_RSA_KEYMATERIAL_LEN) <= 0
          || rsa_ct_len == 0)
          GOTO_CLEANUP_CROAK("RSA encrypt size query failed");
 
-      if (EVP_PKEY_encrypt(rsa_ctx,
+      if (EVP_PKEY_encrypt(ctx,
             (U8*) cmk_prepare_sv_buffer((sv= newSVpvs("")), rsa_ct_len), &rsa_ct_len,
             buf_pos, CMK_RSA_KEYMATERIAL_LEN) <= 0)
          GOTO_CLEANUP_CROAK("RSA encrypt failed");
@@ -944,7 +1007,35 @@ cmk_pkey_generate_key_material(cmk_pkey *pubkey, HV *tumbler, secret_buffer *ske
          GOTO_CLEANUP_CROAK("hv_store failed");
       sv= NULL; /* HV takes ownership */
    }
+#if defined(HAVE_EVP_PKEY_ENCAPSULATE)
+   else if ((ctx = EVP_PKEY_CTX_new(*pubkey, NULL))
+      && EVP_PKEY_encapsulate_init(ctx, NULL) > 0
+   ) {
+      size_t kem_ct_len= 0;
+      size_t kem_shared_len= 0;
+      U8 *kem_shared;
+      U8 *kem_ciphertext;
+
+      if (EVP_PKEY_encapsulate(ctx, NULL, &kem_ct_len, NULL, &kem_shared_len) <= 0
+         || kem_ct_len == 0 || kem_shared_len == 0)
+         GOTO_CLEANUP_CROAK("KEM encapsulate size query failed");
+
+      secret_buffer_alloc_at_least(skey_buf, skey_buf->len + kem_shared_len);
+      kem_shared= (U8*) skey_buf->data + skey_buf->len;
+      kem_ciphertext= (U8*) cmk_prepare_sv_buffer((sv= newSVpvs("")), kem_ct_len);
+
+      if (EVP_PKEY_encapsulate(ctx, kem_ciphertext, &kem_ct_len, kem_shared, &kem_shared_len) <= 0)
+         GOTO_CLEANUP_CROAK("KEM encapsulate failed");
+
+      SvCUR_set(sv, kem_ct_len);
+      skey_buf->len += kem_shared_len;
+      if (!hv_stores(tumbler, "kem_ciphertext", sv))
+         GOTO_CLEANUP_CROAK("hv_store failed");
+      sv= NULL;
+   }
+#endif
    else {
+      ERR_clear_error();
       #ifdef EVP_PKEY_ED25519
       if (type == EVP_PKEY_ED25519
          #ifdef EVP_PKEY_ED448
@@ -958,7 +1049,6 @@ cmk_pkey_generate_key_material(cmk_pkey *pubkey, HV *tumbler, secret_buffer *ske
 cleanup:
    if (ctx) EVP_PKEY_CTX_free(ctx);
    if (pctx) EVP_PKEY_CTX_free(pctx);
-   if (rsa_ctx) EVP_PKEY_CTX_free(rsa_ctx);
    if (ephemeral) EVP_PKEY_free(ephemeral);
    if (sv) /* if hv_stores fails, the thing we tried to store needs freed */
       SvREFCNT_dec(sv);
@@ -975,7 +1065,6 @@ cmk_pkey_recreate_key_material(cmk_pkey *pk, HV *tumbler, secret_buffer *skey_bu
    const char *err = NULL;
    EVP_PKEY *ephemeral_pub = NULL;
    EVP_PKEY_CTX *ctx = NULL;
-   EVP_PKEY_CTX *rsa_ctx = NULL;
    SV **svp;
    int type = EVP_PKEY_base_id(*pk);
 
@@ -1049,27 +1138,53 @@ cmk_pkey_recreate_key_material(cmk_pkey *pk, HV *tumbler, secret_buffer *skey_bu
       rsa_ct = (U8*)secret_buffer_SvPVbyte(*svp, &rsa_ct_len);
 
       /* RSA-OAEP decrypt to get wrap key */
-      rsa_ctx = EVP_PKEY_CTX_new(*pk, NULL);
-      if (!rsa_ctx
-         || EVP_PKEY_decrypt_init(rsa_ctx) <= 0
-         || EVP_PKEY_CTX_set_rsa_padding(rsa_ctx, RSA_PKCS1_OAEP_PADDING) <= 0
-         || EVP_PKEY_CTX_set_rsa_oaep_md(rsa_ctx, EVP_sha256()) <= 0
-         || EVP_PKEY_CTX_set_rsa_mgf1_md(rsa_ctx, EVP_sha256()) <= 0)
+      ctx = EVP_PKEY_CTX_new(*pk, NULL);
+      if (!ctx
+         || EVP_PKEY_decrypt_init(ctx) <= 0
+         || EVP_PKEY_CTX_set_rsa_padding(ctx, RSA_PKCS1_OAEP_PADDING) <= 0
+         || EVP_PKEY_CTX_set_rsa_oaep_md(ctx, EVP_sha256()) <= 0
+         || EVP_PKEY_CTX_set_rsa_mgf1_md(ctx, EVP_sha256()) <= 0)
          GOTO_CLEANUP_CROAK("RSA decrypt init failed");
 
       /* Oddly, this wants a larger size for the buffer, but on the second call it
        * returns the correct number of bytes decoded...  So need to allocate the SecretBuffer
        * larger and then shrink it.
        */
-      if (EVP_PKEY_decrypt(rsa_ctx, NULL, &decoded_len, rsa_ct, rsa_ct_len) <= 0)
+      if (EVP_PKEY_decrypt(ctx, NULL, &decoded_len, rsa_ct, rsa_ct_len) <= 0)
          GOTO_CLEANUP_CROAK("RSA encrypt size query failed");
       secret_buffer_alloc_at_least(skey_buf, skey_buf->len + decoded_len);
 
-      if (EVP_PKEY_decrypt(rsa_ctx, (U8*) skey_buf->data + skey_buf->len, &decoded_len, rsa_ct, rsa_ct_len) <= 0)
+      if (EVP_PKEY_decrypt(ctx, (U8*) skey_buf->data + skey_buf->len, &decoded_len, rsa_ct, rsa_ct_len) <= 0)
          GOTO_CLEANUP_CROAK("RSA decrypt failed");
       skey_buf->len += decoded_len;
    }
+#if defined(HAVE_EVP_PKEY_ENCAPSULATE)
+   else if ((ctx = EVP_PKEY_CTX_new(*pk, NULL))
+      && EVP_PKEY_decapsulate_init(ctx, NULL) > 0
+   ) {
+      STRLEN kem_ct_len;
+      U8 *kem_ct;
+      size_t kem_shared_len= 0;
+
+      /* KEM branch: decapsulate ciphertext from tumbler. */
+      svp = hv_fetchs(tumbler, "kem_ciphertext", 0);
+      if (!svp || !*svp || !SvOK(*svp))
+         GOTO_CLEANUP_CROAK("Missing kem_ciphertext");
+      kem_ct = (U8*) secret_buffer_SvPVbyte(*svp, &kem_ct_len);
+
+      if (EVP_PKEY_decapsulate(ctx, NULL, &kem_shared_len, kem_ct, kem_ct_len) <= 0
+         || kem_shared_len == 0)
+         GOTO_CLEANUP_CROAK("KEM decapsulate size query failed");
+
+      secret_buffer_alloc_at_least(skey_buf, skey_buf->len + kem_shared_len);
+      if (EVP_PKEY_decapsulate(ctx, (U8*) skey_buf->data + skey_buf->len,
+            &kem_shared_len, kem_ct, kem_ct_len) <= 0)
+         GOTO_CLEANUP_CROAK("KEM decapsulate failed");
+      skey_buf->len += kem_shared_len;
+   }
+#endif
    else {
+      ERR_clear_error();
       #ifdef EVP_PKEY_ED25519
       if (type == EVP_PKEY_ED25519
          #ifdef EVP_PKEY_ED448
@@ -1082,7 +1197,6 @@ cmk_pkey_recreate_key_material(cmk_pkey *pk, HV *tumbler, secret_buffer *skey_bu
 
 cleanup:
    if (ctx) EVP_PKEY_CTX_free(ctx);
-   if (rsa_ctx) EVP_PKEY_CTX_free(rsa_ctx);
    if (ephemeral_pub) EVP_PKEY_free(ephemeral_pub);
    if (err) cmk_croak_with_ssl_error("recreate_key_material", err);
 }
