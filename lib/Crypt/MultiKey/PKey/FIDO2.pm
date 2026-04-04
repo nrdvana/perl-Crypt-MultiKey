@@ -102,7 +102,9 @@ use Crypt::SecretBuffer qw( secret );
 use Crypt::MultiKey::FIDO2;
 use parent 'Crypt::MultiKey::PKey';
 
-sub mechanism { 'FIDO2' }
+sub protection_scheme {
+   @_ > 1? $_[0]->_set_protection_scheme($_[1]) : 'FIDO2';
+}
 
 =attribute fido2_credential
 
@@ -120,17 +122,17 @@ the detection of whether the correct key is present.
 
 =item fido2_aaguid_hex
 
-Read/write accessor for the standard GUID hex notation of attribute C<fido2_aaguid>.
+Accessor for the standard GUID hex notation of attribute C<fido2_aaguid>.
 
 =back
 
 =attribute challenge
 
-This hash of this string is sent to the authenticator as the value to perform HMAC on.
+The sha256 of this string is sent to the authenticator as the value to perform HMAC on.
 The default is C<"Crypt::MultiKey::PKey::FIDO2">.
 You can change this to something other than the default, but beware that it can limit your
-ability to automatically match a PKey::FIDO2 object to the corresponding authenticator.
-If you want to issue challenges for multiple PKey::FIDO2 objects in a single request to the
+ability to efficiently match a ::PKey::FIDO2 object to the corresponding authenticator.
+If you want to issue challenges for multiple ::PKey::FIDO2 objects in a single request to the
 authenticator, they all need to have the same value for C<challenge>.
 
 =attribute kdf_salt
@@ -221,6 +223,9 @@ sub create_credential {
 
 =method encrypt_private
 
+  $pkey->encrypt_private;          # new credential, or find device with credential
+  $pkey->encrypt_private($device); # specify device to use
+
 Calls L</create_credential> (unless L</fido2_credential> was already defined) then requests
 the password from the authenticator, then encrypts the private half of this PKey.  It does not
 clear the private half of this PKey.
@@ -245,7 +250,8 @@ sub encrypt_private {
       @devs= ( $self->_resolve_device($device_spec) );
       $self->create_credential($devs[0]);
    }
-   my $hmac_secret= $self->_get_hmac_secret(\@devs);
+   my $hmac_secret= $self->_get_hmac_secret(\@devs)
+      or croak "The fido2_credential was not acknowledged by the device";
    # It worked, so generate fresh salt and then continue with encryption.
    secret(append_random => 16)->span->copy_to($salt_bytes);
    $self->kdf_salt($salt_bytes);
@@ -255,8 +261,8 @@ sub encrypt_private {
 
 =method can_obtain_private
 
-Returns true if FIDO2 support is available and at least one FIDO2 device with a matching AAGUID
-is connected to the system.
+Returns true if FIDO2 support is available and at least one FIDO2 device with a matching
+L</fido_aaguid> is connected to the system.
 
 =cut
 
@@ -266,6 +272,23 @@ sub can_obtain_private {
       && defined $self->fido2_aaguid
       && !!grep $_->aaguid eq $self->fido2_aaguid, Crypt::MultiKey::FIDO2::list_devices();
 }
+
+=method obtain_private
+
+  $pkey->obtain_private;                          # find device, request hmac-secret
+  $pkey->obtain_private(hmac_secret => $secret);  # supply hmac_secret result
+
+This iterates the FIDO2 devices matching the C<fido2_aaguid> looking for one that can answer
+the L<< C<hmac-secret> challenge|Crypt::MultiKey::DISO2::Device/assert_hmac_secret >>.
+On success, it uses the secret to calculate the password to
+L<decrypt_private|Crypt::MultiKey::PKey/decrypt_private>.
+Dies on failure.
+
+You can specify the C<hmac_secret> to avoid talking to a device at all.  This is helpful when
+you are querying the device directly and then want to apply the results to one or more PKey
+objects.
+
+=cut
 
 sub obtain_private {
    my ($self, %opts)= @_;
@@ -281,8 +304,9 @@ sub obtain_private {
       defined $self->fido2_credential && $self->fido2_aaguid
          or croak 'Cannot obtain private key without fido2_credential and fido2_aaguid';
       my @devs= grep $_->aaguid eq $self->fido2_aaguid, Crypt::MultiKey::FIDO2::list_devices()
-         or croak 'Configured FIDO2 device is not currently connected';
-      $hmac_secret= $self->_get_hmac_secret(\@devs);
+         or croak 'No matching FIDO2 authenticator found';
+      $hmac_secret= $self->_get_hmac_secret(\@devs)
+         or croak 'No FIDO2 authenticator accepted the hmac-secret request';
    }
    $self->decrypt_private($self->_derive_password($hmac_secret));
 }
@@ -294,7 +318,7 @@ sub _get_hmac_secret {
       my ($secret, $cred_used)= $_->assert_hmac_secret(@params);
       return $secret if defined $secret;
    }
-   croak "The fido2_credential was not found on any attached device";
+   return undef;
 }
 
 sub _derive_password {

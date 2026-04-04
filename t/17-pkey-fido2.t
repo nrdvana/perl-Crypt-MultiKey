@@ -59,7 +59,7 @@ use Crypt::MultiKey::PKey::FIDO2;
 
 subtest 'encrypt_private + obtain_private with mock device object' => sub {
    my $dev= Local::MockFIDO2Device->new;
-   my $key= Crypt::MultiKey::PKey->generate('x25519')->mechanism('FIDO2');
+   my $key= Crypt::MultiKey::PKey->generate('x25519')->protection_scheme('FIDO2');
 
    $key->encrypt_private($dev);
    ok($key->private_encrypted, 'private key encrypted');
@@ -90,7 +90,7 @@ subtest 'encrypt_private + obtain_private with mock device object' => sub {
 
 subtest 'obtain_private supports supplied hmac_secret and avoids device lookup' => sub {
    my $dev= Local::MockFIDO2Device->new;
-   my $key= Crypt::MultiKey::PKey->generate('x25519')->mechanism('FIDO2');
+   my $key= Crypt::MultiKey::PKey->generate('x25519')->protection_scheme('FIDO2');
    $key->encrypt_private($dev);
    $key->clear_private;
 
@@ -101,7 +101,7 @@ subtest 'obtain_private supports supplied hmac_secret and avoids device lookup' 
 subtest 'encrypt_private with existing credential needs matching AAGUID if no explicit device' => sub {
    my $dev1= Local::MockFIDO2Device->new(aaguid => ("\x01" x 16));
    my $dev2= Local::MockFIDO2Device->new(aaguid => ("\x02" x 16));
-   my $key= Crypt::MultiKey::PKey->generate('x25519')->mechanism('FIDO2');
+   my $key= Crypt::MultiKey::PKey->generate('x25519')->protection_scheme('FIDO2');
 
    $key->encrypt_private($dev1);
 
@@ -118,7 +118,7 @@ subtest 'encrypt_private with existing credential needs matching AAGUID if no ex
 
 subtest 'export/load roundtrip preserves FIDO2 headers needed for unlock' => sub {
    my $dev= Local::MockFIDO2Device->new(aaguid => ("\xAB" x 16));
-   my $key= Crypt::MultiKey::PKey->generate('x25519')->mechanism('FIDO2');
+   my $key= Crypt::MultiKey::PKey->generate('x25519')->protection_scheme('FIDO2');
    $key->challenge("\x00challenge with weird\nchars\xff");
    $key->encrypt_private($dev);
 
@@ -134,7 +134,7 @@ subtest 'export/load roundtrip preserves FIDO2 headers needed for unlock' => sub
 };
 
 subtest 'obtain_private validates required enrollment fields' => sub {
-   my $key= Crypt::MultiKey::PKey->generate('x25519')->mechanism('FIDO2');
+   my $key= Crypt::MultiKey::PKey->generate('x25519')->protection_scheme('FIDO2');
    $key->clear_private;
    $key->private_encrypted('AAAA');
 

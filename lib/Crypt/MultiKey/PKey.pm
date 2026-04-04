@@ -357,8 +357,8 @@ sub _import_key {
                # unless the thing loaded was a public key from earlier in the file.
                $self->_clear_key unless $loaded_something;
             }
-            $self->protection_scheme('Password');
             $self->_import_pem_headers($pem);
+            $self->protection_scheme('Password') unless defined $self->protection_scheme;
             $loaded_something= 1;
             # unless public key is defined, keep iterating in case the public key was provided
             # as another PEM record in the same file
@@ -598,8 +598,9 @@ sub export_pem_openssl_encrypted_private_key {
 
 sub _export_pem_headers {
    my ($self, $pem)= @_;
+   $pem->header_kv([]) unless defined $pem->header_kv;
    # export the 'protection_scheme' (indicating subclass) if it is defined
-   push @{ $pem->header_kv }, cmk_protection_scheme => $self->protection_scheme
+   push @{$pem->header_kv}, cmk_protection_scheme => $self->protection_scheme
       if defined $self->protection_scheme;
    # Store the public key in a PEM header so that we can load the public key from an
    # "ENCRYPTED PRIVATE KEY" file even before we have the password.
