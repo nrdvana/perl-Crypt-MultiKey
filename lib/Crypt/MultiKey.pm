@@ -273,7 +273,7 @@ to the list.
 # For security, only permit loading packages which are known to be safe to construct from
 # external configuration.
 our %lazy_loadable= map +($_ => 1), qw(
-   Crypt::MultiKey::PKey::Unencrypted
+   Crypt::MultiKey::PKey::Password
    Crypt::MultiKey::PKey::FIDO2
    Crypt::MultiKey::PKey::YKChalResp
    Crypt::MultiKey::PKey::SSHAgentSignature

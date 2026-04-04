@@ -42,6 +42,21 @@ C<Crypt::MultiKey::PKey> is a public/private key pair where the public half is a
 but the private half can be encrypted or removed.  The PKey can always L</encrypt> data, but the
 private half must be available to L</decrypt> that data again.
 
+=attribute protection_scheme
+
+The scheme used to protect and/or obtain the private half of the key.  This is used as a class
+name suffix for the PKey object, such as C<Crypt::MultiKey::PKey::Password>.  The class defines
+the L</obtain_private> and L</can_obtain_private> methods, and may override the behavior of
+L</encrypt_private> or introduce an entirely new workflow for setting up the key.
+Most schemes derive a password (or equivalent secret) for use with L</encrypt_private>, storing
+the encrypted private key locally.  However, they are not limited to this; the implementation
+could do something entirely different like fetching the private key from remote, or forwarding
+all encryption operations to a device that posesses the private key.
+
+The default is C<'Password'>, which protects the private key by encrypting it using C<PBKDF2>
+and C<AES-256-GCM>, stores it in the L<private_encrypted> attribute, and obtains it by prompting
+the console for the password.
+
 =attribute algorithm
 
 The type of public-key cryptography used.  This is selected during L</generate>.
@@ -53,20 +68,6 @@ SSH-style C<< "sha256:base64..." >> used to help identify the key.
 =attribute path
 
 A disk path from which this key was loaded or to which it will be saved.
-
-=attribute mechanism
-
-The mechanism for obtaining the private half of the key.  This is used as a class name suffix
-for the PKey object and affects the behavior of the PKey object.  The default is C<undef> (for
-this base class) and prompts the console for a password to use with L<decrypt_private>.
-
-Any key with the L</private_encrypted> attribute can be decrypted using L</decrypt_private>,
-but this attribute indicates the I<source> of the password, such as whether it is a human-typed
-text password, or a password generated from a YubiKey's hash function, etc.  Mechanisms do not
-need to rely on the L</private_encrypted> attribute, and may obtain the private half in other
-ways.
-
-See also: L</obtain_private> and L</can_obtain_private> in this class and subclasses.
 
 =attribute has_public
 
@@ -110,16 +111,16 @@ sub path {
    @_ > 1? $_[0]{path}= $_[1] : $_[0]{path};
 }
 
-sub mechanism {
-   @_ > 1? $_[0]->_set_mechanism($_[1]) : undef;
+sub protection_scheme {
+   @_ > 1? $_[0]->_set_protection_scheme($_[1]) : undef;
 }
-# mechanism attribute is writable, but may only rebless into a subclass
-sub _set_mechanism {
-   my ($self_or_class, $mechanism)= @_;
+# protection_scheme attribute is writable, but may only rebless into a subclass
+sub _set_protection_scheme {
+   my ($self_or_class, $protection_scheme)= @_;
    my $class= ref $self_or_class || $self_or_class;
-   my $subclass= Crypt::MultiKey::lazy_load(__PACKAGE__.'::'.$mechanism);
+   my $subclass= Crypt::MultiKey::lazy_load(__PACKAGE__.'::'.$protection_scheme);
    $subclass eq $class or $subclass->isa($class)
-      or croak "Mechanism $subclass does not derive from $class";
+      or croak "protection_scheme $subclass does not derive from $class";
    if (ref $self_or_class) {
       return bless $self_or_class, $subclass;
    } else {
@@ -154,9 +155,9 @@ along with C<'password'> in order to immediately attempt unlocking an encrypted 
 
 =over
 
-=item mechanism
+=item protection_scheme
 
-If mechanism is a known subclass, this invokes the subclass constructor.
+If protection_scheme is a known subclass, this invokes the subclass constructor.
 
 =item path
 
@@ -187,12 +188,12 @@ to C<import> it during the constructor.
 
 Loading a C<private> key always implies a public key, but if your private key is encrypted this
 attribute can be used to provide the public half, enabling the PKey object to be able to encrypt
-data even before the private half has been decrypted.
+data even before the private half has been obtained.
 
 =item password
 
 If the private key is encrypted, this attempts a L</decrypt_private> before the constructor
-returns, dying if the password is incorrect.
+returns and dies if the password is incorrect.
 
 =back
 
@@ -214,7 +215,7 @@ sub new {
 
 # Make sure attributes (or methods) are applied in the following order:
 our %_attr_pri= (
-   mechanism => -100,
+   protection_scheme => -100,
    path => -99,
    private => -5,
    private_encrypted => -4,
@@ -356,6 +357,7 @@ sub _import_key {
                # unless the thing loaded was a public key from earlier in the file.
                $self->_clear_key unless $loaded_something;
             }
+            $self->protection_scheme('Password');
             $self->_import_pem_headers($pem);
             $loaded_something= 1;
             # unless public key is defined, keep iterating in case the public key was provided
@@ -378,6 +380,7 @@ sub _import_key {
             # '$pass' is undef.
             if (!defined $pass && !$self->has_private) {
                $pem->buffer->span->copy_to($self->{private_encrypted}= '');
+               $self->protection_scheme('Password');
             }
             return 1;
          }
@@ -416,8 +419,9 @@ sub _import_key {
                $self->_import_pkcs8($span, $pass);
             } else {
                $self->_clear_key;
-               $self->{private_encrypted}= $span->copy;
             }
+            $self->{private_encrypted}= $span->copy;
+            $self->protection_scheme('Password');
             return 1;
          }
          elsif ($type eq 'PKCS#8-unencrypted') {
@@ -436,13 +440,13 @@ sub _import_key {
 
 sub _import_pem_headers {
    my ($self, $pem)= @_;
-   # mechanism header can change the class, then might need re-dispatched
-   my $mech= $pem->headers->{cmk_mechanism};
-   if (defined $mech && $mech ne ($self->mechanism//'')) {
+   # protection_scheme header can change the class, then might need re-dispatched
+   my $prot= $pem->headers->{cmk_protection_scheme};
+   if (defined $prot && $prot ne ($self->protection_scheme//'')) {
       my $this_sub= $self->can('_import_pem_headers');
-      $self->mechanism($mech);
+      $self->protection_scheme($prot);
       # guard against infinite loop
-      $self->mechanism eq $mech or croak "BUG";
+      $self->protection_scheme eq $prot or croak "BUG";
       my $new_sub= $self->can('_import_pem_headers');
       goto $new_sub if $new_sub != $this_sub;
    }
@@ -476,6 +480,12 @@ Supported types and aliases:
   rsa2048     => RSA:bits=2048
   rsa1024     => RSA:bits=1024
 
+  (with OpenSSL >= 3.5)
+  ML-KEM      => ML-KEM-768
+  ML-KEM-512
+  ML-KEM-768
+  ML-KEM-2014
+
 =cut
 
 our %type_alias= (
@@ -504,23 +514,32 @@ sub generate {
 
 Export the PKey as a L<SecretBuffer|Crypt::SecretBuffer> object containing OpenSSL PEM text of
 PKCS#8 format data, but also with PEM headers that preserve the value of object attributes.
-The specific attributes exported depend on the L</mechanism>, but the private half of the key
-will never be serialized unencrypted unless L</mechanism> is C<'Unencrypted'>.
+If L</protection_scheme> is C<undef>, this will write out an B<unencrypted private key>.
+(If you called L<encrypt_private>, the C<protection_scheme> changed to C<'Password'> and this
+will write out an encrypted private key)
+
+All exports from this method will include PEM headers as needed to store the PKey attributes.
+OpenSSL cannot read PEM files if they have headers.
 
 =method export_pem
 
-If the PKey has an encrypted private half, this exports as a L<PEM object|Crypt::SecretBuffer::PEM>
-of PKCS#8 data (OpenSSL C<BEGIN ENCRYPTED PRIVATE KEY> format).  If the PKey does not have an
-encrypted private half, this exports only the public key as SubjectPublicKeyInfo data
-(OpenSSL C<BEGIN PUBLIC KEY> format).
+Like L</export>, but return a L<PEM object|Crypt::SecretBuffer::PEM> prior to serializing.
 
-In both cases, PEM headers are added to hold relevant PKey object attributes.  This makes the
-files unreadable by OpenSSL, unless you delete the headers.
+=method export_pem_openssl_public_key
 
-=method export_pem_openssl_pubkey
+Export the PKey as a L<PEM object|Crypt::SecretBuffer::PEM> of C<SubjectPublicKeyInfo> data
+(OpenSSL C<BEGIN PUBLIC KEY> format) B<without> any PEM headers so that L<openssl(1)> can read
+it.
 
-Export the PKey as a L<PEM object|Crypt::SecretBuffer::PEM> of SubjectPublicKeyInfo data
-(OpenSSL C<BEGIN PUBLIC KEY> format) without any PEM headers.
+=method export_pem_openssl_private_key
+
+Export the PKey as a L<PEM object|Crypt::SecretBuffer::PEM> of C<PKCS#8> data, B<unencrypted>,
+and B<without> any PEM headers so that L<openssl(1)> can read it.
+
+=method export_pem_openssl_private_key
+
+Export the PKey as a L<PEM object|Crypt::SecretBuffer::PEM> of password-encrypted C<PKCS#8>
+data, B<without> any PEM headers so that L<openssl(1)> can read it.
 
 =method save
 
@@ -541,39 +560,51 @@ sub export_pem {
    # format passed to the constructor and not yet decrypted)
    my $pem;
    if (defined $self->{private_encrypted}) {
-      # ensure private_encrypted contains the format OpenSSL expects
-      my $content= span($self->{private_encrypted});
-      croak "private_encrypted is not in PKCS#8 format (as would be created by ->encrypt_private)"
-         unless _looks_like_base64($content)
-            && ($content= _decode_base64($content))
-            && _identify_asn1($content) eq 'PKCS#8-encrypted';
-      $pem= Crypt::SecretBuffer::PEM->new(
-         label => 'ENCRYPTED PRIVATE KEY',
-         # Store the public key in a PEM header so that we can load the public key from an
-         # "ENCRYPTED PRIVATE KEY" file even before we have the password.
-         header_kv => [ public_key => $self->public ],
-         content => $content
-      );
+      $pem= $self->export_pem_openssl_encrypted_private_key;
    }
-   # Export as a public key only
+   # If a protection_scheme is defined, default to only exporting the public key
+   elsif (defined $self->protection_scheme) {
+      $pem= $self->export_pem_openssl_public_key;
+   }
+   # No protection scheme, export the whole key
    else {
-      $pem= $self->export_pem_pubkey;
+      $pem= $self->export_pem_openssl_private_key;
    }
    $self->_export_pem_headers($pem);
    $pem;
 }
 
-sub export_pem_openssl_pubkey {
+sub export_pem_openssl_public_key {
    my $self= shift;
    $self->_export_spki(my $content);
    return Crypt::SecretBuffer::PEM->new(label => 'PUBLIC KEY', content => $content);
 }
 
+sub export_pem_openssl_private_key {
+   my $self= shift;
+   return Crypt::SecretBuffer::PEM->new(label => 'PRIVATE KEY', content => $self->private);
+}
+
+sub export_pem_openssl_encrypted_private_key {
+   my $self= shift;
+   # ensure private_encrypted contains the format OpenSSL expects
+   my $content= span($self->{private_encrypted});
+   croak "private_encrypted is not in PKCS#8 format (as would be created by ->encrypt_private)"
+      unless _looks_like_base64($content)
+         && ($content= _decode_base64($content))
+         && _identify_asn1($content) eq 'PKCS#8-encrypted';
+   return Crypt::SecretBuffer::PEM->new(label => 'ENCRYPTED PRIVATE KEY', content => $content);
+}
+
 sub _export_pem_headers {
    my ($self, $pem)= @_;
-   # export the 'mechanism' (indicating subclass) if it is defined
-   push @{ $pem->header_kv }, cmk_mechanism => $self->mechanism
-      if defined $self->mechanism;
+   # export the 'protection_scheme' (indicating subclass) if it is defined
+   push @{ $pem->header_kv }, cmk_protection_scheme => $self->protection_scheme
+      if defined $self->protection_scheme;
+   # Store the public key in a PEM header so that we can load the public key from an
+   # "ENCRYPTED PRIVATE KEY" file even before we have the password.
+   push @{$pem->header_kv}, public_key => $self->public
+      if $pem->label eq 'ENCRYPTED PRIVATE KEY';
    # subclasses override this to export additional headers
 }
 
@@ -590,7 +621,7 @@ sub save {
   $pkey->encrypt_private($password, $kdf_iter=100_000);
 
 Export the (private) key in PKCS#8 format, encrypted with a password, and stored into attribute
-C<private_encrypted> to be saved out by a subsequent L</save> call.
+C<private_encrypted> to be saved out by a subsequent L</export> or L</save>.
 You may customize the number of iterations for the key-derivation-function (KDF) to resist
 brute-force attempts.  If the password is known to be a string of hashed data with
 uniformly-distributed bits, you may reduce the KDF iterations to 1.  (but it cannot be zero,
@@ -599,11 +630,16 @@ Ideally, C<$password> is a L<SecretBuffer|Crypt::SecretBuffer> object, but scala
 accepted.
 The password must be bytes, not wide characters, so make sure to encode it first.
 
+If this PKey did not have a L</protection_scheme>, the protection_scheme gets initialized to
+C<'Password'>.
+
 =cut
 
 sub encrypt_private {
    my $self= shift;
    defined $_[0] or die "Missing password";
+   $self->protection_scheme('Password')
+      unless defined $self->protection_scheme;
    my $kdf_iter= $_[1] || 100_000;
    my $buf= '';
    $self->_export_pkcs8($buf, $_[0], $kdf_iter);
@@ -620,6 +656,8 @@ L<encrypting it|/encrypt_private>, or saving it by some other means.
 
 sub clear_private {
    my $self= shift;
+   croak "Refusing to clear_private when protection_scheme is not defined"
+      unless defined $self->protection_scheme;
    $self->_export_spki(my $buf);
    $self->_clear_key;
    $self->_import_spki($buf);
@@ -654,44 +692,37 @@ sub decrypt_private {
 
 =method can_obtain_private
 
-Returns true if the resources needed for obtaining the private half of the PKey are available.
-For the base PKey class, this returns true if STDIN is a console, meaning that it can display
-a password prompt to the user.  This can return false even when the private key was already
-loaded; check L</has_private> first.
+Returns true if the resources needed for obtaining the private half of the PKey are available,
+or seem to be available.  (attempting may still fail)
 
-=cut
-
-sub can_obtain_private {
-   return -t *main::STDIN;
-}
+This can return false even when the private key was already loaded; check L</has_private> first.
 
 =method obtain_private
 
-Prompt the user for a password and pass that to L</decrypt_private>.  This is a no-op if the
-private half is already loaded.
+Attempt to gain access to the private half of the PKey, either by decrypting it and loading it
+locally, or opening a connection to a device or service which is providing the private half.
+This may block as it prompts the user for a password or other type of confirmation.
+Dies on failure.
+
+If the private half of the PKey is already available, this does nothing.
 
 =cut
 
+sub can_obtain_private { 0 }
+
 sub obtain_private {
-   my $self= shift;
-   # private already loaded? nothing to do.
-   return $self if $self->has_private;
-   croak "Can't decrypt an empty private_encrypted attribute"
-      unless defined $self->private_encrypted;
-   my $pw= secret;
-   my $name= $self->path // $self->fingerprint;
-   $pw->append_console_line(\*main::STDIN, prompt => "Private key $name is encrypted.\nEnter password: ")
-      or croak "Canceled password prompt";
-   $pw->length
-      or croak "Empty password";
-   $self->decrypt_private($pw);
+   return if $_[0]->has_private;
+   croak "No protection_scheme defined for obtaining the private key";
 }
 
 =method generate_key_material
 
-  $skey= Crypt::SecretBuffer->new();
-  my %tumbler;
-  $pkey->generate_key_material(\%tumbler, $skey);
+  $key_material= Crypt::SecretBuffer->new();
+  my (%tumbler1, %tumbler2);
+  $pkey1->generate_key_material(\%tumbler1, $key_material);
+  $pkey2->generate_key_material(\%tumbler2, $key_material);
+  ...
+  $symmetric_key= Crypt::MultiKey::hkdf({ size => 32 }, $key_material);
 
 Generate reproducible cryptographic bytes using the public half of this key and append them to
 a SecretBuffer.  The parameters needed to reproduce those bytes are stored into a "tumbler".
@@ -703,8 +734,11 @@ keys to recreate.
 
 =method recreate_key_material
 
-  $skey= Crypt::SecretBuffer->new();
-  $key->recreate_key_material(\%tumbler, $skey);
+  $key_material= Crypt::SecretBuffer->new();
+  $pkey1->recreate_key_material(\%tumbler1, $key_material);
+  $pkey2->recreate_key_material(\%tumbler2, $key_material);
+  ...
+  $symmetric_key= Crypt::MultiKey::hkdf({ size => 32 }, $key_material);
 
 Reproduce the cryptographic bytes that were previously generated by L</generate_key_material>
 using the private half of this key and the information in C<%tumbler>.
