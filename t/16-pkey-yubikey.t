@@ -37,7 +37,7 @@ is(
 
 sub round_trip {
    my ($selector, $expect_serial, $expect_slot)= @_;
-   my $key= Crypt::MultiKey::PKey->generate('x25519')->mechanism('YKChalResp');
+   my $key= Crypt::MultiKey::PKey->generate('x25519')->protection_scheme('YKChalResp');
 
    defined $selector? $key->encrypt_private($selector) : $key->encrypt_private;
    is($key->yubikey_serial, $expect_serial, 'selected expected yubikey serial');
@@ -64,14 +64,14 @@ round_trip(undef, '00000000', 1);
 round_trip('10000001', '10000001', 2);
 round_trip('20000002', '20000002', 1);
 
-my $missing= Crypt::MultiKey::PKey->generate('x25519')->mechanism('YKChalResp');
+my $missing= Crypt::MultiKey::PKey->generate('x25519')->protection_scheme('YKChalResp');
 like(
    dies { $missing->encrypt_private('99999999') },
    qr/Required YubiKey.*?not connected/,
    'dies for unknown yubikey serial selector',
 );
 
-my $unset= Crypt::MultiKey::PKey->generate('x25519')->mechanism('YKChalResp');
+my $unset= Crypt::MultiKey::PKey->generate('x25519')->protection_scheme('YKChalResp');
 $unset->clear_private;
 $unset->private_encrypted('AAAA');
 like(
@@ -80,7 +80,7 @@ like(
    'obtain_private requires yubikey_serial',
 );
 
-my $without_serial= Crypt::MultiKey::PKey->generate('x25519')->mechanism('YKChalResp');
+my $without_serial= Crypt::MultiKey::PKey->generate('x25519')->protection_scheme('YKChalResp');
 ok(!$without_serial->can_obtain_private, 'can_obtain_private is false when yubikey_serial is unset');
 
 done_testing;

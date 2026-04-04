@@ -32,7 +32,9 @@ ECDSA signing adds random salt to each signature, making it unusable as a passwo
 
 =cut
 
-sub mechanism { 'SSHAgentSignature' }
+sub protection_scheme {
+   @_ > 1? $_[0]->_set_protection_scheme($_[1]) : 'SSHAgentSignature';
+}
 
 =attribute agent
 

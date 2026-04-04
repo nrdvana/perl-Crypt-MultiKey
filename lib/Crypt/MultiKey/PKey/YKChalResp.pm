@@ -40,7 +40,9 @@ devices.
 
 =cut
 
-sub mechanism { 'YKChalResp' }
+sub protection_scheme {
+   @_ > 1? $_[0]->_set_protection_scheme($_[1]) : 'YKChalResp';
+}
 
 =attribute yubikey_serial
 

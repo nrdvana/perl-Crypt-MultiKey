@@ -35,7 +35,7 @@ use Crypt::MultiKey::PKey::SSHAgentSignature;
 sub round_trip {
    my ($selector, $expect_pubkey)= @_;
 
-   my $key= Crypt::MultiKey::PKey->generate('x25519')->mechanism('SSHAgentSignature');
+   my $key= Crypt::MultiKey::PKey->generate('x25519')->protection_scheme('SSHAgentSignature');
    $key->{agent}= TestAgent->new;
 
    defined $selector? $key->encrypt_private($selector) : $key->encrypt_private;
@@ -62,11 +62,11 @@ round_trip(undef, 'AAA_KEY_1');
 round_trip('AAA_KEY_2', 'AAA_KEY_2');
 round_trip(qr/deploy/, 'AAA_KEY_2');
 
-my $missing= Crypt::MultiKey::PKey->generate('x25519')->mechanism('SSHAgentSignature');
+my $missing= Crypt::MultiKey::PKey->generate('x25519')->protection_scheme('SSHAgentSignature');
 $missing->{agent}= TestAgent->new;
 like(dies { $missing->encrypt_private('NO_SUCH_KEY') }, qr/No SSH agent key matched selector/, 'dies for unknown selector');
 
-my $ambiguous= Crypt::MultiKey::PKey->generate('x25519')->mechanism('SSHAgentSignature');
+my $ambiguous= Crypt::MultiKey::PKey->generate('x25519')->protection_scheme('SSHAgentSignature');
 $ambiguous->{agent}= bless {}, 'TestAgentDup';
 {
    package TestAgentDup;
