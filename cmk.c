@@ -1476,7 +1476,7 @@ void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret,
    if (aes_key->len != (size_t) need_key_len)
       croak("Wrong key length for cipher (%d, need %d)", (int)aes_key->len, need_key_len);
 
-   /* branch for stream ciphers */
+   /* branch for stream-based encryption */
    if (cipher == EVP_aes_256_gcm()) {
       U8 *ciphertext_pos, *ciphertext_lim, *nonce, *gcm_tag;
       const U8 *secret_pos, *secret_lim;
@@ -1582,22 +1582,19 @@ void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret,
          GOTO_CLEANUP_CROAK("failed to write output hash keys");
       sv= NULL; /* owned by hash now */
    }
-   else { /* branch for block ciphers */
-      /* Need more work on API for specifying blocks and maybe streaming them to a file */
-      croak("unimplemented");
-#if 0
+   else { /* branch for block-based encryption */
       size_t block_size = 512;  /* default to 512-byte sectors for dm-crypt compatibility */
-      size_t num_blocks, pad_blocks= 0, block, offset;
-      secret_buffer *block_buffer_sb= NULL;
-      U8 block_buffer_st[4096];
+      uint64_t block_idx = 0;
+      size_t num_blocks, block, offset;
+      U8 *ciphertext;
 
       if (aes_key->len != CMK_AES_256_XTS_KEY_LEN)
          GOTO_CLEANUP_CROAK("Wrong key length for cipher");
 
       /* Get XTS block size if specified */
-      el= hv_fetchs(params, "block_size", 0);
-      if (el && *el && SvOK(*el)) {
-         IV block_size_iv = SvIV(*el);
+      svp= hv_fetchs(params, "block_size", 0);
+      if (svp && *svp && SvOK(*svp)) {
+         IV block_size_iv = SvIV(*svp);
          if (block_size_iv < 16 || block_size_iv > 1024*1024
             || round_up_to_pow2((size_t)block_size_iv) != (size_t)block_size_iv)
             GOTO_CLEANUP_CROAK("block_size must be a power of 2 between 16 and 1MiB");
@@ -1608,10 +1605,17 @@ void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret,
             GOTO_CLEANUP_CROAK("hv_store");
          sv= NULL;
       }
-      num_blocks= (secret_len + block_size - 1) / block_size;
-      if (pad_to_length > block_size) {
-         size_t mult= pad_to_length / block_size; /* powers of 2, will be an integer >= 2 */
-         num_blocks= (num_blocks + mult - 1) & ~(mult-1);
+      num_blocks= secret_len / block_size;
+      if (num_blocks * block_size != secret_len)
+         GOTO_CLEANUP_CROAK("secret must be an even multiple of block_size");
+
+      /* get block index */
+      svp= hv_fetchs(params, "block_idx", 0);
+      if (svp && *svp && SvOK(*svp)) {
+         IV block_idx_iv = SvIV(*svp);
+         if (block_idx_iv < 0)
+            GOTO_CLEANUP_CROAK("block_idx must be non-negative");
+         block_idx = (uint64_t)block_idx_iv;
       }
 
       if (!(aes_ctx = EVP_CIPHER_CTX_new()))
@@ -1622,37 +1626,13 @@ void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret,
       offset= 0;
       for (block = 0; block < num_blocks; offset += block_size, block++) {
          /* XTS uses the block number as the 'tweak' value */
-         uint64_t tweak[2]= { htole64(block), 0 };
-         U8 *block_buffer;
+         uint64_t tweak[2]= { htole64(block_idx + block), 0 };
 
          if (EVP_EncryptInit_ex(aes_ctx, cipher, NULL, aes_key->data, (U8*)tweak) != 1)
             GOTO_CLEANUP_CROAK("AES-XTS init failed");
 
-         if (offset + block_size <= secret_len) {
-            block_buffer= secret + offset;
-         }
-         else {
-            /* either use stack buffer or allocate one via secret_buffer */
-            if (block_size <= sizeof(block_buffer_st))
-               block_buffer= block_buffer_st;
-            else {
-               if (!block_buffer_sb) {
-                  block_buffer_sb= secret_buffer_new(0, NULL);
-                  secret_buffer_set_len(block_buffer_sb, block_size);
-               }
-               block_buffer= block_buffer_sb->data;
-            }
-            /* Final partial block of secret */
-            if (offset < secret_len) {
-               size_t tail= secret_len - offset;
-               memcpy(block_buffer, secret + offset, tail);
-               memset(block_buffer + tail, 0, block_size - tail);
-            } else {
-               memset(block_buffer, 0, block_size);
-            }
-         }
          if (EVP_EncryptUpdate(aes_ctx, ciphertext + offset, &outlen, 
-                               block_buffer, (int)block_size) != 1
+                               secret + offset, (int)block_size) != 1
             || (size_t)outlen != block_size)
             GOTO_CLEANUP_CROAK("AES-XTS encrypt failed");
 
@@ -1664,7 +1644,6 @@ void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret,
       if (!hv_stores(params, "ciphertext", sv))
          GOTO_CLEANUP_CROAK("failed to write output hash keys");
       sv= NULL; /* owned by hash now */
-#endif
    }
 cleanup:
    if (sv) SvREFCNT_dec(sv);
@@ -1679,8 +1658,9 @@ void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *se
    const char *err= NULL;
    const EVP_CIPHER *cipher= NULL;
    EVP_CIPHER_CTX *aes_ctx = NULL;
-   U8 *buf;
+   int outlen, final_len;
    STRLEN len;
+   U8 *buf;
    SV **svp;
 
    ERR_clear_error();
@@ -1707,7 +1687,6 @@ void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *se
    if (cipher == EVP_aes_256_gcm()) {
       U8 *ciphertext_pos, *ciphertext_lim, *nonce, *gcm_tag, *secret_pos, *secret_lim;
       size_t ciphertext_len, secret_len;
-      int outlen, final_len;
 
       svp= hv_fetchs(params, "ciphertext", 0);
       if (!svp || !*svp || !SvOK(*svp))
@@ -1811,52 +1790,60 @@ void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *se
          || final_len != 0)
          GOTO_CLEANUP_CROAK("AES-GCM decrypt failed, gcm_tag mismatch");
    }
-   /* branch for block ciphers */
-   else {
-      /* TODO: this needs more thought about API for specifying which blocks to encrypt
-       * and maybe streaming them to a file.
-       */
-      croak("unimplemented");
-#if 0
+   else { /* branch for block ciphers */
       size_t block_size = 512;  /* default to 512-byte sectors for dm-crypt compatibility */
+      uint64_t block_idx= 0;
       size_t num_blocks, block, offset;
-      IV block_size_iv;
+      const U8 *ciphertext;
 
-      /* Get XTS block size if specified */
-      svp= hv_fetchs(params, "aes_xts_block_size", 0);
-      if (!(svp && *svp && SvOK(*svp)))
-         GOTO_CLEANUP_CROAK("Missing attribute aes_xts_block_size");
-      block_size_iv = SvIV(*svp);
-      if (block_size_iv < 16 || block_size_iv > 1048576)  /* sanity check: 16 bytes to 1MB */
-         GOTO_CLEANUP_CROAK("aes_xts_block_size must be between 16 and 1048576");
-      block_size = (size_t)block_size_iv;
-      num_blocks = (ciphertext_len + block_size - 1) / block_size;
+      svp= hv_fetchs(params, "ciphertext", 0);
+      if (!svp || !*svp || !SvOK(*svp))
+         croak("Missing 'ciphertext'");
+      ciphertext= (U8*) secret_buffer_SvPVbyte(*svp, &len);
+
+      /* Get XTS block size if not default of 512 */
+      svp= hv_fetchs(params, "block_size", 0);
+      if (svp && *svp && SvOK(*svp)) {
+         IV block_size_iv = SvIV(*svp);
+         if (block_size_iv < 16 || block_size_iv > 1024*1024
+            || round_up_to_pow2((size_t)block_size_iv) != (size_t)block_size_iv)
+            GOTO_CLEANUP_CROAK("block_size must be a power of 2 between 16 and 1MiB");
+         block_size = (size_t)block_size_iv;
+      }
+
+      num_blocks= len / block_size;
+      if (num_blocks * block_size != len)
+         GOTO_CLEANUP_CROAK("ciphertext must be an even multiple of block_size");
+      secret_buffer_set_len(secret_out, len);
+
+      /* get block index */
+      svp= hv_fetchs(params, "block_idx", 0);
+      if (svp && *svp && SvOK(*svp)) {
+         IV block_idx_iv = SvIV(*svp);
+         if (block_idx_iv < 0)
+            GOTO_CLEANUP_CROAK("block_idx must be non-negative");
+         block_idx = (uint64_t)block_idx_iv;
+      }
 
       if (!(aes_ctx = EVP_CIPHER_CTX_new()))
          GOTO_CLEANUP_CROAK("AES-XTS context creation failed");
 
-      secret_buffer_set_len(secret_out, ciphertext_len);
       offset= 0;
       for (block = 0; block < num_blocks; offset += block_size, block++) {
-         U8 tweak[16] = {0};
-         size_t block_len = (offset + block_size <= ciphertext_len)
-                           ? block_size
-                           : (ciphertext_len - offset);
-         
-         *(uint64_t*)tweak = (uint64_t)block;  /* tweak = block number */
-         
-         if (EVP_DecryptInit_ex(aes_ctx, cipher, NULL, aes_key->data, tweak) != 1)
+         /* XTS uses the block number as the 'tweak' value */
+         uint64_t tweak[2]= { htole64(block_idx + block), 0 };
+
+         if (EVP_DecryptInit_ex(aes_ctx, cipher, NULL, aes_key->data, (U8*)tweak) != 1)
             GOTO_CLEANUP_CROAK("AES-XTS decrypt init failed");
 
          if (EVP_DecryptUpdate(aes_ctx, secret_out->data + offset, &outlen,
-                               ciphertext + offset, (int)block_len) != 1
-            || (size_t)outlen != block_len)
+                               ciphertext + offset, (int)block_size) != 1
+            || (size_t)outlen != block_size)
             GOTO_CLEANUP_CROAK("AES-XTS decrypt failed");
 
          if (EVP_DecryptFinal_ex(aes_ctx, NULL, &final_len) != 1)
             GOTO_CLEANUP_CROAK("AES-XTS decrypt final failed");
       }
-#endif
    }
 cleanup:
    if (aes_ctx) EVP_CIPHER_CTX_free(aes_ctx);
