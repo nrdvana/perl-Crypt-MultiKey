@@ -197,7 +197,7 @@ sub compile_and_run {
    $self->{last_exec_output}= '';
    $self->{last_compile_output}= '';
    for (qw( include_dirs extra_compiler_flags extra_linker_flags )) {
-      unshift @{ $opts{$_} ||= [] }, @{ $self->$_ };
+      $opts{$_}= [ @{ $self->$_ }, @{ $opts{$_} || [] } ];
    }
 
    my $srcfile= "ftest-$$-" . ++$self->{seq} . ".c";
