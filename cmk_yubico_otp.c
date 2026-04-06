@@ -1,22 +1,8 @@
-#ifndef HAVE_LINUX_HIDRAW
-
-/* Currently this implementation only supports Linux.  Any other platform has to fall back to
-   the ykinfo and ykchalresp external commands */
-
-bool cmk_yubico_otp_available() {
-   return false;
-}
-HV *cmk_yubico_otp_ykinfo(int fd) {
-   return NULL;
-}
-int cmk_yubico_otp_ykchalresp(int fd, int slot, int timeout_ms, SV *chal, secret_buffer *resp) {
-   return -1;
-}
-
-#else
-
-#include <linux/hiddev.h>
-#include <sys/ioctl.h>
+#include "EXTERN.h"
+#include "perl.h"
+#include "XSUB.h"
+#include "ppport.h"
+#include "cmk.h"
 
 #ifndef HID_MAX_DESCRIPTOR_SIZE
 #define HID_MAX_DESCRIPTOR_SIZE 4096
@@ -26,11 +12,11 @@ int cmk_yubico_otp_ykchalresp(int fd, int slot, int timeout_ms, SV *chal, secret
 
 /* Parsed YubiKey OTP status, matching the fields reported by `ykinfo -a` */
 struct yk_status {
-    uint8_t  version_major;
-    uint8_t  version_minor;
-    uint8_t  version_build;
-    uint8_t  pgm_seq;
-    uint16_t touch_level;
+   uint8_t  version_major;
+   uint8_t  version_minor;
+   uint8_t  version_build;
+   uint8_t  pgm_seq;
+   uint16_t touch_level;
 };
 /* Bits in the low byte of touchLevel */
 #define CONFIG1_VALID    0x01   /* slot 1 is programmed (fw >= 2.1) */
@@ -604,6 +590,3 @@ static int read_response_from_key(
    errno = EMSGSIZE;
    return -1;
 }
-
-#endif
-

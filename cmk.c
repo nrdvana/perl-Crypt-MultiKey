@@ -3,8 +3,7 @@
 #include "XSUB.h"
 #define NEED_mg_findext
 #include "ppport.h"
-
-#include "CryptMultiKey_config.h"
+#include "cmk.h"
 
 #include <openssl/evp.h>
 #include <openssl/pem.h>
@@ -30,20 +29,6 @@
 #include <string.h>
 #include <stdlib.h>
 #include <ctype.h>
-
-#ifndef HAVE_BOOL
-   #define bool int
-   #define true 1
-   #define false 0
-#endif
-#ifndef HAVE_ENDIAN_H
-   #include "cmk_compat_endian.h"
-#endif
-
-#include "cmk.h"
-
-#define STRINGIFY_MACRO(x) #x
-#define GOTO_CLEANUP_CROAK(msg) do { err= msg; goto cleanup; } while(0)
 
 #define CMK_AES_256_XTS_KEY_LEN 64
 #define CMK_AES_256_GCM_KEY_LEN 32
@@ -123,8 +108,6 @@ static size_t round_up_to_pow2(size_t n) {
    n |= n >> 32;
    return n+1;
 }
-
-#include "cmk_yubico_otp.c"
 
 /* Generate a version 4 (random) UUID into the provided SV.
  * UUID v4 format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx

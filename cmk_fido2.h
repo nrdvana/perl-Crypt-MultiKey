@@ -1,4 +1,5 @@
-#include "cmk.h"
+#ifndef CMK_FIDO2_H
+#define CMK_FIDO2_H
 
 /* Wrap a fido_dev_t with a blessed Crypt::MultiKey::FIDO2::Device object, which will then
  * own and control the lifespan of the fido_dev_t.  The info may be provided to populate
@@ -39,3 +40,4 @@ extern int cmk_fido2_assert_hmac_secret(SV *dev_objref, const char *pin,
    const char *rp_domain, AV *credentials, const U8 *salt, size_t salt_len,
    secret_buffer *out);
 
+#endif

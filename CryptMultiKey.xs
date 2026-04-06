@@ -2,27 +2,10 @@
 #include "perl.h"
 #include "XSUB.h"
 #include "ppport.h"
-
-#include "CryptMultiKey_config.h"
-
-#ifndef HAVE_BOOL
-   #define bool int
-   #define true 1
-   #define false 0
-#endif
+#include "cmk.h"
 
 #include <openssl/evp.h>
 #include <openssl/rand.h>
-#include "cmk.h"
-
-#ifdef HAVE_LIBFIDO2
-  #include "cmk_fido2.h"
-#endif
-
-
-/**********************************************************************************************\
-* XS Utils
-\**********************************************************************************************/
 
 /* For exported constant dualvars */
 #define EXPORT_ENUM(x) newCONSTSUB(stash, #x, new_enum_dualvar(aTHX_ x, newSVpvs_share(#x)))
@@ -33,8 +16,6 @@ static SV * new_enum_dualvar(pTHX_ IV ival, SV *name) {
    SvREADONLY_on(name);
    return name;
 }
-
-extern MAGIC* cmk_get_X_magic(pTHX_ SV *obj, int flags, const MGVTBL *mg_vtbl, const char *mg_desc);
 
 /* Aliases for typemap, to give useful errors when key state is wrong */
 typedef cmk_pkey cmk_pubkey, cmk_privkey, maybe_cmk_pkey, auto_cmk_pkey;
@@ -52,41 +33,6 @@ _openssl_version_components()
       XPUSHs(sv_2mortal(newSViv(major)));
       XPUSHs(sv_2mortal(newSViv(minor)));
       XPUSHs(sv_2mortal(newSViv(patch)));
-
-bool
-_have_yubico_otp()
-   CODE:
-      RETVAL= cmk_yubico_otp_available();
-   OUTPUT:
-      RETVAL
-
-void
-_yubico_otp_ykinfo(fd)
-   int fd
-   INIT:
-      HV *ret;
-   PPCODE:
-      if ((ret= cmk_yubico_otp_ykinfo(fd)))
-         XPUSHs(newRV_noinc((SV*)ret));
-      else
-         XSRETURN_UNDEF;
-
-void
-_yubico_otp_ykchalresp(fd, slot, timeout, challenge)
-   int fd
-   int slot
-   NV timeout
-   SV *challenge
-   INIT:
-      SV *secret_buffer_ref= NULL;
-      secret_buffer *response= secret_buffer_new(0, &secret_buffer_ref);
-   PPCODE:
-      switch(cmk_yubico_otp_ykchalresp(fd, slot, (int)(timeout*1000), challenge, response)) {
-      case  0: ST(0)= secret_buffer_ref; XSRETURN(1); break;
-      case -1: XSRETURN(0); break;
-      case -2: XSRETURN_UNDEF; break;
-      default: croak("BUG");
-      }
 
 void
 _generate_uuid_v4()
@@ -149,164 +95,8 @@ symmetric_decrypt(params, aes_key, secret_out=NULL)
       cmk_symmetric_decrypt(params, aes_key, secret_out);
       XSRETURN(1); /* return buffer of secret */
 
-#ifdef HAVE_LIBFIDO2
-INCLUDE: lib/Crypt/MultiKey/FIDO2.xs
-INCLUDE: lib/Crypt/MultiKey/FIDO2/Device.xs
-#endif
-      
-MODULE = Crypt::MultiKey                PACKAGE = Crypt::MultiKey::PKey
-
-void
-algorithm(pkey)
-   maybe_cmk_pkey *pkey
-   PPCODE:
-      ST(0)= sv_newmortal();
-      if (pkey && *pkey)
-         cmk_pkey_get_algorithm_name(pkey, ST(0));
-      XSRETURN(1);
-
-void
-_keygen(pkey, type)
-   auto_cmk_pkey *pkey
-   const char *type
-   PPCODE:
-      cmk_pkey_keygen(pkey, type);
-
-bool
-has_public(pkey)
-   maybe_cmk_pkey *pkey
-   CODE:
-      RETVAL= pkey && cmk_pkey_has_public(pkey);
-   OUTPUT:
-      RETVAL
-
-bool
-has_private(pkey)
-   maybe_cmk_pkey *pkey
-   CODE:
-      RETVAL= pkey && cmk_pkey_has_private(pkey);
-   OUTPUT:
-      RETVAL
-
-void
-_clear_key(pkey)
-   maybe_cmk_pkey *pkey
-   PPCODE:
-      if (pkey && *pkey) {
-         EVP_PKEY_free(*pkey);
-         *pkey= NULL;
-      }
-
-void
-_import_spki(pkey, buffer)
-   auto_cmk_pkey *pkey
-   SV *buffer
-   INIT:
-      STRLEN len;
-      const U8 *buf= (const U8*) secret_buffer_SvPVbyte(buffer, &len);
-   PPCODE:
-      cmk_pkey_import_spki(pkey, buf, len);
-
-void
-_export_spki(pkey, buf)
-   cmk_pubkey *pkey
-   SV *buf
-   PPCODE:
-      cmk_pkey_export_spki(pkey, buf);
-
-void
-_import_pkcs8(pkey, buffer, pass_sv=&PL_sv_undef)
-   auto_cmk_pkey *pkey
-   SV *buffer
-   SV *pass_sv
-   INIT:
-      STRLEN len, pass_len= 0;
-      const U8 *buf= (const U8*) secret_buffer_SvPVbyte(buffer, &len);
-      const char *pass= SvOK(pass_sv)? secret_buffer_SvPVbyte(pass_sv, &pass_len) : NULL;
-   PPCODE:
-      cmk_pkey_import_pkcs8(pkey, buf, len, pass, pass_len);
-
-void
-_import_openssh_privkey(pkey, buffer, pass_sv=&PL_sv_undef)
-   auto_cmk_pkey *pkey
-   SV *buffer
-   SV *pass_sv
-   INIT:
-      STRLEN len, pass_len= 0;
-      const U8 *buf= (const U8*) secret_buffer_SvPVbyte(buffer, &len);
-      const char *pass= SvOK(pass_sv)? secret_buffer_SvPVbyte(pass_sv, &pass_len) : NULL;
-   PPCODE:
-      cmk_pkey_import_openssh_privkey(pkey, buf, len, pass, pass_len);
-
-void
-_import_openssh_pubkey(pkey, buffer)
-   auto_cmk_pkey *pkey
-   SV *buffer
-   INIT:
-      STRLEN len;
-      const U8 *buf= (const U8*) secret_buffer_SvPVbyte(buffer, &len);
-   PPCODE:
-      cmk_pkey_import_openssh_pubkey(pkey, buf, len);
-
-void
-_export_pkcs8(pkey, buf, pass_sv=&PL_sv_undef, kdf_iter=100000)
-   cmk_privkey *pkey
-   SV *buf
-   SV *pass_sv
-   int kdf_iter
-   INIT:
-      STRLEN pass_len= 0;
-      const char *pass= SvOK(pass_sv)? secret_buffer_SvPVbyte(pass_sv, &pass_len) : NULL;
-      if (SvOK(pass_sv) && !pass_len)
-         croak("Empty password supplied; pass undef to skip encryption");
-   PPCODE:
-      cmk_pkey_export_pkcs8(pkey, pass, pass_len, kdf_iter, buf);
-
-void
-generate_key_material(pkey, tumbler, skey_buf)
-   cmk_pubkey *pkey
-   HV *tumbler
-   secret_buffer *skey_buf
-   PPCODE:
-      cmk_pkey_generate_key_material(pkey, tumbler, skey_buf);
-
-void
-recreate_key_material(pkey, tumbler, skey_buf)
-   cmk_pubkey *pkey
-   HV *tumbler
-   secret_buffer *skey_buf
-   PPCODE:
-      cmk_pkey_recreate_key_material(pkey, tumbler, skey_buf);
-
-void
-encrypt(pkey, secret_sv)
-   cmk_pubkey *pkey
-   SV *secret_sv
-   INIT:
-      STRLEN secret_len= 0;
-      const U8 *secret= (const U8*) secret_buffer_SvPVbyte(secret_sv, &secret_len);
-      secret_buffer *skey_buf= secret_buffer_new(0, NULL);
-      HV *enc= newHV();
-      SV *enc_ref= sv_2mortal(newRV_noinc((SV*) enc)); /* ensure HV gets cleaned up on error */
-   PPCODE:
-      cmk_pkey_generate_key_material(pkey, enc, skey_buf);
-      cmk_symmetric_encrypt(enc, cmk_hkdf(enc, skey_buf), secret, secret_len);
-      PUSHs(enc_ref);
-
-void
-decrypt(pkey, enc)
-   cmk_pubkey *pkey
-   HV *enc
-   INIT:
-      SV *secret_ref= NULL;
-      secret_buffer *secret= secret_buffer_new(0, &secret_ref);
-      secret_buffer *skey_buf= secret_buffer_new(0, NULL);
-   PPCODE:
-      cmk_pkey_recreate_key_material(pkey, enc, skey_buf);
-      cmk_symmetric_decrypt(enc, cmk_hkdf(enc, skey_buf), secret);
-      PUSHs(secret_ref);
-
-MODULE = Crypt::MultiKey               PACKAGE = Crypt::MultiKey::Coffer
+INCLUDE: lib/Crypt/MultiKey/PKey.xs
+INCLUDE: conditional.xs
 
 BOOT:
    HV *stash= gv_stashpvs("Crypt::MultiKey", 1);

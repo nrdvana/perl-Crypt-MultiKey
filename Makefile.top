@@ -21,20 +21,30 @@ BEGIN {
    }
 }
 
+use IO::Handle;
 require ExtUtils::Depends;
 require ExtUtils::CFeatureTest;
 
 my $dep= ExtUtils::Depends->new('Crypt::MultiKey', 'Crypt::SecretBuffer');
 my $test= ExtUtils::CFeatureTest->new;
+open my $cond_xs, ">conditional.xs" or die "open(conditional.xs): $!";
 
 $test->header('stdbool.h');
-$test->feature(HAVE_BOOL => 'bool x= true; return x == false;');
+unless ($test->feature(HAVE_BOOL => 'bool x= true; return x == false;')) {
+   $test->append_to_config_header(
+      '#define bool int',
+      '#define true 1',
+      '#define false 0',
+   );
+}
 
 $test->header('stdint.h');
-$test->feature(HAVE_ENDIAN_H
+unless ($test->feature(HAVE_ENDIAN_H
    => 'uint32_t le= htole32(0x12345678); return le > 0? 0 : 1;',
    { h => 'endian.h' }
-);
+)) {
+   $test->append_to_config_header('#include "cmk_compat_endian.h"');
+}
 
 $test->require_feature(HAVE_LIBSSL
    => 'unsigned char buf[1]; return RAND_bytes(buf, 1) == 1? 0 : 1;',
@@ -49,13 +59,18 @@ if ($test->feature(HAVE_LIBFIDO2
       { h => [ 'fido.h', 'fido/es256.h' ], -l => [ 'fido2', 'cbor' ] }
 )) {
    $dep->add_c("cmk_fido2.c");
+   $cond_xs->print("INCLUDE: lib/Crypt/MultiKey/FIDO2.xs\n");
+   $cond_xs->print("INCLUDE: lib/Crypt/MultiKey/FIDO2/Device.xs\n");
 }
 
-$test->feature(HAVE_LINUX_HIDRAW
+if ($test->feature(HAVE_LINUX_HIDRAW
    # don't actually want ioctl to succeed, just ensure it compiled and linked
    => 'struct hidraw_devinfo info; ioctl(0, HIDIOCGRAWINFO, &info); return 0;',
    { h => [ 'linux/hidraw.h', 'sys/ioctl.h' ] }
-);
+)) {
+   $dep->add_c("cmk_yubico_otp.c");
+   $cond_xs->print("INCLUDE: lib/Crypt/MultiKey/YubicoOTP.xs\n");
+}
 
 $test->feature(HAVE_EVP_PKEY_ENCAPSULATE
    => 'EVP_PKEY_CTX *ctx = 0; EVP_PKEY_encapsulate_init(ctx, 0); EVP_PKEY_decapsulate_init(ctx, 0); return 0;',
@@ -74,10 +89,11 @@ $test->feature(HAVE_MLKEM_KEYGEN
    { h => [ 'openssl/evp.h', 'openssl/params.h', 'openssl/core_names.h' ] }
 );
 
+$cond_xs->close;
 $test->write_config_header('CryptMultiKey_config.h');
 $test->export_deps($dep);
 
-$dep->install('cmk.h');
+$dep->install('CryptMultiKey.h');
 $dep->add_c('cmk.c');
 $dep->add_xs('CryptMultiKey.xs');
 $dep->add_pm(map { my $n= $_; $n =~ s/^lib/\$(INST_LIB)/; $_ => $n } <lib/*/*.pm>, <lib/*/*/*.pm>, <lib/*/*/*/*.pm>);

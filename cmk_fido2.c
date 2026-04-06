@@ -1,16 +1,9 @@
 #include "EXTERN.h"
 #include "perl.h"
 #include "XSUB.h"
-#define NEED_mg_findext
 #include "ppport.h"
-
-#include "CryptMultiKey_config.h"
+#include "cmk.h"
 #include <openssl/x509.h>
-#include "cmk_fido2.h"
-
-#define GOTO_CLEANUP_CROAK(msg) do { err= msg; goto cleanup; } while(0)
-
-extern MAGIC* cmk_get_X_magic(pTHX_ SV *obj, int flags, const MGVTBL *mg_vtbl, const char *mg_desc);
 
 static SV *new_fido2_err_dualvar(int err_code);
 static bool cmk_es256_spki_from_fido_cred(const fido_cred_t *cred, U8 **der_out, int *der_len_out);

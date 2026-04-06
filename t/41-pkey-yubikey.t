@@ -17,7 +17,7 @@ for (qw( ykinfo ykchalresp )) {
 }
 
 is(
-   Crypt::MultiKey::PKey::YKChalResp->_enumerate_devices,
+   [ Crypt::MultiKey::YubicoOTP::list_devices() ],
    [
       { serial => '00000000', version => '5.4.3', touch_level => '775',
         programming_sequence => 3, slot1_status => 1, slot2_status => 1,
