@@ -54,7 +54,7 @@ replace the entire file.
 
 =cut
 
-use strict;
+use v5.10;
 use warnings;
 use version;
 use Carp;

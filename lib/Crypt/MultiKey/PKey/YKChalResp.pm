@@ -1,8 +1,8 @@
 package Crypt::MultiKey::PKey::YKChalResp;
 # VERSION
-# ABSTRACT: use YubKey challenge/response to unlock a private key
+# ABSTRACT: Use a YubiKey OTP challenge/response to encrypt/decrypt the private key
 
-use strict;
+use v5.10;
 use warnings;
 use Carp;
 use Symbol ();

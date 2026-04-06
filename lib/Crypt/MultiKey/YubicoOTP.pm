@@ -39,7 +39,7 @@ Return a list of L<Crypt::MultiKey::YubicoOTP::Device> objects for each availabl
 
 =cut
 
-use strict;
+use v5.10;
 use warnings;
 use Time::HiRes qw( time sleep );
 use Carp qw( carp croak );

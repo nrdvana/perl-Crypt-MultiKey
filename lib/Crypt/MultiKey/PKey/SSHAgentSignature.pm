@@ -1,8 +1,8 @@
 package Crypt::MultiKey::PKey::SSHAgentSignature;
 # VERSION
-# ABSTRACT: use signature from ssh-agent to unlock a private key
+# ABSTRACT: Use signature from ssh-agent as a password to encrypt/decrypt the private key
 
-use strict;
+use v5.10;
 use warnings;
 use Carp;
 use Digest::SHA qw( sha256_base64 );

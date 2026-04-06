@@ -2,10 +2,18 @@ package Crypt::MultiKey::PKey::Password;
 # VERSION
 # ABSTRACT: Default PKey protection scheme - encrypt private half with a password
 
-use strict;
+use v5.10;
 use warnings;
 use Carp;
 use parent 'Crypt::MultiKey::PKey';
+
+=head1 DESCRIPTION
+
+This is the default PKey protection scheme that you get when you call C<encrypt_private> on a
+previously unprotected PKey object.  In order to interactively read the password, it expects
+STDIN to be a terminal.  You can bypass this requirement using  C<decrypt_private> directly.
+
+=cut
 
 sub protection_scheme {
    @_ > 1? $_[0]->_set_protection_scheme($_[1]) : 'Password';

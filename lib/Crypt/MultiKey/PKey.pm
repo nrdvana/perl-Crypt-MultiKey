@@ -2,7 +2,7 @@ package Crypt::MultiKey::PKey;
 # VERSION
 # ABSTRACT: Object representing a Public/Private key pair (OpenSSL EVP_PKEY)
 
-use strict;
+use v5.10;
 use warnings;
 use Carp;
 use mro 'c3';

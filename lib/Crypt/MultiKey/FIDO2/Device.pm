@@ -22,6 +22,9 @@ L<Crype::MultiKey::PKey::FIDO2> implementation.
 
 sub new {
    my ($class, $path)= @_;
+   croak "libfido2 support not available; install libfido2 and then reinstall Crypt::MultiKey"
+      unless Crypt::MultiKey::FIDO2::available();
+
    my $self= bless {}, $class;
    $self->open($path) or croak "open($path): ".$self->fido_err;
    return $self;

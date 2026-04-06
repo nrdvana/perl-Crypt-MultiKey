@@ -1,9 +1,7 @@
-use strict;
-use warnings;
-use Test2::V0;
+use FindBin;
+use lib "$FindBin::Bin/lib";
+use Test2AndUtils;
 use Crypt::SecretBuffer qw( secret );
-
-use lib 'lib';
 use Crypt::MultiKey::SSHAgentClient;
 
 {

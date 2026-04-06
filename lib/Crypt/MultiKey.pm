@@ -48,7 +48,7 @@ package Crypt::MultiKey;
 
 This module collection is an implementation of a "key wrapping scheme" (such as done by
 L<age(1)> or libsodium) packaged as an object resembling a password safe
-(L<Coffer|Crypt::MultiKey::Coffer>) and also as an object representing an encrypted block device
+(L<Coffer|Crypt::MultiKey::Coffer>) and also as an object representing encrypted block storage
 (L<Vault|Crypt::MultiKey::Vault>, similar to Linux LUKS) and comes with a handy
 L<PKey|Crypt::MultiKey::PKey> object that can load a variety of existing public/private key
 formats and use a variety of methods to decrypt them, such as
@@ -400,8 +400,8 @@ __END__
 
 "age is a simple, modern and secure file encryption tool, format, and Go library."
 
-This tool can encrypt a secret using one or more public keys, to then be decrypted using any of
-the corresponding private keys.
+This tool can encrypt a secret using one or more public keys such that it can then be decrypted
+using any of the corresponding private keys.
 
 =item L<libsodium|https://github.com/jedisct1/libsodium>
 

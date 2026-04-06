@@ -2,7 +2,7 @@ package Crypt::MultiKey::Coffer;
 our $VERSION= '0.001'; # VERSION
 # ABSTRACT: Encrypted container that can be unlocked with various combinations of keys
 
-use strict;
+use v5.10;
 use warnings;
 use Carp;
 use version;

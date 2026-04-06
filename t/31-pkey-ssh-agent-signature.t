@@ -1,8 +1,6 @@
-use strict;
-use warnings;
-use Test2::V0;
-
-use lib 'lib';
+use FindBin;
+use lib "$FindBin::Bin/lib";
+use Test2AndUtils;
 use Crypt::MultiKey qw( sha256 );
 use Crypt::MultiKey::PKey;
 use Crypt::MultiKey::PKey::SSHAgentSignature;

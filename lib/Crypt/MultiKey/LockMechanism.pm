@@ -1,4 +1,6 @@
 package Crypt::MultiKey::LockMechanism;
+# VERSION
+# ABSTRACT: Implementation of a key-wrapping-scheme used by Coffer and Vault
 
 =head1 DESCRIPTION
 
@@ -26,7 +28,7 @@ This class is only the lock mechanism, and does not handle serialization.
 
 =cut
 
-use strict;
+use v5.10;
 use warnings;
 use Carp;
 use Scalar::Util qw( blessed );

@@ -1,6 +1,6 @@
 package Crypt::MultiKey::PKey::FIDO2;
 # VERSION
-# ABSTRACT: Use FIDO2 hmac-secret as a password to decrypt the private half of the key
+# ABSTRACT: Use FIDO2 hmac-secret as a password to encrypt/decrypt the private key
 
 =head1 DESCRIPTION
 
@@ -93,7 +93,7 @@ credential_id.
 
 =cut
 
-use strict;
+use v5.10;
 use warnings;
 use Carp;
 use Scalar::Util qw( blessed );

@@ -19,7 +19,7 @@ by checking C<< Crypt::MultiKey::FIDO2->can("list_devices") >>.
 
 =head1 FUNCTIONS
 
-=head2 enabled
+=head2 available
 
 Whether libfido2 support was enabled during the installation of Crypt::MultiKey.
 
@@ -44,18 +44,15 @@ If there is only one to choose from, it is returned immediately without waiting 
 
 =cut
 
-use strict;
+use v5.10;
 use warnings;
 use Time::HiRes qw( time sleep );
 use Carp qw( croak );
-
-sub enabled {
-   !!Crypt::MultiKey::FIDO2->can('_list_devices');
-}
+use constant { available => !!__PACKAGE__->can('_list_devices') };
 
 sub list_devices {
-   defined \&Crypt::MultiKey::FIDO2::_list_devices
-      or croak "libfido2 support not enabled; install libfido2 and then reinstall Crypt::MultiKey";
+   croak "libfido2 support not available; install libfido2 and then reinstall Crypt::MultiKey"
+      unless available;
    @{ Crypt::MultiKey::FIDO2::_list_devices() }
 }
 

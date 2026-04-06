@@ -1,4 +1,6 @@
 package Crypt::MultiKey::SSHAgentClient;
+# VERSION
+# ABSTRACT: Interact with the user's SSH Agent
 
 =head1 SYNOPSIS
 
@@ -8,14 +10,14 @@ package Crypt::MultiKey::SSHAgentClient;
 
 =head1 DESCRIPTION
 
-You can ask OpenSSH to sign arbitrary data using `ssh-keygen -Y`, however this feature is an
-option when building OpenSSH and even some modern Linux distros haven't enabled it.  So, this
-module makes a direct socket connection to your SSH agent!  If that fails, it falls back to
-running the 'ssh-add' and 'ssh-keygen' commands.
+You can ask OpenSSH to sign arbitrary data using C<< ssh-keygen -Y >>, however this feature is
+an option when building OpenSSH and even some modern Linux distros haven't enabled it.
+So, this module makes a direct socket connection to your SSH agent!  If that fails, it falls
+back to running the L<ssh-add(1)> and L<ssh-keygen(1)> commands.
 
 =cut
 
-use strict;
+use v5.10;
 use warnings;
 use Carp;
 use Crypt::SecretBuffer qw( secret );
@@ -29,7 +31,7 @@ use IPC::Open3;
 
 Create a new object.  This object connects to the agent on demand, so it creating the object
 might succeed but then throw an exception during C<get_key_list> if it can't connect and the
-'ssh-add' program isn't found or 'ssh-keygen' doesn't support C<-Y>.
+C<ssh-add> program isn't found or C<ssh-keygen> doesn't support C<-Y>.
 
 =cut
 
