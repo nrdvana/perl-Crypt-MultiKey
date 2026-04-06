@@ -51,30 +51,22 @@ sub new {
 
 Path of SSH agent socket.  Defaults to C<< $ENV{SSH_AUTH_SOCK} >>.
 
-=attribute ssh_add_path
+=attribute ssh_add_cmd
 
-Path to binary 'ssh-add'
+Path to C<ssh-add(1)> command, defaulting to C<'ssh-add'> which lets the OS find it.
 
-=attribute ssh_keygen_path
+=attribute ssh_keygen_cmd
 
-Path to binary 'ssh-keygen'
+Path to C<ssh-keygen(1)> command, defaulting to C<'ssh-keygen'> which lets the OS find it.
 
 =cut
 
-sub _set_ssh_auth_sock   { $_[0]{ssh_auth_sock}= $_[1] }
-sub _set_ssh_add_path    { $_[0]{ssh_add_path}= $_[1] }
-sub _set_ssh_keygen_path { $_[0]{ssh_keygen_path}= $_[1] }
+sub _set_ssh_auth_sock  { $_[0]{ssh_auth_sock}= $_[1] }
+sub _set_ssh_add_cmd    { $_[0]{ssh_add_cmd}= $_[1] }
+sub _set_ssh_keygen_cmd { $_[0]{ssh_keygen_cmd}= $_[1] }
 
 sub _build_ssh_auth_sock {
    return $ENV{SSH_AUTH_SOCK};
-}
-
-sub _build_ssh_add_path {
-   return $_[0]->_find_command('ssh-add');
-}
-
-sub _build_ssh_keygen_path {
-   return $_[0]->_find_command('ssh-keygen');
 }
 
 sub ssh_auth_sock {
@@ -82,14 +74,14 @@ sub ssh_auth_sock {
    : ($_[0]{ssh_auth_sock} || shift->_build_ssh_auth_sock)
 }
 
-sub ssh_add_path {
-   @_ > 1? shift->_set_ssh_add_path(@_)
-   : ($_[0]{ssh_add_path} || shift->_build_ssh_add_path)
+sub ssh_add_cmd {
+   @_ > 1? shift->_set_ssh_add_cmd(@_)
+   : ($_[0]{ssh_add_cmd} || $Crypt::MultiKey::command_path{'ssh-add'} || 'ssh-add')
 }
 
-sub ssh_keygen_path {
-   @_ > 1? shift->_set_ssh_keygen_path(@_)
-   : ($_[0]{ssh_keygen_path} || shift->_build_ssh_keygen_path)
+sub ssh_keygen_cmd {
+   @_ > 1? shift->_set_ssh_keygen_cmd(@_)
+   : ($_[0]{ssh_keygen_cmd} || $Crypt::MultiKey::command_path{'ssh-keygen'} || 'ssh-keygen')
 }
 
 =method get_key_list
@@ -184,12 +176,9 @@ sub _sign_via_agent_socket {
 
 sub _get_key_list_via_ssh_add {
    my $self= shift;
-   my $path= $self->ssh_add_path
-      or croak "Unable to locate ssh-add for fallback mode";
-
-   my ($out, $err, $rc)= _run_cmd($path, '-L');
+   my ($wstat, $out, $err, $rc)= _run_cmd($self->ssh_add_cmd, '-L');
    croak "ssh-add -L failed: $err"
-      if $rc;
+      if $wstat;
 
    my @keys;
    while ($out =~ /^(\S+)\s+(\S+)\s*(.*)$/mg) {
@@ -204,35 +193,23 @@ sub _get_key_list_via_ssh_add {
 
 sub _sign_via_ssh_keygen {
    my ($self, $pubkey_base64, $data, $namespace)= @_;
-   my $path= $self->ssh_keygen_path
-      or croak "Unable to locate ssh-keygen for fallback mode";
-
    my $pubkey_type= _pubkey_type_from_base64($pubkey_base64);
-
    my $pubkey_file= File::Temp->new(SUFFIX => '.pub');
-   print $pubkey_file $pubkey_type.' '.$pubkey_base64." cmk\n"
+   $pubkey_file->print($pubkey_type.' '.$pubkey_base64." cmk\n")
       or croak "Failed writing temporary public key file";
    close $pubkey_file or croak "Failed closing temporary public key file";
 
    my $data_file= File::Temp->new();
    binmode $data_file;
-   print $data_file $data
+   $data_file->print($data) && $data_file->close
       or croak "Failed writing temporary signing payload";
-   my $data_path= $data_file->filename;
-   close $data_file or croak "Failed closing temporary signing payload";
 
-   my ($out, $err, $rc)= _run_cmd(
-      $path,
-      '-Y', 'sign',
-      '-n', $namespace,
-      '-q',
-      '-f', $pubkey_file->filename,
-      $data_path,
-   );
+   my ($wstat, $out, $err)= _run_cmd($self->ssh_keygen_cmd, -Y => 'sign',
+      -n => $namespace, '-q', -f => $pubkey_file->filename, $data_file->filename);
    croak "ssh-keygen -Y sign failed: $err"
-      if $rc;
+      if $wstat;
 
-   my $sig_path= $data_path.'.sig';
+   my $sig_path= $data_file->filename.'.sig';
    my $sig= secret(load_file => $sig_path);
    unlink $sig_path;
    return $sig;
@@ -378,42 +355,40 @@ sub _pubkey_type_from_base64 {
    return $type;
 }
 
-sub _find_command {
-   my ($self, $name)= @_;
-   my $path= $ENV{PATH} || '';
-   my @path= File::Spec->path;
-   my @ext= ('');
-   if ($^O =~ /MSWin32|cygwin/i) {
-      my $pathext= $ENV{PATHEXT} || '.EXE;.BAT;.CMD;.COM';
-      @ext= split /;/, $pathext;
-      push @ext, '';
-   }
-
-   my $dir;
-   for $dir (@path) {
-      my $ext;
-      for $ext (@ext) {
-         my $candidate= File::Spec->catfile($dir, $name.$ext);
-         return $candidate if -f $candidate && -x $candidate;
-      }
-   }
-   return;
-}
-
 sub _run_cmd {
    my @cmd= @_;
-   my ($wtr, $rdr, $err);
-   $err= Symbol::gensym();
-   my $pid= eval { IPC::Open3::open3($wtr, $rdr, $err, @cmd) };
-   croak "Failed to execute '$cmd[0]': $@"
+   my $path= $Crypt::MultiKey::command_path{$cmd[0]};
+   $cmd[0]= $path if defined $path;
+   my ($out, $err)= (undef, Symbol::gensym());
+   my $pid= eval { IPC::Open3::open3(undef, $out, $err, @cmd) };
+   croak "Failed to execute '$_[0]': $cmd"
       unless $pid;
-   close $wtr;
    local $/;
-   my $out= <$rdr>;
-   my $err_txt= <$err>;
+   my $out= <$rdr> // '';
+   my $err= <$err> // '';
    waitpid($pid, 0);
-   my $rc= $?;
-   return ($out || '', $err_txt || '', $rc);
+   return ($?, $out, $err);
 }
 
 1;
+__END__
+=head1 CONFIGURATION
+
+You can specify the paths to the exeutables used by this module with the
+C<< %Crypt::MultiKey::command_path >> global variable:
+
+=over
+
+=item ssh-add
+
+C<< $Crypt::MultiKey::command_path{'ssh-add'} >>
+
+=item ssh-keygen
+
+C<< $Crypt::MultiKey::command_path{'ssh-keygen'} >>.
+
+=back
+
+For security, these are not configurable from an environment variable.
+
+=cut

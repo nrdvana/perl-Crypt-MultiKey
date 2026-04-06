@@ -176,3 +176,25 @@ sub _ykchalresp {
 delete @{Crypt::MultiKey::YubicoOTP::}{qw( carp croak secret HEX ISO8859_1 )};
 require Crypt::MultiKey::YubicoOTP::Device;
 1;
+
+__END__
+=head1 CONFIGURATION
+
+You can specify the paths to the exeutables used by this module with the
+C<< %Crypt::MultiKey::command_path >> global variable:
+
+=over
+
+=item ykinfo
+
+C<< $Crypt::MultiKey::command_path{ykinfo} >>
+
+=item ykchalresp
+
+C<< $Crypt::MultiKey::command_path{ykchalresp} >>.
+
+=back
+
+For security, these are not configurable from an environment variable.
+
+=cut
