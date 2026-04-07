@@ -106,14 +106,14 @@ extern HV *cmk_yubico_otp_ykinfo(int fd);
 /* Run rough equivalent of the 'ykchalresp' command over the Yubico OTP API */
 extern int cmk_yubico_otp_ykchalresp(int fd, int slot, int timeout_ms, SV *chal, secret_buffer *resp);
 
-/* Perform symmetric encryption using the supplied AES key, storing the ciphertext and parameters
- * into the hash `params`.
+/* Perform symmetric encryption using the supplied AES key and input secret.
+ * Ciphertext is written into ciphertext_out, which may be a scalar or SecretBuffer object.
  */
-extern void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret, size_t secret_len);
+extern void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret, size_t secret_len, SV *ciphertext_out);
 
-/* Perform symmetric decryption using the supplied AES key and ciphertext and parameters in
+/* Perform symmetric decryption using the supplied AES key and ciphertext bytes and parameters in
  * `params`, storing the original secret into secret_out.
  */
-extern void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *secret_out);
+extern void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, const U8 *ciphertext, size_t ciphertext_len, secret_buffer *secret_out);
 
 #endif /* define CRYPT_MULTIKEY_H */

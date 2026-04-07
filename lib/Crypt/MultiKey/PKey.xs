@@ -123,30 +123,55 @@ recreate_key_material(pkey, tumbler, skey_buf)
       cmk_pkey_recreate_key_material(pkey, tumbler, skey_buf);
 
 void
-encrypt(pkey, secret_sv)
+encrypt(pkey, secret_sv, ciphertext_out=NULL)
    cmk_pubkey *pkey
    SV *secret_sv
+   SV *ciphertext_out
    INIT:
       STRLEN secret_len= 0;
       const U8 *secret= (const U8*) secret_buffer_SvPVbyte(secret_sv, &secret_len);
       secret_buffer *skey_buf= secret_buffer_new(0, NULL);
       HV *enc= newHV();
+      SV *ciphertext= ciphertext_out;
+      bool own_ciphertext= false;
       SV *enc_ref= sv_2mortal(newRV_noinc((SV*) enc)); /* ensure HV gets cleaned up on error */
    PPCODE:
+      if (!ciphertext) {
+         ciphertext= newSVpvs("");
+         own_ciphertext= true;
+      }
+      if (!hv_stores(enc, "ciphertext", ciphertext)) {
+         if (own_ciphertext)
+            SvREFCNT_dec(ciphertext);
+         croak("failed to create ciphertext field");
+      }
       cmk_pkey_generate_key_material(pkey, enc, skey_buf);
-      cmk_symmetric_encrypt(enc, cmk_hkdf(enc, skey_buf), secret, secret_len);
+      cmk_symmetric_encrypt(enc, cmk_hkdf(enc, skey_buf), secret, secret_len, ciphertext);
       PUSHs(enc_ref);
 
 void
-decrypt(pkey, enc)
+decrypt(pkey, enc, secret_out=NULL)
    cmk_pubkey *pkey
    HV *enc
+   secret_buffer *secret_out
    INIT:
       SV *secret_ref= NULL;
-      secret_buffer *secret= secret_buffer_new(0, &secret_ref);
       secret_buffer *skey_buf= secret_buffer_new(0, NULL);
    PPCODE:
+      SV **svp= hv_fetchs(enc, "ciphertext", 0);
+      SV *ciphertext= NULL;
+      if (!svp || !*svp || !SvOK(*svp))
+         croak("Missing 'ciphertext'");
+      ciphertext= *svp;
+      if (!secret_out) {
+         secret_out= secret_buffer_new(0, &secret_ref);
+      } else {
+         secret_ref= ST(2);
+      }
       cmk_pkey_recreate_key_material(pkey, enc, skey_buf);
-      cmk_symmetric_decrypt(enc, cmk_hkdf(enc, skey_buf), secret);
+      {
+         STRLEN ciphertext_len= 0;
+         const U8 *ciphertext_buf= (const U8*) secret_buffer_SvPVbyte(ciphertext, &ciphertext_len);
+         cmk_symmetric_decrypt(enc, cmk_hkdf(enc, skey_buf), ciphertext_buf, ciphertext_len, secret_out);
+      }
       PUSHs(secret_ref);
-

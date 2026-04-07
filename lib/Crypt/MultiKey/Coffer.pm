@@ -711,7 +711,9 @@ sub encrypt {
    @cipher_data{'cipher','pad'}= @{$prev_cipher}{'cipher','pad'}
       if defined $prev_cipher;
    # Main encryption routine
-   Crypt::MultiKey::symmetric_encrypt(\%cipher_data, $self->lock_mechanism->cipher_skey, $self->content);
+   $cipher_data{ciphertext}= Crypt::MultiKey::symmetric_encrypt(
+      \%cipher_data, $self->lock_mechanism->cipher_skey, $self->content
+   );
    $self->{cipher_data}= \%cipher_data;
    $self->content_changed(0);
    $self;
@@ -737,7 +739,9 @@ sub decrypt {
       unless $self->unlocked;
    croak "No ciphertext defined"
       unless $self->has_ciphertext;
-   $self->{content}= Crypt::MultiKey::symmetric_decrypt($self->cipher_data, $self->lock_mechanism->cipher_skey);
+   $self->{content}= Crypt::MultiKey::symmetric_decrypt(
+      $self->cipher_data, $self->lock_mechanism->cipher_skey, $self->cipher_data->{ciphertext}
+   );
    $self;
 }
 
