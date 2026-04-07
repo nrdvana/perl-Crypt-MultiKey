@@ -224,7 +224,9 @@ The buffer contains raw bytes, not hex or base64.
 =head2 symmetric_encrypt
 
   my %params;
-  symmetric_encrypt(\%params, $aes_key, $secret);
+  my $ciphertext= symmetric_encrypt(\%params, $aes_key, $secret);
+  # or
+  symmetric_encrypt(\%params, $aes_key, $secret, $ciphertext_out);
   # %params:
   #   cipher     - Currently must be AES-256-GCM; will be assigned if unset
   #   pad        - optionally harden the secret with a prefix of random bytes
@@ -234,11 +236,11 @@ The buffer contains raw bytes, not hex or base64.
   #                In other words, cause decryption to fail if it isn't given
   #                identical 'auth_data'.  The failure will be indistinguishable
   #                from an incorrect $aes_key.
-  #   ciphertext - set on output to the encrypted bytes of ciphertext
-
 This performs encryption using a cipher (currently always C<AES-256-GCM>) and optional padding
-to obscure the length of the secret.  The ciphertext is written into a field of C<%params>.
-You must preserve the entire contents of C<%params> to be passed to C<symmetric_decrypt>.
+to obscure the length of the secret.
+The ciphertext is returned, or written into C<$ciphertext_out> if supplied
+(which may be a byte scalar or C<Crypt::SecretBuffer>).
+You must preserve both C<%params> and the ciphertext to be passed to C<symmetric_decrypt>.
 The C<$aes_key> should be a L<SecretBuffer|Crypt::SecretBuffer> object and must be the correct
 length for the cipher.  Use L</hkdf> to get a key the correct length.
 
@@ -247,9 +249,10 @@ instead reconstruct the C<auth_data> before decryption.
 
 =head2 symmetric_decrypt
 
-  my %params= ...;         # previous encryption result hashref
+  my %params= ...;         # previous encryption parameter hashref
+  my $ciphertext= ...;     # previous ciphertext bytes
   $params{auth_data}= ...; # if you used auth_data during encryption
-  my $secret= symmetric_decrypt(\%params, $aes_key);
+  my $secret= symmetric_decrypt(\%params, $aes_key, $ciphertext);
 
 This decrypts the previous result of C<symmetric_encrypt>.  If using C<AES-GCM>, it will also
 verify whether the C<$aes_key> was the correct key, and croak on failure.

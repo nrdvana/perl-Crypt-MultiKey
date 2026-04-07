@@ -1,7 +1,7 @@
 use FindBin;
 use lib "$FindBin::Bin/lib";
 use Test2AndUtils;
-use Crypt::SecretBuffer qw( secret );
+use Crypt::SecretBuffer qw( secret span );
 use Crypt::MultiKey;
 use File::Temp;
 
@@ -24,8 +24,8 @@ subtest gcm_no_padding => sub {
    for my $len (@lengths) {
       my $s1= secret(append_random => $len);
       my %params= ( cipher => 'AES-256-GCM' );
-      Crypt::MultiKey::symmetric_encrypt(\%params, $aes_key, $s1);
-      my $s2= Crypt::MultiKey::symmetric_decrypt(\%params, $aes_key);
+      my $ciphertext= Crypt::MultiKey::symmetric_encrypt(\%params, $aes_key, $s1);
+      my $s2= Crypt::MultiKey::symmetric_decrypt(\%params, $aes_key, $ciphertext);
       is( $s1->memcmp($s2), 0, "length=$len: s1 == s2" );
    }
 };
@@ -48,9 +48,10 @@ subtest gcm_padding => sub {
    for my $len (@lengths) {
       my $s1= secret("x" x $len);
       my %params= ( cipher => 'AES-256-GCM', pad => $len + 200 );
-      Crypt::MultiKey::symmetric_encrypt(\%params, $aes_key, $s1);
-      is( length $params{ciphertext}, 12 + $len + 200 + 16, 'length $ciphertext' );
-      my $s2= Crypt::MultiKey::symmetric_decrypt(\%params, $aes_key);
+      my $ciphertext= undef;
+      Crypt::MultiKey::symmetric_encrypt(\%params, $aes_key, $s1, $ciphertext);
+      is( length $ciphertext, 12 + $len + 200 + 16, 'length $ciphertext' );
+      my $s2= Crypt::MultiKey::symmetric_decrypt(\%params, $aes_key, $ciphertext);
       is( $s2->length, $len, "decoded length=$len" );
       is( $s1->memcmp($s2), 0, "s1 == s2" )
          or diag $s1->unmask_to(\&escape_nonprintable), "\n", $s2->unmask_to(\&escape_nonprintable);
@@ -61,16 +62,34 @@ subtest gcm_auth_data => sub {
    my $aes_key= secret(append_random => 32);
    my $s1= secret(append_random => 100);
    my %params= ( cipher => 'AES-256-GCM', auth_data => 'some context' );
-   Crypt::MultiKey::symmetric_encrypt(\%params, $aes_key, $s1);
-   my $s2= Crypt::MultiKey::symmetric_decrypt(\%params, $aes_key);
+   my $ciphertext= undef;
+   Crypt::MultiKey::symmetric_encrypt(\%params, $aes_key, $s1, $ciphertext);
+   my $s2= Crypt::MultiKey::symmetric_decrypt(\%params, $aes_key, $ciphertext);
    is( $s1->memcmp($s2), 0, "s1 == s2" );
 
    $params{auth_data}= 'tampered-with context';
-   ok( !eval { $s2= Crypt::MultiKey::symmetric_decrypt(\%params, $aes_key); 1 },
+   ok( !eval { $s2= Crypt::MultiKey::symmetric_decrypt(\%params, $aes_key, $ciphertext); 1 },
       'decrypt fails with tampered context' );
    delete $params{auth_data};
-   ok( !eval { $s2= Crypt::MultiKey::symmetric_decrypt(\%params, $aes_key); 1 },
+   ok( !eval { $s2= Crypt::MultiKey::symmetric_decrypt(\%params, $aes_key, $ciphertext); 1 },
       'decrypt fails with missing context' );
+};
+
+subtest gcm_inplace => sub {
+   my $aes_key= secret(append_random => 32);
+   my $plaintext= "inplace test payload";
+   my %params= ( cipher => 'AES-256-GCM' );
+   my $buf= secret($plaintext);
+   $buf->append("\0" x 64);
+   my $s_plain= span($buf)->subspan(0, length($plaintext));
+   Crypt::MultiKey::symmetric_encrypt(\%params, $aes_key, $s_plain, $buf);
+   my $s2= Crypt::MultiKey::symmetric_decrypt(\%params, $aes_key, $buf, $buf);
+   is( $s2->length, length($plaintext), "decoded plaintext length" );
+   is( $s2->memcmp($plaintext), 0, "decoded plaintext matches" );
+
+   my %pad_params= ( cipher => 'AES-256-GCM', pad => 64 );
+   ok( !eval { Crypt::MultiKey::symmetric_encrypt(\%pad_params, $aes_key, $buf, $buf); 1 },
+      'inplace encryption rejects pad' );
 };
 
 subtest xts => sub {
@@ -78,10 +97,11 @@ subtest xts => sub {
    my $s1= secret("0123456789ABCDEF" x 512);
    for my $block_size (512, 1024, 2048, 4096) {
       my %params= ( cipher => 'AES-256-XTS', block_size => $block_size );
-      Crypt::MultiKey::symmetric_encrypt(\%params, $aes_key, $s1);
-      is( length $params{ciphertext}, $s1->length, 'length $ciphertext' );
+      my $ciphertext= undef;
+      Crypt::MultiKey::symmetric_encrypt(\%params, $aes_key, $s1, $ciphertext);
+      is( length $ciphertext, $s1->length, 'length $ciphertext' );
 
-      my $s2= Crypt::MultiKey::symmetric_decrypt(\%params, $aes_key);
+      my $s2= Crypt::MultiKey::symmetric_decrypt(\%params, $aes_key, $ciphertext);
       is( $s2->length, $s1->length, 'decode length' );
       is( $s2->memcmp($s1), 0, 's1 == s2' );
 
@@ -174,8 +194,8 @@ subtest xts => sub {
          } or diag "Exception: $@";
          # Read the backing file after dm-crypt encrypted into it
          $s_backing->load_file($tmpname);
-         is($s_backing->length, length($params{ciphertext}), 'backing file length');
-         is($s_backing->memcmp($params{ciphertext}), 0, 'backing file ciphertext matches module ciphertext');
+         is($s_backing->length, length($ciphertext), 'backing file length');
+         is($s_backing->memcmp($ciphertext), 0, 'backing file ciphertext matches module ciphertext');
 
          system('dmsetup', 'remove', $mapname) == 0
             or warn "dmsetup remove $mapname failed";

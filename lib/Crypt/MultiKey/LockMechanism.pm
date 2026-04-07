@@ -214,7 +214,7 @@ sub add_access {
    my %lock= ( tumblers => \@tumblers );
    my $symmetric_key= $self->_hkdf_for_lock(\%lock, $key_material);
    # Use the keyslot's aes key to encrypt the primary key
-   Crypt::MultiKey::symmetric_encrypt(\%lock, $symmetric_key, $self->primary_skey);
+   $lock{ciphertext}= Crypt::MultiKey::symmetric_encrypt(\%lock, $symmetric_key, $self->primary_skey);
    push @{$self->locks}, \%lock;
    return \%lock;
 }
@@ -294,7 +294,7 @@ sub unlock {
             $_->{key}->recreate_key_material($_, $key_material)
                for @$tumblers;
             my $aes_key= $self->_hkdf_for_lock($lock, $key_material);
-            $primary_skey= Crypt::MultiKey::symmetric_decrypt($lock, $aes_key);
+            $primary_skey= Crypt::MultiKey::symmetric_decrypt($lock, $aes_key, $lock->{ciphertext});
          };
       push @failures, $@;
    }

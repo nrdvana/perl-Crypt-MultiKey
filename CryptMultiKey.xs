@@ -70,30 +70,40 @@ hmac_sha256(key, ...)
       XPUSHs(mortal_buf_ref);
 
 void
-symmetric_encrypt(params, aes_key, secret)
+symmetric_encrypt(params, aes_key, secret, ciphertext_out=NULL)
    HV *params
    secret_buffer *aes_key
    SV *secret
+   SV *ciphertext_out
    INIT:
       STRLEN len;
       const U8 *buf= (const U8*) secret_buffer_SvPVbyte(secret, &len);
+      SV *ret= ciphertext_out;
    PPCODE:
-      cmk_symmetric_encrypt(params, aes_key, buf, len);
-      XSRETURN(1); /* return params hashref */
+      if (!ret)
+         ret= sv_newmortal();
+      cmk_symmetric_encrypt(params, aes_key, buf, len, ret);
+      XPUSHs(ret);
 
 void
-symmetric_decrypt(params, aes_key, secret_out=NULL)
+symmetric_decrypt(params, aes_key, ciphertext, secret_out=NULL)
    HV *params
    secret_buffer *aes_key
+   SV *ciphertext
    secret_buffer *secret_out
+   INIT:
+      STRLEN ciphertext_len= 0;
+      const U8 *ciphertext_buf= (const U8*) secret_buffer_SvPVbyte(ciphertext, &ciphertext_len);
+      SV *ret_sv= NULL;
    PPCODE:
       if (!secret_out) {
-         secret_out= secret_buffer_new(0, &(ST(0)));
-      } else {
-         ST(0)= ST(2);
+         secret_out= secret_buffer_new(0, &ret_sv);
       }
-      cmk_symmetric_decrypt(params, aes_key, secret_out);
-      XSRETURN(1); /* return buffer of secret */
+      else {
+         ret_sv= ST(3);
+      }
+      cmk_symmetric_decrypt(params, aes_key, ciphertext_buf, ciphertext_len, secret_out);
+      XPUSHs(ret_sv); /* return buffer of secret */
 
 INCLUDE: lib/Crypt/MultiKey/PKey.xs
 INCLUDE: conditional.xs

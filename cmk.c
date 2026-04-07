@@ -1420,19 +1420,25 @@ cleanup:
 #define CMK_PAD_PREFIX_MAX_SIZE (8 + 63 + 8)
 #define CMK_PAD_PREFIX_VARSIZE(buf) (((buf)[0] ^ (buf)[1] ^ (buf)[2] ^ (buf)[3] ^ (buf)[4] ^ (buf)[5] ^ (buf)[6] ^ (buf)[7]) & 0x3F)
 
-/* Perform symmetric encryption using the supplied key, storing the ciphertext and
- * parameters into the hash `params`.
+/* Perform symmetric encryption using the supplied key and write ciphertext into ciphertext_out.
  */
-void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret, size_t secret_len) {
+void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret, size_t secret_len, SV *ciphertext_out) {
    const char *err= NULL;
    const EVP_CIPHER *cipher= NULL;
    EVP_CIPHER_CTX *aes_ctx = NULL;
    SV **svp, *sv= NULL;
+   secret_buffer *ciphertext_sb= NULL;
    U8 *buf;
    int outlen, need_key_len;
    STRLEN len;
+   bool inplace= false;
+   size_t needed_len= 0;
+   U8 *out_ptr= NULL;
+   size_t out_capacity= 0;
 
    ERR_clear_error();
+   if (!ciphertext_out)
+      croak("ciphertext_out must not be NULL");
 
    /* determine cipher */
    svp= hv_fetchs(params, "cipher", 0);
@@ -1458,6 +1464,32 @@ void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret,
 
    if (aes_key->len != (size_t) need_key_len)
       croak("Wrong key length for cipher (%d, need %d)", (int)aes_key->len, need_key_len);
+
+   /* Determine output target and detect whether input aliases output. */
+   if ((ciphertext_sb= secret_buffer_from_magic(ciphertext_out, 0))) {
+      size_t secret_addr= (size_t) secret;
+      size_t out_addr;
+      out_ptr= (U8*) ciphertext_sb->data;
+      out_capacity= ciphertext_sb->capacity;
+      out_addr= (size_t) out_ptr;
+      if (secret_addr >= out_addr && secret_addr < out_addr + ciphertext_sb->len)
+         inplace= true;
+   }
+   else {
+      size_t secret_addr;
+      size_t out_addr;
+      if (!SvOK(ciphertext_out))
+         sv_setpvs(ciphertext_out, "");
+      if (!SvPOK(ciphertext_out) || SvUTF8(ciphertext_out) || SvIsCOW(ciphertext_out))
+         croak("ciphertext_out must be a non-UTF8 byte string scalar or SecretBuffer");
+      out_ptr= (U8*) SvPVX(ciphertext_out);
+      out_capacity= SvLEN(ciphertext_out) > 0? SvLEN(ciphertext_out)-1 : 0;
+      len= SvCUR(ciphertext_out);
+      secret_addr= (size_t) secret;
+      out_addr= (size_t) out_ptr;
+      if (secret_addr >= out_addr && secret_addr < out_addr + len)
+         inplace= true;
+   }
 
    /* branch for stream-based encryption */
    if (cipher == EVP_aes_256_gcm()) {
@@ -1487,14 +1519,40 @@ void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret,
          rem= padded_len % pad;
          if (rem) padded_len+= pad - rem;
       }
+      if (padded_len < secret_len)
+         GOTO_CLEANUP_CROAK("ciphertext length overflow");
 
-      /* The encrypted result is N bytes of public nonce followed by the output bytes of the
-       * cipher followed by the public GCM tag bytes.  These can all be allocated as a single
-       * buffer inside of an SV, then assign pointers to the components */
-      nonce= (U8*) cmk_prepare_sv_buffer((sv= newSVpvs("")),
-         CMK_AES_256_GCM_NONCE_LEN + padded_len + CMK_AES_256_GCM_TAG_LEN);
-      ciphertext_pos= nonce + CMK_AES_256_GCM_NONCE_LEN;
-      gcm_tag= ciphertext_lim= ciphertext_pos + padded_len;
+      needed_len= padded_len + CMK_AES_256_GCM_NONCE_LEN + CMK_AES_256_GCM_TAG_LEN;
+      if (needed_len < padded_len)
+         GOTO_CLEANUP_CROAK("ciphertext length overflow");
+      if (inplace && prefix_len)
+         GOTO_CLEANUP_CROAK("'pad' is incompatible with inplace encryption");
+      if (inplace && needed_len > out_capacity)
+         GOTO_CLEANUP_CROAK("inplace encryption requires preallocated output capacity");
+
+      /* Ciphertext layout for AES-GCM is:
+       *    [ciphertext bytes][nonce][gcm_tag]
+       * which allows straightforward in-place encryption of the leading secret bytes.
+       */
+      if (ciphertext_sb) {
+         if (inplace)
+            ciphertext_sb->len= needed_len;
+         else
+            secret_buffer_set_len(ciphertext_sb, needed_len);
+         out_ptr= (U8*) ciphertext_sb->data;
+      }
+      else if (inplace) {
+         SvCUR_set(ciphertext_out, needed_len);
+         *SvEND(ciphertext_out)= '\0';
+         out_ptr= (U8*) SvPVX(ciphertext_out);
+      }
+      else
+         out_ptr= (U8*) cmk_prepare_sv_buffer(ciphertext_out, needed_len);
+
+      ciphertext_pos= out_ptr;
+      ciphertext_lim= out_ptr + padded_len;
+      nonce= ciphertext_lim;
+      gcm_tag= nonce + CMK_AES_256_GCM_NONCE_LEN;
 
       if (RAND_bytes(nonce, CMK_AES_256_GCM_NONCE_LEN) != 1)
          GOTO_CLEANUP_CROAK("Failed to generate GCM nonce");
@@ -1560,10 +1618,6 @@ void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret,
 
       if (EVP_CIPHER_CTX_ctrl(aes_ctx, EVP_CTRL_GCM_GET_TAG, CMK_AES_256_GCM_TAG_LEN, gcm_tag) != 1)
          GOTO_CLEANUP_CROAK("AES-GCM get tag failed");
-      /* Save results into fields of params */
-      if (!hv_stores(params, "ciphertext", sv))
-         GOTO_CLEANUP_CROAK("failed to write output hash keys");
-      sv= NULL; /* owned by hash now */
    }
    else { /* branch for block-based encryption */
       size_t block_size = 512;  /* default to 512-byte sectors for dm-crypt compatibility */
@@ -1591,6 +1645,7 @@ void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret,
       num_blocks= secret_len / block_size;
       if (num_blocks * block_size != secret_len)
          GOTO_CLEANUP_CROAK("secret must be an even multiple of block_size");
+      needed_len= num_blocks * block_size;
 
       /* get block index */
       svp= hv_fetchs(params, "block_idx", 0);
@@ -1604,7 +1659,23 @@ void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret,
       if (!(aes_ctx = EVP_CIPHER_CTX_new()))
          GOTO_CLEANUP_CROAK("AES-XTS context creation failed");
 
-      ciphertext= cmk_prepare_sv_buffer((sv= newSVpvs("")), num_blocks * block_size);
+      if (inplace && needed_len > out_capacity)
+         GOTO_CLEANUP_CROAK("inplace encryption requires preallocated output capacity");
+
+      if (ciphertext_sb) {
+         if (inplace)
+            ciphertext_sb->len= needed_len;
+         else
+            secret_buffer_set_len(ciphertext_sb, needed_len);
+         ciphertext= (U8*) ciphertext_sb->data;
+      }
+      else if (inplace) {
+         SvCUR_set(ciphertext_out, needed_len);
+         *SvEND(ciphertext_out)= '\0';
+         ciphertext= (U8*) SvPVX(ciphertext_out);
+      }
+      else
+         ciphertext= (U8*) cmk_prepare_sv_buffer(ciphertext_out, needed_len);
 
       offset= 0;
       for (block = 0; block < num_blocks; offset += block_size, block++) {
@@ -1622,11 +1693,6 @@ void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret,
          if (EVP_EncryptFinal_ex(aes_ctx, NULL, &outlen) != 1)
             GOTO_CLEANUP_CROAK("AES-XTS final failed");
       }
-
-      /* Save results into fields of params */
-      if (!hv_stores(params, "ciphertext", sv))
-         GOTO_CLEANUP_CROAK("failed to write output hash keys");
-      sv= NULL; /* owned by hash now */
    }
 cleanup:
    if (sv) SvREFCNT_dec(sv);
@@ -1637,7 +1703,7 @@ cleanup:
 /* Perform symmetric decryption using the supplied AES key and ciphertext and parameters,
  * storing the original secret into secret_out.
  */
-void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *secret_out) {
+void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, const U8 *ciphertext, size_t ciphertext_len, secret_buffer *secret_out) {
    const char *err= NULL;
    const EVP_CIPHER *cipher= NULL;
    EVP_CIPHER_CTX *aes_ctx = NULL;
@@ -1669,19 +1735,23 @@ void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *se
    /* branch for stream ciphers, curently only AES-256-GCM */
    if (cipher == EVP_aes_256_gcm()) {
       U8 *ciphertext_pos, *ciphertext_lim, *nonce, *gcm_tag, *secret_pos, *secret_lim;
-      size_t ciphertext_len, secret_len;
+      size_t secret_len;
+      const U8 *ciphertext_full= ciphertext;
+      bool inplace= false;
+      size_t secret_out_addr;
+      size_t ciphertext_addr;
 
-      svp= hv_fetchs(params, "ciphertext", 0);
-      if (!svp || !*svp || !SvOK(*svp))
-         croak("Missing 'ciphertext'");
-      nonce= (U8*) secret_buffer_SvPVbyte(*svp, &len);
-
-      if (len < CMK_AES_256_GCM_NONCE_LEN + CMK_AES_256_GCM_TAG_LEN)
+      if (ciphertext_len < CMK_AES_256_GCM_NONCE_LEN + CMK_AES_256_GCM_TAG_LEN)
          croak("ciphertext smaller than minimum length (GCM nonce+tag)");
-      ciphertext_len= len - CMK_AES_256_GCM_NONCE_LEN - CMK_AES_256_GCM_TAG_LEN;
-      ciphertext_pos= nonce + CMK_AES_256_GCM_NONCE_LEN;
-      ciphertext_lim= gcm_tag= ciphertext_pos + ciphertext_len;
-      secret_len= ciphertext_len; /* AES GCM decodes N cyphertext bytes into N secret bytes */
+      secret_len= ciphertext_len - CMK_AES_256_GCM_NONCE_LEN - CMK_AES_256_GCM_TAG_LEN;
+      ciphertext_pos= (U8*) ciphertext_full;
+      ciphertext_lim= ciphertext_pos + secret_len;
+      nonce= ciphertext_lim;
+      gcm_tag= nonce + CMK_AES_256_GCM_NONCE_LEN;
+      secret_out_addr= (size_t) secret_out->data;
+      ciphertext_addr= (size_t) ciphertext_full;
+      if (ciphertext_addr >= secret_out_addr && ciphertext_addr < secret_out_addr + secret_out->len)
+         inplace= true;
       
       if (!(aes_ctx = EVP_CIPHER_CTX_new())
          || EVP_DecryptInit_ex(aes_ctx, cipher, NULL, NULL, NULL) != 1
@@ -1728,7 +1798,12 @@ void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *se
          if (ciphertext_len < prefix_len + secret_len)
             GOTO_CLEANUP_CROAK("Ciphertext is too short to be a padded secret");
          /* allocate secret buffer and set up position pointers */
-         secret_buffer_set_len(secret_out, secret_len);
+         if (inplace) {
+            if (secret_len > secret_out->capacity)
+               GOTO_CLEANUP_CROAK("inplace decryption requires sufficient output capacity");
+         }
+         else
+            secret_buffer_set_len(secret_out, secret_len);
          secret_pos= (U8*) secret_out->data;
          secret_lim= secret_pos + secret_len;
          /* copy across any bytes that were already decrypted and not part of the prefix */
@@ -1742,7 +1817,12 @@ void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *se
          ciphertext_pos += outlen;
          OPENSSL_cleanse(prefix_buf, sizeof(prefix_buf));
       } else {
-         secret_buffer_set_len(secret_out, secret_len);
+         if (inplace) {
+            if (secret_len > secret_out->capacity)
+               GOTO_CLEANUP_CROAK("inplace decryption requires sufficient output capacity");
+         }
+         else
+            secret_buffer_set_len(secret_out, secret_len);
          secret_pos= (U8*) secret_out->data;
          secret_lim= secret_pos + secret_len;
       }
@@ -1772,17 +1852,13 @@ void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *se
       if (EVP_DecryptFinal_ex(aes_ctx, NULL, &final_len) != 1
          || final_len != 0)
          GOTO_CLEANUP_CROAK("AES-GCM decrypt failed, gcm_tag mismatch");
+      if (inplace)
+         secret_out->len= secret_len;
    }
    else { /* branch for block ciphers */
       size_t block_size = 512;  /* default to 512-byte sectors for dm-crypt compatibility */
       uint64_t block_idx= 0;
       size_t num_blocks, block, offset;
-      const U8 *ciphertext;
-
-      svp= hv_fetchs(params, "ciphertext", 0);
-      if (!svp || !*svp || !SvOK(*svp))
-         croak("Missing 'ciphertext'");
-      ciphertext= (U8*) secret_buffer_SvPVbyte(*svp, &len);
 
       /* Get XTS block size if not default of 512 */
       svp= hv_fetchs(params, "block_size", 0);
@@ -1794,10 +1870,10 @@ void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, secret_buffer *se
          block_size = (size_t)block_size_iv;
       }
 
-      num_blocks= len / block_size;
-      if (num_blocks * block_size != len)
+      num_blocks= ciphertext_len / block_size;
+      if (num_blocks * block_size != ciphertext_len)
          GOTO_CLEANUP_CROAK("ciphertext must be an even multiple of block_size");
-      secret_buffer_set_len(secret_out, len);
+      secret_buffer_set_len(secret_out, ciphertext_len);
 
       /* get block index */
       svp= hv_fetchs(params, "block_idx", 0);

@@ -746,19 +746,25 @@ using the private half of this key and the information in C<%tumbler>.
 
 =method encrypt
 
-  $fields= $pkey->encrypt($secret);
+  my $fields= $pkey->encrypt($secret);
+  my $fields2= $pkey->encrypt($secret, $ciphertext_out);
 
 Encrypt a secret using the public half of this key.  The secret is ideally a C<SecretBuffer>
-object, but may also be a scalar.  The return value is a hashref containing the ciphertext
-and other fields that are required to decrypt it, and which depend on the type of key used.
+object, but may also be a scalar.  The return value is a hashref containing the encryption
+parameters and key-exchange data needed for decryption.  The ciphertext is stored as
+C<< $fields->{ciphertext} >> unless you pass an explicit C<$ciphertext_out> scalar/buffer.
 
 =method decrypt
 
   $secret_buffer= $pkey->decrypt(\%fields);
+  $secret_buffer= $pkey->decrypt(\%fields, $ciphertext);
+  $pkey->decrypt(\%fields, $ciphertext, $secret_out);
 
 Decrypt a secret using the private half of this key.  (and dies if the private half of the key
-is not currently available)  The hash of fields must include everything written by C<encrypt>.
-The original secret is returned as a L<SecretBuffer object|Crypt::SecretBuffer>.
+is not currently available).  By default it reads ciphertext from
+C<< $fields->{ciphertext} >>, but you can pass ciphertext explicitly.
+The original secret is returned as a L<SecretBuffer object|Crypt::SecretBuffer>, or written into
+C<$secret_out> if supplied.
 
 =cut
 
