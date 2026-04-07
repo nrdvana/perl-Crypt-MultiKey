@@ -757,12 +757,10 @@ C<< $fields->{ciphertext} >> unless you pass an explicit C<$ciphertext_out> scal
 =method decrypt
 
   $secret_buffer= $pkey->decrypt(\%fields);
-  $secret_buffer= $pkey->decrypt(\%fields, $ciphertext);
-  $pkey->decrypt(\%fields, $ciphertext, $secret_out);
+  $pkey->decrypt(\%fields, $secret_out);
 
 Decrypt a secret using the private half of this key.  (and dies if the private half of the key
-is not currently available).  By default it reads ciphertext from
-C<< $fields->{ciphertext} >>, but you can pass ciphertext explicitly.
+is not currently available).  It reads ciphertext from C<< $fields->{ciphertext} >>.
 The original secret is returned as a L<SecretBuffer object|Crypt::SecretBuffer>, or written into
 C<$secret_out> if supplied.
 

@@ -132,35 +132,41 @@ encrypt(pkey, secret_sv, ciphertext_out=NULL)
       const U8 *secret= (const U8*) secret_buffer_SvPVbyte(secret_sv, &secret_len);
       secret_buffer *skey_buf= secret_buffer_new(0, NULL);
       HV *enc= newHV();
-      SV *ciphertext= ciphertext_out? ciphertext_out : newSVpvs("");
+      SV *ciphertext= ciphertext_out;
+      bool own_ciphertext= false;
       SV *enc_ref= sv_2mortal(newRV_noinc((SV*) enc)); /* ensure HV gets cleaned up on error */
    PPCODE:
-      if (!hv_stores(enc, "ciphertext", ciphertext))
+      if (!ciphertext) {
+         ciphertext= newSVpvs("");
+         own_ciphertext= true;
+      }
+      if (!hv_stores(enc, "ciphertext", ciphertext)) {
+         if (own_ciphertext)
+            SvREFCNT_dec(ciphertext);
          croak("failed to create ciphertext field");
+      }
       cmk_pkey_generate_key_material(pkey, enc, skey_buf);
       cmk_symmetric_encrypt(enc, cmk_hkdf(enc, skey_buf), secret, secret_len, ciphertext);
       PUSHs(enc_ref);
 
 void
-decrypt(pkey, enc, ciphertext=NULL, secret_out=NULL)
+decrypt(pkey, enc, secret_out=NULL)
    cmk_pubkey *pkey
    HV *enc
-   SV *ciphertext
    secret_buffer *secret_out
    INIT:
       SV *secret_ref= NULL;
       secret_buffer *skey_buf= secret_buffer_new(0, NULL);
    PPCODE:
-      if (!ciphertext) {
-         SV **svp= hv_fetchs(enc, "ciphertext", 0);
-         if (!svp || !*svp || !SvOK(*svp))
-            croak("Missing 'ciphertext'");
-         ciphertext= *svp;
-      }
+      SV **svp= hv_fetchs(enc, "ciphertext", 0);
+      SV *ciphertext= NULL;
+      if (!svp || !*svp || !SvOK(*svp))
+         croak("Missing 'ciphertext'");
+      ciphertext= *svp;
       if (!secret_out) {
          secret_out= secret_buffer_new(0, &secret_ref);
       } else {
-         secret_ref= ST(3);
+         secret_ref= ST(2);
       }
       cmk_pkey_recreate_key_material(pkey, enc, skey_buf);
       {
