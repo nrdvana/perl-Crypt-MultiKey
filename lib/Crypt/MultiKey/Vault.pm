@@ -59,15 +59,19 @@ use warnings;
 use version;
 use Carp;
 use Fcntl ();
+use MIME::Base64 qw/ encode_base64 decode_base64 /;
+use File::Basename qw/ basename /;
 use Crypt::MultiKey;
 use Crypt::MultiKey::LockMechanism;
 use Scalar::Util qw/ blessed looks_like_number /;
-use Crypt::SecretBuffer qw/ secret HEX BASE64 ISO8859_1 /;
+use Crypt::SecretBuffer qw/ secret span HEX BASE64 ISO8859_1 /;
 use Crypt::SecretBuffer::PEM 0.020;
 use constant {
    STAGING_BUFFER_SIZE => 0x100000,
    STAGING_BUFFER_MASK => 0x0FFFFF,
    STAGING_BUFFER_SHIFT => 20,
+   DEFAULT_SECTOR_SIZE => 512,
+   DEFAULT_DATA_OFFSET => 65536,
 };
 
 =attribute path
@@ -110,10 +114,33 @@ future, but is currently tied to the default implementation.
 =cut
 
 sub path   { $_[0]{path} }
+sub _set_path { $_[0]{path}= $_[1]; $_[0] }
 sub handle { $_[0]{handle} }
+sub _set_handle { $_[0]{handle}= $_[1]; $_[0] }
 sub cipher { $_[0]{cipher} }
+sub _set_cipher { $_[0]{cipher}= $_[1]; $_[0] }
 sub sector_size { $_[0]{sector_size} }
+sub _set_sector_size {
+   my ($self, $val)= @_;
+   $val += 0;
+   croak "sector_size must be an integer >= 512"
+      if $val < 512 || int($val) != $val;
+   croak "sector_size must be a power of 2"
+      if $val & ($val-1);
+   $self->{sector_size}= $val;
+   $self;
+}
 sub data_offset { $_[0]{data_offset} }
+sub _set_data_offset {
+   my ($self, $val)= @_;
+   $val += 0;
+   croak "data_offset must be a non-negative integer"
+      if $val < 0 || int($val) != $val;
+   croak "data_offset must be a multiple of sector_size"
+      if $self->sector_size && $val % $self->sector_size;
+   $self->{data_offset}= $val;
+   $self;
+}
 sub data_size {
    @_ > 1? croak("use ->resize to change data_size")
    : $_[0]{handle}? $_[0]->_get_data_size_from_handle
@@ -122,12 +149,29 @@ sub data_size {
 
 sub _get_data_size_from_handle {
    my $self= shift;
-   my $pos= sysseek($self->handle, 0, SEEK_END)
+   my $pos= sysseek($self->handle, 0, Fcntl::SEEK_END())
       // croak "seek failed: $!";
    croak "file has been truncated"
       if $pos < $self->data_offset;
    return $pos - $self->data_offset;
 }
+
+sub authentication { $_[0]{authentication} }
+sub _cipher_skey {
+   my $self= shift;
+   my $skey= $self->lock_mechanism->primary_skey
+      or croak "Vault is locked";
+   Crypt::MultiKey::hkdf(
+      { size => 64, kdf_info => 'Crypt::MultiKey/Vault/cipher_skey', kdf_salt => '' },
+      $skey
+   );
+}
+
+our %_attr_pri= (
+   path => -2,
+   handle => -2,
+   sector_size => -1,
+);
 
 =attribute bundled_keys
 
@@ -253,17 +297,313 @@ read until you call L</unlock>.
 
 sub new {
    my $class= shift;
+   my %attrs= @_ == 1? %{$_[0]} : @_;
    my $self= bless {}, $class;
+   $self->{cipher}= 'AES-256-XTS';
+   $self->{sector_size}= DEFAULT_SECTOR_SIZE;
+   $self->{data_offset}= DEFAULT_DATA_OFFSET;
+   $self->{data_size}= 0;
+   $self->_init(\%attrs) if $self->can('_init');
+   for (sort { ($_attr_pri{$a}||0) <=> ($_attr_pri{$b}||0) } keys %attrs) {
+      my $setter= "_set_$_";
+      $self->$setter($attrs{$_});
+   }
+   $self->name($self->{path}? basename($self->{path}) : 'Vault')
+      unless defined $self->name;
+   return $self;
+}
+
+sub open {
+   my ($class_or_self, %opts)= @_;
+   my $self= ref($class_or_self)? $class_or_self : $class_or_self->new;
+   my $fh= delete $opts{handle};
+   my $path= delete $opts{path};
+   my $bundled_keys= delete $opts{bundled_keys};
+   croak "Specify exactly one of 'path' or 'handle'"
+      if (!$fh && !$path) || ($fh && $path);
+   croak "Unknown options: ".join(', ', sort keys %opts)
+      if keys %opts;
+   if (!$fh) {
+      CORE::open $fh, '+<:raw', $path
+         or croak "open($path): $!";
+   }
+   $self->{path}= $path if defined $path;
+   $self->{handle}= $fh;
+   $self->{bundled_keys}= $bundled_keys if defined $bundled_keys;
+   $self->_load;
+   return $self;
 }
 
 sub _load {
    my $self= shift;
-   
+   my $fh= $self->handle or croak "No handle";
+   my $at= sysseek($fh, 0, Fcntl::SEEK_SET())
+      // croak "seek: $!";
+   $at == 0 or croak "seek returned wrong address";
+   # Start with the first 64KiB, then keep reading until we have at least one
+   # complete VAULT PEM stanza.
+   my $header_buf= secret;
+   my $end_marker= "-----END CRYPT MULTIKEY VAULT-----";
+   my $tmp= '';
+   while (index($tmp, $end_marker) < 0) {
+      my $want= $header_buf->length? 16384 : 65536;
+      my $n= sysread($fh, my $chunk= '', $want);
+      defined $n or croak "read: $!";
+      last unless $n;
+      $header_buf->append(substr($chunk, 0, $n));
+      $tmp .= substr($chunk, 0, $n);
+      croak "Vault header appears unreasonably large"
+         if $header_buf->length > 0x400000;
+   }
+   my ($vault_pem)= do {
+      my ($pem_text)= $tmp =~ /(-----BEGIN CRYPT MULTIKEY VAULT-----.*?-----END CRYPT MULTIKEY VAULT-----\s*)/s;
+      defined $pem_text
+         ? grep $_->label eq 'CRYPT MULTIKEY VAULT', Crypt::SecretBuffer::PEM->parse_all(span($pem_text))
+         : ();
+   };
+   croak "No CRYPT MULTIKEY VAULT pem block in file"
+      unless defined $vault_pem;
+   my $attrs= $self->_attrs_from_pem($vault_pem, $self->path // 'handle');
+   my $data_offset= $attrs->{data_start_block} * $attrs->{sector_size};
+   my $tail= '';
+   my $tail_at= sysseek($fh, $data_offset - 2, Fcntl::SEEK_SET())
+      // croak "seek: $!";
+   $tail_at == ($data_offset - 2)
+      or croak "seek returned wrong address";
+   my $n= sysread($fh, $tail, 2);
+   croak "read: unexpected EOF"
+      unless defined($n) && $n == 2;
+   croak "Bytes before data_start are not \"\\n\\0\""
+      unless $tail eq "\n\0";
+   $self->_set_cipher($attrs->{cipher});
+   $self->_set_sector_size($attrs->{sector_size});
+   $self->_set_data_offset($data_offset);
+   $self->_set_locks($attrs->{locks});
+   $self->_set_user_meta($attrs->{user_meta} || {});
+   $self->{authentication}= $attrs->{authentication};
+   if ($self->bundled_keys) {
+      if ($header_buf->length < $data_offset) {
+         my $at= sysseek($fh, $header_buf->length, Fcntl::SEEK_SET())
+            // croak "seek: $!";
+         $at == $header_buf->length
+            or croak "seek returned wrong address";
+         while ($header_buf->length < $data_offset) {
+            $header_buf->append_sysread($fh, $data_offset - $header_buf->length)
+               or croak "read: ".($! || "unexpected EOF");
+         }
+      }
+      my @pkey_pem= grep {
+         $_->label eq 'ENCRYPTED PRIVATE KEY' || $_->label eq 'PUBLIC KEY'
+      } Crypt::SecretBuffer::PEM->parse_all($header_buf->span(pos => 0, len => $data_offset-1));
+      my @pkeys;
+      for my $pk_pem (@pkey_pem) {
+         eval { push @pkeys, Crypt::MultiKey::PKey->load($pk_pem) }
+            or carp "Warning: failed to load bundled PKey: $@";
+      }
+      $self->insert_keys(@pkeys) if @pkeys;
+   }
+   $self->{data_size}= $self->_get_data_size_from_handle;
+   $self;
 }
 
 sub _generate_header {
    my $self= shift;
-   
+   my $pem= $self->_export_pem;
+   my $header= $pem->serialize;
+   $header->append($self->_export_bundled_keys)
+      if $self->bundled_keys;
+   my $pad= $self->data_offset - $header->length;
+   croak "Header does not fit in reserved area"
+      if $pad < 2;
+   $header->append(("\n" x ($pad-1)), "\0")
+      if $pad > 0;
+   return $header;
+}
+
+sub _export_bundled_keys {
+   my $self= shift;
+   my $method= $self->bundled_keys eq 'public'? 'export_pem_openssl_public_key' : 'export_pem';
+   my %keys;
+   my $n_missing= 0;
+   for my $lock (@{ $self->locks }) {
+      for my $tmbl (@{ $lock->{tumblers} }) {
+         if (defined $tmbl->{key}) {
+            $keys{$tmbl->{key}->fingerprint}= $tmbl->{key};
+         } else {
+            ++$n_missing;
+         }
+      }
+   }
+   carp "Exporting 'bundled_keys' but $n_missing tumblers lack a PKey object"
+      if $n_missing;
+   my $ret= secret;
+   for my $fp (sort keys %keys) {
+      my $k= $keys{$fp};
+      my $pem= !defined($k->protection_scheme)
+         ? $k->export_pem_openssl_public_key
+         : $k->$method;
+      $ret->append($pem->serialize);
+   }
+   return $ret;
+}
+
+sub _attrs_from_pem {
+   my ($self, $pem, $path)= @_;
+   my $header_kv= $pem->header_kv;
+   croak "Headers must start with version and writer_version"
+      unless @$header_kv > 4 && $header_kv->[0] eq 'version' && $header_kv->[2] eq 'writer_version';
+   my $min_version= version->parse($header_kv->[1]);
+   carp "'$path' requires version $min_version of Crypt::MultiKey::Vault but this is only version "
+      .__PACKAGE__->VERSION
+      if $min_version > __PACKAGE__->VERSION;
+   croak "Headers must end with header_authentication"
+      unless @$header_kv > 2 && $header_kv->[-2] eq 'header_authentication';
+   my $header_text= '';
+   for (0..$#$header_kv-2) {
+      $header_text .= $header_kv->[$_] . ($_ & 1? "\n" : ": ");
+   }
+   my ($mac_algo,$mac_base64)= split ':', $header_kv->[-1], 2;
+   my $attrs= Crypt::MultiKey::_inflate_pem_header_kv(@{$header_kv}[4..($#$header_kv-2)]);
+   Crypt::MultiKey::LockMechanism->_validate_locks($attrs->{locks});
+   for my $lock (@{ $attrs->{locks} || [] }) {
+      for my $tmbl (@{ $lock->{tumblers} || [] }) {
+         for (qw( ephemeral_pubkey rsa_key_ciphertext kem_ciphertext )) {
+            $tmbl->{$_}= decode_base64($tmbl->{$_})
+               if defined $tmbl->{$_};
+         }
+      }
+      for (qw( kdf_salt ciphertext )) {
+         $lock->{$_}= decode_base64($lock->{$_})
+            if defined $lock->{$_};
+      }
+   }
+   $attrs->{authentication}= [ $header_text, $mac_algo, decode_base64($mac_base64) ];
+   return $attrs;
+}
+
+sub _export_pem {
+   my $self= shift;
+   my @locks_export= @{ $self->locks };
+   for my $lock (@locks_export) {
+      $lock= { %$lock };
+      for (qw( kdf_salt ciphertext )) {
+         $lock->{$_}= encode_base64($lock->{$_}, '')
+            if defined $lock->{$_};
+      }
+      for my $tmbl (@{ $lock->{tumblers}= [ @{$lock->{tumblers}} ] }) {
+         $tmbl= { %$tmbl };
+         delete $tmbl->{key};
+         for (qw( ephemeral_pubkey rsa_key_ciphertext kem_ciphertext )) {
+            $tmbl->{$_}= encode_base64($tmbl->{$_}, '')
+               if defined $tmbl->{$_};
+         }
+      }
+   }
+   my @header_kv= Crypt::MultiKey::_flatten_to_pem_header_kv(
+      version        => '0.001',
+      writer_version => __PACKAGE__->VERSION,
+      cipher         => $self->cipher,
+      sector_size    => $self->sector_size,
+      data_start_block => int($self->data_offset / $self->sector_size),
+      user_meta      => $self->user_meta,
+      locks          => \@locks_export,
+   );
+   my $header_text= '';
+   for (0..$#header_kv) {
+      $header_text .= $header_kv[$_] . ($_ & 1? "\n" : ": ");
+   }
+   my $header_mac= 'HMAC-SHA256:';
+   Crypt::MultiKey::hmac_sha256($self->lock_mechanism->hmac_skey, $header_text)
+      ->span->append_to($header_mac, encoding => BASE64);
+   push @header_kv, 'header_authentication' => $header_mac;
+   return Crypt::SecretBuffer::PEM->new(
+      label     => 'CRYPT MULTIKEY VAULT',
+      header_kv => \@header_kv,
+   );
+}
+
+sub authenticate {
+   my ($self, $croak)= @_;
+   my $auth= $self->authentication;
+   unless (defined $auth) {
+      croak 'No authentication attribute available' if $croak;
+      return 0;
+   }
+   unless (defined $self->lock_mechanism->primary_skey) {
+      croak 'No primary_skey available for authentication' if $croak;
+      return 0;
+   }
+   unless ($auth->[1] eq 'HMAC-SHA256') {
+      croak 'Only HMAC-SHA256 is supported' if $croak;
+      return 0;
+   }
+   my $mac= Crypt::MultiKey::hmac_sha256($self->lock_mechanism->hmac_skey, $auth->[0]);
+   unless ($mac->memcmp($auth->[2]) == 0) {
+      croak 'Header MAC failed; Vault headers have been modified since file was written.'
+         if $croak;
+      return 0;
+   }
+   return 1;
+}
+
+sub save {
+   my ($self, @args)= @_;
+   my %opts= @args == 1 && !ref $args[0]? (path => $args[0]) : @args;
+   my $path= delete $opts{path};
+   my $rewrite= !$self->handle || defined($path);
+   $path //= $self->path;
+   croak "No path set" unless defined $path;
+   my %attr_updates;
+   for my $attr (qw( cipher sector_size data_offset user_meta name )) {
+      next unless exists $opts{$attr};
+      $attr_updates{$attr}= delete $opts{$attr};
+   }
+   croak "Unknown save options: ".join(', ', sort keys %opts)
+      if keys %opts;
+   croak "Can't save Vault when no locks are defined"
+      unless @{ $self->locks };
+   my ($data_size, $plain);
+   if ($rewrite && $self->handle) {
+      $data_size= $self->data_size;
+      $plain= $data_size? $self->read(0, $data_size)->copy : secret;
+   }
+   for my $attr (sort keys %attr_updates) {
+      my $setter= "_set_".$attr;
+      $self->$setter($attr_updates{$attr});
+   }
+   if (!$rewrite) {
+      my $hdr= $self->_generate_header;
+      _write_data_segment($self->handle, 0, $hdr);
+      return $self;
+   }
+   $data_size= $self->data_size unless defined $data_size;
+   $plain= $data_size? $self->read(0, $data_size)->copy : secret unless defined $plain;
+   my $bs= $self->sector_size;
+   my $target_size= $data_size;
+   my $rem= $target_size % $bs;
+   $target_size += ($bs - $rem) if $rem;
+   $plain->length($target_size)
+      if $plain->length < $target_size;
+   $self->resize($target_size);
+   CORE::open my $fh, '>:raw', $path
+      or croak "open(>$path): $!";
+   _write_data_segment($fh, 0, $self->_generate_header);
+   if ($plain->length) {
+      my $skey= $self->_cipher_skey;
+      my $cipher= Crypt::MultiKey::symmetric_encrypt({
+         cipher      => $self->cipher,
+         sector_size => $self->sector_size,
+         sector_idx  => 0,
+      }, $skey, $plain);
+      _write_data_segment($fh, $self->data_offset, $cipher);
+   }
+   close($fh) or croak "close($path): $!";
+   CORE::open my $rw, '+<:raw', $path
+      or croak "open(+<$path): $!";
+   $self->{handle}= $rw;
+   $self->{path}= $path;
+   delete $self->{_data};
+   $self;
 }
 
 =method resize
@@ -301,6 +641,7 @@ end of the file it will return undef.
 
 sub read {
    my ($self, $ofs, $size)= @_;
+   my $skey= $self->_cipher_skey;
    my $data_size= $self->data_size;
    # offset must be at or before end of data
    croak "negative data offset" if $ofs < 0;
@@ -315,26 +656,23 @@ sub read {
       # find which blocks are affected
       my $sec0= int($ofs / $sz);
       my $secN= int(($ofs + $size - 1) / $sz);
-      my $size= ($secN - $sec0 + 1) * $sz;
+      my $full_size= ($secN - $sec0 + 1) * $sz;
       my $file_ofs= $self->data_offset + $sec0 * $sz;
       my $at= sysseek($fh, $file_ofs, Fcntl::SEEK_SET())
          // croak "seek: $!";
       $at == $file_ofs
          or croak "seek returned wrong address";
       my $data= secret;
-      while ($data->len < $size) {
-         # We already checked the size of the file, so it should just read the
-         # desired number of bytes in the first call.
-         # Die on failure (undef) or EOF (0)
-         $data->append_sysread($fh, $size - $data->len)
-            or croak "read: $!";
+      while ($data->length < $full_size) {
+         $data->append_sysread($fh, $full_size - $data->length)
+            or croak "read: ".($! || "unexpected EOF");
       }
       # decrypt the blocks
       Crypt::MultiKey::symmetric_decrypt({
          cipher      => $self->cipher,
          sector_size => $self->sector_size,
-         sector_idx  => $idx0,
-      }, $data, $data);
+         sector_idx  => $sec0,
+      }, $skey, $data, $data);
       return $data->span(pos => ($ofs & ($sz-1)), len => $size);
    } else {
       # Staging data before first save.  Read from unencrypted 1MiB buffers.
@@ -351,7 +689,7 @@ sub read {
             $out->append($buf->span(pos => $buf_ofs, lim => $buf_lim));
          } else {
             # pretend this sparse block is all zeroes
-            $out->len($out->len + ($buf_lim - $buf_ofs));
+            $out->length($out->length + ($buf_lim - $buf_ofs));
          }
          my $n= $buf_lim - $buf_ofs;
          $ofs += $n;
@@ -373,8 +711,8 @@ more efficient when aligned.  The file will be enlarged if you write beyond the 
 sub write {
    my ($self, $ofs, $data)= @_;
    croak "negative data offset" if $ofs < 0;
-   my $lim= $ofs + $data->len;
-   my $skey= $self->lock_mechanism->cipher_skey;
+   my $lim= $ofs + $data->length;
+   my $skey= $self->_cipher_skey;
    $data= span($data); # Now we have a ::Span object
    if (my $fh= $self->handle) {
       # real file
@@ -382,12 +720,12 @@ sub write {
       my $smask= $sz-1;
       # find which sectors are affected
       my $sec0= int($ofs / $sz);
-      my $secN= int(($ofs + $data->len) / $sz);
+      my $secN= int(($ofs + $data->len - 1) / $sz);
       if (my $sofs= ($ofs & $smask)) {
          # unaligned write.  Need to load the sector, decrypt it, splice it,
          # and re-encrypt.
          my $len= ($sec0 == $secN)? $data->len : $sz - $sofs;
-         my $sdat= $self->read($sec0 * $sz, $sz);
+         my $sdat= $self->read($sec0 * $sz, $sz)->copy;
          $sdat->splice($sofs, $len, $data->subspan(0, $len));
          Crypt::MultiKey::symmetric_encrypt({ cipher => $self->cipher }, $skey, $sdat, $sdat);
          _write_data_segment($fh, $self->data_offset + $sec0 * $sz, $sdat);
@@ -397,7 +735,7 @@ sub write {
       # Now ofs is aligned. Check new length...
       if (my $tail= ($data->len & $smask)) {
          # also ends with an unaligned write
-         my $sdat= $self->read($secN * $sz, $sz);
+         my $sdat= $self->read($secN * $sz, $sz)->copy;
          $sdat->splice(0, $tail, $data->subspan(-$tail));
          Crypt::MultiKey::symmetric_encrypt({ cipher => $self->cipher }, $skey, $sdat, $sdat);
          _write_data_segment($fh, $self->data_offset + $secN * $sz, $sdat);
@@ -419,7 +757,7 @@ sub write {
          $segment= $segment->clone(len => STAGING_BUFFER_SIZE - $buf_ofs)
             if $buf_ofs + $data->len > STAGING_BUFFER_SIZE;
          my $buf= ($bufs->[$idx] //= secret(length => STAGING_BUFFER_SIZE));
-         $buf->splice($buf_ofs, $segment->len, $segment)
+         $buf->splice($buf_ofs, $segment->len, $segment);
          $data->pos($data->pos + $segment->len);
       }
       $self->{data_size}= $lim if $lim > $self->{data_size};
@@ -438,7 +776,7 @@ sub _write_data_segment {
          $wrote += $wr;
       }
    } else {
-      my ($data_ofs, $data_len)= (0, $data->len);
+      my ($data_ofs, $data_len)= (0, $data->length);
       # convert Span object back to SecretBuffer and offset
       unless ($data->can('syswrite')) {
          $data_ofs= $data->pos;
@@ -474,7 +812,7 @@ sub create_block_device {
    defined fileno($self->handle)
       or croak "create_block_device can only be used when Vault is backed by a real file";
    # throws an exception if the vault is still locked
-   my $aes_key= $self->lock_mechanism->cipher_skey;
+   my $aes_key= $self->_cipher_skey;
    # make sure handle is functioning
    my $length= sysseek($self->handle, 0, Fcntl::SEEK_END)
       // croak "seek: $!";
@@ -505,7 +843,7 @@ sub create_block_device {
          # For sector sizes larger than 512, iv_large_sectors makes plain64 set the
          # initialization vector to the sector number rather than a 512-byte block
          # offset of the start of the sector.
-         push @features, "sector_size:$bz",
+         push @features, "sector_size:$sz",
                          'iv_large_sectors';
       }
 
@@ -517,7 +855,7 @@ sub create_block_device {
          $blkdev= $path;
       }
       else {
-         open my $fh, '-|', 'losetup', '--find', '--show', '--', $path
+         CORE::open my $fh, '-|', 'losetup', '--find', '--show', '--', $path
             or die "open losetup pipe failed: $!";
          $blkdev= <$fh>;
          close($fh) or die "losetup failed";
@@ -540,12 +878,12 @@ sub create_block_device {
       );
 
       my $err= eval {
-         open(my $fh, '|-', 'dmsetup', 'create', $mapname, '--table', '-')
+         CORE::open(my $fh, '|-', 'dmsetup', 'create', $mapname, '--table', '-')
             or die "open dmsetup pipe failed: $!";
          binmode($fh, ':raw');
          my $ofs= 0;
-         while ($ofs < $dmsetup_table->len) {
-            my $wrote= $dmsetup_table->syswrite($fh, $dmsetup_table->len - $ofs, $ofs)
+         while ($ofs < $dmsetup_table->length) {
+            my $wrote= $dmsetup_table->syswrite($fh, $dmsetup_table->length - $ofs, $ofs)
                // croak "write to dmsetup failed: $!";
             $ofs += $wrote;
          }
@@ -564,14 +902,14 @@ sub create_block_device {
       -e $mapdev
          or croak "Mapped device '$mapdev' was not created";
 
-      if ($length >= $bs) {
+      if ($length >= $sz) {
          unless (eval {
-            open my $dmh, '<:raw', $mapdev
+            CORE::open my $dmh, '<:raw', $mapdev
                or die "open($mapdev): $!";
             my $s= secret;
-            $s->sysread($dmh, $bs)
+            $s->sysread($dmh, $sz)
                // die "read($mapdev): $!";
-            $s->memcmp($self->read(0, $bs)) == 0
+            $s->memcmp($self->read(0, $sz)) == 0
                or die "dm-crypt decryption of block 0 gave wrong results";
             1;
          }) {
