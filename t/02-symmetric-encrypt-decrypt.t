@@ -25,6 +25,7 @@ subtest gcm_no_padding => sub {
       my $s1= secret(append_random => $len);
       my %params= ( cipher => 'AES-256-GCM' );
       my $ciphertext= Crypt::MultiKey::symmetric_encrypt(\%params, $aes_key, $s1);
+      is( length $ciphertext, $len + 30, 'length $ciphertext' );
       my $s2= Crypt::MultiKey::symmetric_decrypt(\%params, $aes_key, $ciphertext);
       is( $s1->memcmp($s2), 0, "length=$len: s1 == s2" );
    }
@@ -50,7 +51,7 @@ subtest gcm_padding => sub {
       my %params= ( cipher => 'AES-256-GCM', pad => $len + 200 );
       my $ciphertext= undef;
       Crypt::MultiKey::symmetric_encrypt(\%params, $aes_key, $s1, $ciphertext);
-      is( length $ciphertext, 12 + $len + 200 + 16, 'length $ciphertext' );
+      is( length $ciphertext, $len + 200, 'length $ciphertext' );
       my $s2= Crypt::MultiKey::symmetric_decrypt(\%params, $aes_key, $ciphertext);
       is( $s2->length, $len, "decoded length=$len" );
       is( $s1->memcmp($s2), 0, "s1 == s2" )
@@ -96,7 +97,7 @@ subtest xts => sub {
    my $aes_key= secret(append_random => 64);
    my $s1= secret("0123456789ABCDEF" x 512);
    for my $block_size (512, 1024, 2048, 4096) {
-      my %params= ( cipher => 'AES-256-XTS', block_size => $block_size );
+      my %params= ( cipher => 'AES-256-XTS', sector_size => $block_size, sector_idx => 5 );
       my $ciphertext= undef;
       Crypt::MultiKey::symmetric_encrypt(\%params, $aes_key, $s1, $ciphertext);
       is( length $ciphertext, $s1->length, 'length $ciphertext' );
@@ -159,7 +160,7 @@ subtest xts => sub {
                'crypt',
                'aes-xts-plain64',
                $key_hex,
-               0,                   # IV offset, also measured in 512 units
+               5*($block_size/512), # starting sector_idx offset, also measured in 512 units
                $loopdev,            # device
                0,                   # offset within device
                2,                   # feature count

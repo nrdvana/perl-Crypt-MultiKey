@@ -1415,144 +1415,236 @@ cleanup:
       croak("hmac_sha256: unexpected mac length %d", (int)outlen);
 }
 
+/* Perform symmetric encryption using the supplied key and write ciphertext into ciphertext_out.
+ *
+ * aes_key must be the correct length for the cipher specified in params.
+ *
+ * ciphertext_out will be resized as needed, unless you are performing in-place encryption.
+ *
+ * You can perform in-place encryption by passing ciphertext_out->data as the 'secret' pointer,
+ * but with the restriction that ciphertext_out must already have sufficient capacity for the
+ * output (which in GCM mode means 30 bytes longer than secret_len), and you can't use the 'pad'
+ * feature.
+ *
+ * In GCM mode, the output of cmk_symmetric_encrypt needs to store at least:
+ *   - ciphertext (same length as the secret)
+ *   - GCM nonce (12 bytes)
+ *   - GCM tag (16 bytes)
+ *
+ * I didn't find a simple standard for encoding these (without the overhead of ASN.1 and
+ * SSL certificates) so I chose a simple concatenated encoding, with the ciphertext placed first
+ * so that encryption can be performed in-place on the input buffer before appending the nonce,
+ * tag, and flags.
+ *
+ * I also have an optional "pad" feature which can obfuscate the length of the ciphertext
+ * and harden against known-plaintext / structure attacks, even though AES-GCM itself is already
+ * secure against known-plaintext attacks when used correctly.
+ *
+ * I also added an extra 2 bytes of flags at the end, which indicate whether padding was used,
+ * and could be used to indicate other encodings in the future.
+ *
+ * So, the total structure is:
+ *
+ *   AES-GCM{ data }, 12-byte Nonce, 16-byte GCM Tag, 2-byte Flags
+ *
+ * or, with padding enabled:
+ *
+ *   AES-GCM{ 8 byte random header, 0..63 random bytes, 8-byte int64-le data length,
+ *              data, NUL byte padding }, Nonce, GCM Tag, Flags
+ *
+ * In XTS mode, the output is simply N encrypted sectors of data, exactly the same length as
+ * the secret.
+ */
+#define CMK_FLAGS_SIZE 2
+#define CMK_FLAG_HAS_PREFIX 1
+
 /* 8 random bytes + 0..63 random bytes + 8 byte secret_len */
 #define CMK_PAD_PREFIX_MIN_SIZE (8 + 0 + 8)
 #define CMK_PAD_PREFIX_MAX_SIZE (8 + 63 + 8)
 #define CMK_PAD_PREFIX_VARSIZE(buf) (((buf)[0] ^ (buf)[1] ^ (buf)[2] ^ (buf)[3] ^ (buf)[4] ^ (buf)[5] ^ (buf)[6] ^ (buf)[7]) & 0x3F)
 
-/* Perform symmetric encryption using the supplied key and write ciphertext into ciphertext_out.
- */
 void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret, size_t secret_len, SV *ciphertext_out) {
    const char *err= NULL;
    const EVP_CIPHER *cipher= NULL;
    EVP_CIPHER_CTX *aes_ctx = NULL;
    SV **svp, *sv= NULL;
    secret_buffer *ciphertext_sb= NULL;
-   U8 *buf;
-   int outlen, need_key_len;
+   int outlen, need_key_len, flags= 0;
    STRLEN len;
-   bool inplace= false;
-   size_t needed_len= 0;
+   bool inplace= false, is_xts= false;
+   size_t need_out_len= 0,
+          out_capacity= 0,
+          prefix_len= 0,
+          padded_len= secret_len;
+   U8 *buf;
    U8 *out_ptr= NULL;
-   size_t out_capacity= 0;
+   U8 prefix_buf[CMK_PAD_PREFIX_MAX_SIZE];
 
    ERR_clear_error();
    if (!ciphertext_out)
       croak("ciphertext_out must not be NULL");
 
    /* determine cipher */
-   svp= hv_fetchs(params, "cipher", 0);
-   if (svp && *svp && SvOK(*svp)) {
-      buf= (U8*) secret_buffer_SvPVbyte(*svp, &len);
-      if (len == 11 && memcmp(buf, "AES-256-GCM", 11) == 0) {
-         need_key_len= CMK_AES_256_GCM_KEY_LEN;
-         cipher= EVP_aes_256_gcm();
-      }
-      else if (len == 11 && memcmp(buf, "AES-256-XTS", 11) == 0) {
-         need_key_len= CMK_AES_256_XTS_KEY_LEN;
-         cipher= EVP_aes_256_xts();
-      }
-      else
-         GOTO_CLEANUP_CROAK("Unsupported cipher");
+   svp= hv_fetchs(params, "cipher", 1);
+   if (!svp || !*svp)
+      croak("hv_fetchs failed");
+   if (SvOK(*svp)) {
+      buf= (U8*) SvPVbyte(*svp, len);
    } else {
-      if (!hv_stores(params, "cipher", (sv= newSVpvs("AES-256-GCM"))))
-         GOTO_CLEANUP_CROAK("hv_store");
-      sv= NULL;
-      cipher= EVP_aes_256_gcm();
-      need_key_len= CMK_AES_256_GCM_KEY_LEN;
+      len= 11; buf= "AES-256-GCM";
+      sv_setpvs(*svp, "AES-256-GCM");
    }
+   if (len == 11 && memcmp(buf, "AES-256-GCM", 11) == 0) {
+      need_key_len= CMK_AES_256_GCM_KEY_LEN;
+      need_out_len= secret_len + CMK_AES_256_GCM_NONCE_LEN + CMK_AES_256_GCM_TAG_LEN + CMK_FLAGS_SIZE;
+      cipher= EVP_aes_256_gcm();
+   }
+   else if (len == 11 && memcmp(buf, "AES-256-XTS", 11) == 0) {
+      need_key_len= CMK_AES_256_XTS_KEY_LEN;
+      need_out_len= secret_len;
+      cipher= EVP_aes_256_xts();
+      is_xts= true;
+   }
+   else
+      GOTO_CLEANUP_CROAK("Unsupported cipher");
 
    if (aes_key->len != (size_t) need_key_len)
       croak("Wrong key length for cipher (%d, need %d)", (int)aes_key->len, need_key_len);
 
-   /* Determine output target and detect whether input aliases output. */
+   /* 'pad' feature, for hiding the length of the secret */
+   svp= hv_fetchs(params, "pad", 0);
+   if (svp && *svp && SvTRUE(*svp)) {
+      uint64_t packed_secret_len;
+      size_t rem;
+      IV pad= SvIV(*svp);
+      if (is_xts)
+         GOTO_CLEANUP_CROAK("pad feature is incompatible with AES-XTS");
+      if (pad < 1 || pad > (1<<30))
+         GOTO_CLEANUP_CROAK("pad must be greater than 0 and less/eq than 1GiB (for sanity)");
+      flags |= CMK_FLAG_HAS_PREFIX;
+      /* generate random prefix bytes */
+      if (RAND_bytes(prefix_buf, sizeof(prefix_buf)) != 1)
+         GOTO_CLEANUP_CROAK("Failed to generate random prefix");
+      /* hash the first 8 bytes to determine how many random bytes to include */
+      prefix_len= 8 + CMK_PAD_PREFIX_VARSIZE(prefix_buf) + 8;
+      /* now store the true secret length as little-endian 64-bit */
+      packed_secret_len= htole64(secret_len);
+      memcpy(prefix_buf + prefix_len - 8, &packed_secret_len, 8);
+      /* round the whole result up to a multiple of pad */
+      padded_len+= prefix_len;
+      rem= (prefix_len + need_out_len) % pad;
+      if (rem) padded_len+= pad - rem;
+      if (padded_len < secret_len)
+         GOTO_CLEANUP_CROAK("ciphertext length overflow");
+      need_out_len += padded_len - secret_len;
+   }
+   
+   /* Determine output target and detect whether input aliases output.
+    * Because we allow the caller to specify source and destination buffers, and the destination
+    * buffer will be enlarged automatically, and the caller has the capability of specifying a
+    * pointer within the space that could get reallocated, we need to check for that condition.
+    */
    if ((ciphertext_sb= secret_buffer_from_magic(ciphertext_out, 0))) {
-      size_t secret_addr= (size_t) secret;
-      size_t out_addr;
       out_ptr= (U8*) ciphertext_sb->data;
-      out_capacity= ciphertext_sb->capacity;
-      out_addr= (size_t) out_ptr;
-      if (secret_addr >= out_addr && secret_addr < out_addr + ciphertext_sb->len)
+      if (secret >= out_ptr && secret < out_ptr + ciphertext_sb->capacity) {
          inplace= true;
+         if (need_out_len > ciphertext_sb->capacity)
+            GOTO_CLEANUP_CROAK("inplace encryption requires preallocated output capacity");
+      }
+      else if (need_out_len > ciphertext_sb->capacity) {
+         secret_buffer_set_len(ciphertext_sb, need_out_len);
+         out_ptr= (U8*) ciphertext_sb->data;
+      }
    }
    else {
-      size_t secret_addr;
-      size_t out_addr;
+      STRLEN out_capacity;
       if (!SvOK(ciphertext_out))
          sv_setpvs(ciphertext_out, "");
-      if (!SvPOK(ciphertext_out) || SvUTF8(ciphertext_out) || SvIsCOW(ciphertext_out))
+      if (!SvPOK(ciphertext_out) || SvUTF8(ciphertext_out))
          croak("ciphertext_out must be a non-UTF8 byte string scalar or SecretBuffer");
       out_ptr= (U8*) SvPVX(ciphertext_out);
       out_capacity= SvLEN(ciphertext_out) > 0? SvLEN(ciphertext_out)-1 : 0;
-      len= SvCUR(ciphertext_out);
-      secret_addr= (size_t) secret;
-      out_addr= (size_t) out_ptr;
-      if (secret_addr >= out_addr && secret_addr < out_addr + len)
+      if (secret >= out_ptr && secret < out_ptr + out_capacity) {
          inplace= true;
-   }
-
-   /* branch for stream-based encryption */
-   if (cipher == EVP_aes_256_gcm()) {
-      U8 *ciphertext_pos, *ciphertext_lim, *nonce, *gcm_tag;
-      const U8 *secret_pos, *secret_lim;
-      U8 prefix_buf[CMK_PAD_PREFIX_MAX_SIZE];
-      size_t prefix_len= 0, padded_len= secret_len;
-
-      /* check if length-hiding requested */
-      svp= hv_fetchs(params, "pad", 0);
-      if (svp && *svp && SvTRUE(*svp)) {
-         uint64_t packed_secret_len;
-         size_t rem;
-         IV pad= SvIV(*svp);
-         if (pad < 1)
-            GOTO_CLEANUP_CROAK("pad must be greater than 0");
-         /* generate random prefix bytes */
-         if (RAND_bytes(prefix_buf, sizeof(prefix_buf)) != 1)
-            GOTO_CLEANUP_CROAK("Failed to generate random prefix");
-         /* hash the first 8 bytes to determine how many random bytes to include */
-         prefix_len= 8 + CMK_PAD_PREFIX_VARSIZE(prefix_buf) + 8;
-         /* now store the true secret length as little-endian 64-bit */
-         packed_secret_len= htole64(secret_len);
-         memcpy(prefix_buf + prefix_len - 8, &packed_secret_len, 8);
-         /* then take the prefix length and secret length and round them up to a multiple of pad */
-         padded_len+= prefix_len;
-         rem= padded_len % pad;
-         if (rem) padded_len+= pad - rem;
+         if (need_out_len > out_capacity || SvIsCOW(ciphertext_out))
+            GOTO_CLEANUP_CROAK("inplace encryption requires preallocated non-shared output capacity");
       }
-      if (padded_len < secret_len)
-         GOTO_CLEANUP_CROAK("ciphertext length overflow");
-
-      needed_len= padded_len + CMK_AES_256_GCM_NONCE_LEN + CMK_AES_256_GCM_TAG_LEN;
-      if (needed_len < padded_len)
-         GOTO_CLEANUP_CROAK("ciphertext length overflow");
-      if (inplace && prefix_len)
-         GOTO_CLEANUP_CROAK("'pad' is incompatible with inplace encryption");
-      if (inplace && needed_len > out_capacity)
-         GOTO_CLEANUP_CROAK("inplace encryption requires preallocated output capacity");
-
-      /* Ciphertext layout for AES-GCM is:
-       *    [ciphertext bytes][nonce][gcm_tag]
-       * which allows straightforward in-place encryption of the leading secret bytes.
-       */
-      if (ciphertext_sb) {
-         if (inplace)
-            ciphertext_sb->len= needed_len;
-         else
-            secret_buffer_set_len(ciphertext_sb, needed_len);
-         out_ptr= (U8*) ciphertext_sb->data;
-      }
-      else if (inplace) {
-         SvCUR_set(ciphertext_out, needed_len);
-         *SvEND(ciphertext_out)= '\0';
+      else if (need_out_len > out_capacity) {
+         /* include NUL terminator and room to convert scalar to CoW if needed */
+         sv_grow(ciphertext_out, need_out_len + 1 + sizeof(char*)*2);
          out_ptr= (U8*) SvPVX(ciphertext_out);
       }
-      else
-         out_ptr= (U8*) cmk_prepare_sv_buffer(ciphertext_out, needed_len);
+   }
+   if (inplace && padded_len > secret_len)
+      croak("pad feature cannot be encrypted in-place");
+
+   /* AES-XTS operates by performing one encryption for each sector of the input, using the
+    * sector number as the initialization vector for that encryption.  That's specific enough
+    * that it gets its own setup and loop.
+    */
+   if (is_xts) {
+      size_t sector_size = 512;  /* default to 512-byte sectors for dm-crypt compatibility */
+      uint64_t sector_idx = 0;
+      size_t num_sectors, sector, offset;
+
+      /* Get XTS sector size if specified */
+      svp= hv_fetchs(params, "sector_size", 0);
+      if (svp && *svp && SvOK(*svp)) {
+         IV sector_size_iv = SvIV(*svp);
+         if (sector_size_iv < 16 || sector_size_iv > 1024*1024
+            || round_up_to_pow2((size_t)sector_size_iv) != (size_t)sector_size_iv)
+            GOTO_CLEANUP_CROAK("sector_size must be a power of 2 between 16 and 1MiB (or between 512 and 4KiB for dm-crypt compat)");
+         sector_size = (size_t)sector_size_iv;
+      } else {
+         /* Store default sector size */
+         if (!hv_stores(params, "sector_size", (sv= newSViv(sector_size))))
+            GOTO_CLEANUP_CROAK("hv_store");
+         sv= NULL;
+      }
+      num_sectors= secret_len / sector_size;
+      if (num_sectors * sector_size != secret_len)
+         GOTO_CLEANUP_CROAK("secret must be an even multiple of sector_size");
+
+      /* get index of starting sector */
+      svp= hv_fetchs(params, "sector_idx", 0);
+      if (svp && *svp && SvOK(*svp)) {
+         IV sector_idx_iv = SvIV(*svp);
+         if (sector_idx_iv < 0)
+            GOTO_CLEANUP_CROAK("sector_idx must be non-negative");
+         sector_idx = (uint64_t)sector_idx_iv;
+      }
+
+      if (!(aes_ctx = EVP_CIPHER_CTX_new()))
+         GOTO_CLEANUP_CROAK("AES context creation failed");
+
+      offset= 0;
+      for (sector = 0; sector < num_sectors; offset += sector_size, sector++) {
+         /* XTS uses the sector number as the 'tweak' value */
+         uint64_t tweak[2]= { htole64(sector_idx + sector), 0 };
+
+         if (EVP_EncryptInit_ex(aes_ctx, cipher, NULL, aes_key->data, (U8*)tweak) != 1)
+            GOTO_CLEANUP_CROAK("AES-XTS init failed");
+
+         if (EVP_EncryptUpdate(aes_ctx, out_ptr + offset, &outlen, 
+                               secret + offset, (int)sector_size) != 1
+            || (size_t)outlen != sector_size)
+            GOTO_CLEANUP_CROAK("AES-XTS encrypt failed");
+
+         if (EVP_EncryptFinal_ex(aes_ctx, NULL, &outlen) != 1)
+            GOTO_CLEANUP_CROAK("AES-XTS final failed");
+      }
+   }
+   else { /* not -XTS */
+      U8 *ciphertext_pos, *ciphertext_lim, *nonce, *gcm_tag, *flags_p;
+      const U8 *secret_pos, *secret_lim;
 
       ciphertext_pos= out_ptr;
       ciphertext_lim= out_ptr + padded_len;
       nonce= ciphertext_lim;
       gcm_tag= nonce + CMK_AES_256_GCM_NONCE_LEN;
+      flags_p= gcm_tag + CMK_AES_256_GCM_TAG_LEN;
+      
+      ASSUME(flags_p + CMK_FLAGS_SIZE == out_ptr + need_out_len);
 
       if (RAND_bytes(nonce, CMK_AES_256_GCM_NONCE_LEN) != 1)
          GOTO_CLEANUP_CROAK("Failed to generate GCM nonce");
@@ -1564,7 +1656,7 @@ void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret,
       )
          GOTO_CLEANUP_CROAK("AES-GCM init failed");
 
-      /* The integrity_context parameter allows the user to include AAD
+      /* The auth_data parameter allows the user to include AAD
        * (Additional Authenticated Data) into the GCM counter so that the GCM tag is
        * validating the authenticity of the secret *and* the additional data, even
        * though the additional data is not included in the ciphertext.
@@ -1575,7 +1667,7 @@ void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret,
          const U8 *aad = (const U8*)secret_buffer_SvPVbyte(*svp, &aad_len);
          if (aad_len) {
             if (EVP_EncryptUpdate(aes_ctx, NULL, &outlen, aad, (int)aad_len) != 1)
-               GOTO_CLEANUP_CROAK("AES-GCM add integrity_context failed");
+               GOTO_CLEANUP_CROAK("AES-GCM add auth_data failed");
          }
       }
 
@@ -1584,7 +1676,6 @@ void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret,
             || outlen != (int)prefix_len)
             GOTO_CLEANUP_CROAK("AES-GCM encrypt (secret_len) failed");
          ciphertext_pos += prefix_len;
-         OPENSSL_cleanse(prefix_buf, prefix_len);
       }
 
       for (secret_pos= secret, secret_lim= secret+secret_len; secret_pos < secret_lim;) {
@@ -1618,83 +1709,21 @@ void cmk_symmetric_encrypt(HV *params, secret_buffer *aes_key, const U8 *secret,
 
       if (EVP_CIPHER_CTX_ctrl(aes_ctx, EVP_CTRL_GCM_GET_TAG, CMK_AES_256_GCM_TAG_LEN, gcm_tag) != 1)
          GOTO_CLEANUP_CROAK("AES-GCM get tag failed");
+
+      /* write flags */
+      flags_p[0]= (U8)(flags & 0xFF);
+      flags_p[1]= (U8)(flags >> 8);
    }
-   else { /* branch for block-based encryption */
-      size_t block_size = 512;  /* default to 512-byte sectors for dm-crypt compatibility */
-      uint64_t block_idx = 0;
-      size_t num_blocks, block, offset;
-      U8 *ciphertext;
-
-      if (aes_key->len != CMK_AES_256_XTS_KEY_LEN)
-         GOTO_CLEANUP_CROAK("Wrong key length for cipher");
-
-      /* Get XTS block size if specified */
-      svp= hv_fetchs(params, "block_size", 0);
-      if (svp && *svp && SvOK(*svp)) {
-         IV block_size_iv = SvIV(*svp);
-         if (block_size_iv < 16 || block_size_iv > 1024*1024
-            || round_up_to_pow2((size_t)block_size_iv) != (size_t)block_size_iv)
-            GOTO_CLEANUP_CROAK("block_size must be a power of 2 between 16 and 1MiB");
-         block_size = (size_t)block_size_iv;
-      } else {
-         /* Store default block size */
-         if (!hv_stores(params, "block_size", (sv= newSViv(block_size))))
-            GOTO_CLEANUP_CROAK("hv_store");
-         sv= NULL;
-      }
-      num_blocks= secret_len / block_size;
-      if (num_blocks * block_size != secret_len)
-         GOTO_CLEANUP_CROAK("secret must be an even multiple of block_size");
-      needed_len= num_blocks * block_size;
-
-      /* get block index */
-      svp= hv_fetchs(params, "block_idx", 0);
-      if (svp && *svp && SvOK(*svp)) {
-         IV block_idx_iv = SvIV(*svp);
-         if (block_idx_iv < 0)
-            GOTO_CLEANUP_CROAK("block_idx must be non-negative");
-         block_idx = (uint64_t)block_idx_iv;
-      }
-
-      if (!(aes_ctx = EVP_CIPHER_CTX_new()))
-         GOTO_CLEANUP_CROAK("AES-XTS context creation failed");
-
-      if (inplace && needed_len > out_capacity)
-         GOTO_CLEANUP_CROAK("inplace encryption requires preallocated output capacity");
-
-      if (ciphertext_sb) {
-         if (inplace)
-            ciphertext_sb->len= needed_len;
-         else
-            secret_buffer_set_len(ciphertext_sb, needed_len);
-         ciphertext= (U8*) ciphertext_sb->data;
-      }
-      else if (inplace) {
-         SvCUR_set(ciphertext_out, needed_len);
-         *SvEND(ciphertext_out)= '\0';
-         ciphertext= (U8*) SvPVX(ciphertext_out);
-      }
-      else
-         ciphertext= (U8*) cmk_prepare_sv_buffer(ciphertext_out, needed_len);
-
-      offset= 0;
-      for (block = 0; block < num_blocks; offset += block_size, block++) {
-         /* XTS uses the block number as the 'tweak' value */
-         uint64_t tweak[2]= { htole64(block_idx + block), 0 };
-
-         if (EVP_EncryptInit_ex(aes_ctx, cipher, NULL, aes_key->data, (U8*)tweak) != 1)
-            GOTO_CLEANUP_CROAK("AES-XTS init failed");
-
-         if (EVP_EncryptUpdate(aes_ctx, ciphertext + offset, &outlen, 
-                               secret + offset, (int)block_size) != 1
-            || (size_t)outlen != block_size)
-            GOTO_CLEANUP_CROAK("AES-XTS encrypt failed");
-
-         if (EVP_EncryptFinal_ex(aes_ctx, NULL, &outlen) != 1)
-            GOTO_CLEANUP_CROAK("AES-XTS final failed");
-      }
+   /* Update output container official length, delayed in case input and output buffers overlap.
+    * Capacity was ensured earlier. */
+   if (ciphertext_sb) {
+      secret_buffer_set_len(ciphertext_sb, need_out_len);
+   } else {
+      SvCUR_set(ciphertext_out, need_out_len);
+      *SvEND(ciphertext_out)= '\0';
    }
 cleanup:
+   OPENSSL_cleanse(prefix_buf, sizeof(prefix_buf));
    if (sv) SvREFCNT_dec(sv);
    if (aes_ctx) EVP_CIPHER_CTX_free(aes_ctx);
    if (err) cmk_croak_with_ssl_error("symmetric_encrypt", err);
@@ -1702,12 +1731,22 @@ cleanup:
 
 /* Perform symmetric decryption using the supplied AES key and ciphertext and parameters,
  * storing the original secret into secret_out.
+ *
+ * Like cmk_symmetric_encrypt, this can perform an in-place decryption by passing the secret_out
+ * data pointer as the `ciphertext` pointer, but restricted to XTS mode or GCM without the 'pad'
+ * feature.
  */
 void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, const U8 *ciphertext, size_t ciphertext_len, secret_buffer *secret_out) {
    const char *err= NULL;
    const EVP_CIPHER *cipher= NULL;
    EVP_CIPHER_CTX *aes_ctx = NULL;
-   int outlen, final_len;
+   int outlen, final_len, need_key_len;
+   bool is_xts= false;
+   U8 prefix_buf[CMK_PAD_PREFIX_MAX_SIZE];
+   size_t prefix_len;
+   /* check for overlap between input and output */
+   bool inplace= secret_out->capacity && ciphertext >= (U8*) secret_out->data
+      && ciphertext < (U8*) secret_out->data + secret_out->capacity;
    STRLEN len;
    U8 *buf;
    SV **svp;
@@ -1720,48 +1759,103 @@ void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, const U8 *ciphert
       croak("Missing 'cipher'");
    buf= (U8*) secret_buffer_SvPVbyte(*svp, &len);
    if (len == 11 && memcmp(buf, "AES-256-GCM", 11) == 0) {
-      if (aes_key->len != CMK_AES_256_GCM_KEY_LEN)
-         croak("Wrong key length for AES-256-GCM");
+      need_key_len= CMK_AES_256_GCM_KEY_LEN;
       cipher= EVP_aes_256_gcm();
    }
    else if (len == 11 && memcmp(buf, "AES-256-XTS", 11) == 0) {
-      if (aes_key->len != CMK_AES_256_XTS_KEY_LEN)
-         croak("Wrong key length for AES-256-XTS");
+      need_key_len= CMK_AES_256_XTS_KEY_LEN;
       cipher= EVP_aes_256_xts();
+      is_xts= true;
    }
    else
       croak("Unsupported cipher");
 
-   /* branch for stream ciphers, curently only AES-256-GCM */
-   if (cipher == EVP_aes_256_gcm()) {
-      U8 *ciphertext_pos, *ciphertext_lim, *nonce, *gcm_tag, *secret_pos, *secret_lim;
-      size_t secret_len;
-      const U8 *ciphertext_full= ciphertext;
-      bool inplace= false;
-      size_t secret_out_addr;
-      size_t ciphertext_addr;
+   if (aes_key->len != (size_t) need_key_len)
+      croak("Wrong key length for cipher (%d, need %d)", (int)aes_key->len, need_key_len);
 
-      if (ciphertext_len < CMK_AES_256_GCM_NONCE_LEN + CMK_AES_256_GCM_TAG_LEN)
-         croak("ciphertext smaller than minimum length (GCM nonce+tag)");
-      secret_len= ciphertext_len - CMK_AES_256_GCM_NONCE_LEN - CMK_AES_256_GCM_TAG_LEN;
-      ciphertext_pos= (U8*) ciphertext_full;
-      ciphertext_lim= ciphertext_pos + secret_len;
+   /* AES-XTS operates by performing one encryption for each sector of the input, using the
+    * sector number as the initialization vector for that encryption.  That's specific enough
+    * that it gets its own setup and loop.
+    */
+   if (is_xts) {
+      size_t sector_size = 512;  /* default to 512-byte sectors for dm-crypt compatibility */
+      uint64_t sector_idx= 0;
+      size_t num_sectors, sector, offset;
+
+      /* Get XTS sector size if not default of 512 */
+      svp= hv_fetchs(params, "sector_size", 0);
+      if (svp && *svp && SvOK(*svp)) {
+         IV sector_size_iv = SvIV(*svp);
+         if (sector_size_iv < 16 || sector_size_iv > 1024*1024
+            || round_up_to_pow2((size_t)sector_size_iv) != (size_t)sector_size_iv)
+            GOTO_CLEANUP_CROAK("sector_size must be a power of 2 between 16 and 1MiB");
+         sector_size = (size_t)sector_size_iv;
+      }
+
+      num_sectors= ciphertext_len / sector_size;
+      if (num_sectors * sector_size != ciphertext_len)
+         GOTO_CLEANUP_CROAK("ciphertext must be an even multiple of sector_size");
+      /* if doing inplace decryption, the secretbuffer will already need to be large enough,
+         so this won't be a problem. */
+      if (secret_out->capacity < ciphertext_len)
+         secret_buffer_alloc_at_least(secret_out, ciphertext_len);
+
+      /* get sector index */
+      svp= hv_fetchs(params, "sector_idx", 0);
+      if (svp && *svp && SvOK(*svp)) {
+         IV sector_idx_iv = SvIV(*svp);
+         if (sector_idx_iv < 0)
+            GOTO_CLEANUP_CROAK("sector_idx must be non-negative");
+         sector_idx = (uint64_t)sector_idx_iv;
+      }
+
+      if (!(aes_ctx = EVP_CIPHER_CTX_new()))
+         GOTO_CLEANUP_CROAK("AES-XTS context creation failed");
+
+      offset= 0;
+      for (sector = 0; sector < num_sectors; offset += sector_size, sector++) {
+         /* XTS uses the sector number as the 'tweak' value */
+         uint64_t tweak[2]= { htole64(sector_idx + sector), 0 };
+
+         if (EVP_DecryptInit_ex(aes_ctx, cipher, NULL, aes_key->data, (U8*)tweak) != 1)
+            GOTO_CLEANUP_CROAK("AES-XTS decrypt init failed");
+
+         if (EVP_DecryptUpdate(aes_ctx, secret_out->data + offset, &outlen,
+                               ciphertext + offset, (int)sector_size) != 1
+            || (size_t)outlen != sector_size)
+            GOTO_CLEANUP_CROAK("AES-XTS decrypt failed");
+
+         if (EVP_DecryptFinal_ex(aes_ctx, NULL, &final_len) != 1)
+            GOTO_CLEANUP_CROAK("AES-XTS decrypt final failed");
+      }
+      /* capacity was already ensured, now update official length */
+      secret_buffer_set_len(secret_out, ciphertext_len);
+   }
+   else { /* not -XTS */
+      const U8 *ciphertext_pos, *ciphertext_lim, *nonce, *gcm_tag;
+      U8 *secret_pos, *secret_lim;
+      int flags;
+      size_t secret_len;
+
+      if (ciphertext_len < CMK_AES_256_GCM_NONCE_LEN + CMK_AES_256_GCM_TAG_LEN + CMK_FLAGS_SIZE)
+         croak("ciphertext length (%ld) smaller than minimum GCM nonce+tag +flags", (long)ciphertext_len);
+      flags= (ciphertext[ciphertext_len-1] << 8) | ciphertext[ciphertext_len-2];
+      ciphertext_len -= CMK_AES_256_GCM_NONCE_LEN + CMK_AES_256_GCM_TAG_LEN + CMK_FLAGS_SIZE;
+      secret_len= ciphertext_len;
+      ciphertext_pos= ciphertext;
+      ciphertext_lim= ciphertext + ciphertext_len;
       nonce= ciphertext_lim;
       gcm_tag= nonce + CMK_AES_256_GCM_NONCE_LEN;
-      secret_out_addr= (size_t) secret_out->data;
-      ciphertext_addr= (size_t) ciphertext_full;
-      if (ciphertext_addr >= secret_out_addr && ciphertext_addr < secret_out_addr + secret_out->len)
-         inplace= true;
-      
+
       if (!(aes_ctx = EVP_CIPHER_CTX_new())
          || EVP_DecryptInit_ex(aes_ctx, cipher, NULL, NULL, NULL) != 1
          || EVP_CIPHER_CTX_ctrl(aes_ctx, EVP_CTRL_GCM_SET_IVLEN, CMK_AES_256_GCM_NONCE_LEN, NULL) != 1
          || EVP_DecryptInit_ex(aes_ctx, NULL, NULL, (U8*) aes_key->data, nonce) != 1
-         || EVP_CIPHER_CTX_ctrl(aes_ctx, EVP_CTRL_GCM_SET_TAG, CMK_AES_256_GCM_TAG_LEN, gcm_tag) != 1
+         || EVP_CIPHER_CTX_ctrl(aes_ctx, EVP_CTRL_GCM_SET_TAG, CMK_AES_256_GCM_TAG_LEN, (U8*) gcm_tag) != 1
       )
          GOTO_CLEANUP_CROAK("AES-GCM decrypt init failed");
 
-      /* The integrity_context parameter allows the user to include AAD
+      /* The auth_data parameter allows the user to include AAD
        * (Additional Authenticated Data) into the GCM counter so that the GCM tag is
        * validating the authenticity of the secret *and* the additional data, even
        * though the additional data is not included in the ciphertext.
@@ -1772,15 +1866,14 @@ void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, const U8 *ciphert
          const U8 *aad = (const U8*)secret_buffer_SvPVbyte(*svp, &aad_len);
          if (aad_len) {
             if (EVP_DecryptUpdate(aes_ctx, NULL, &outlen, aad, (int)aad_len) != 1)
-               GOTO_CLEANUP_CROAK("AES-GCM add integrity_context failed");
+               GOTO_CLEANUP_CROAK("AES-GCM add auth_data failed");
          }
       }
       /* check if length obfuscation was used */
-      svp= hv_fetchs(params, "pad", 0);
-      if (svp && *svp && SvTRUE(*svp)) {
+      if (flags & CMK_FLAG_HAS_PREFIX) {
          uint64_t packed_secret_len;
-         U8 prefix_buf[CMK_PAD_PREFIX_MAX_SIZE];
-         size_t prefix_len;
+         if (inplace)
+            croak("pad feature cannot be decrypted in-place");
          /* read up to PREFIX_MAX_SIZE of potential prefix */
          len= ciphertext_len < sizeof(prefix_buf)? ciphertext_len : sizeof(prefix_buf);
          if (len < CMK_PAD_PREFIX_MIN_SIZE)
@@ -1794,37 +1887,31 @@ void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, const U8 *ciphert
          /* now load the true secret length as little-endian 64-bit */
          memcpy(&packed_secret_len, prefix_buf + prefix_len - 8, 8);
          secret_len= le64toh(packed_secret_len);
-         /* sanity check */
-         if (ciphertext_len < prefix_len + secret_len)
+         /* sanity check.  secret_len could be INT_MAX etc, so guard against overflow */
+         if (secret_len > ciphertext_len || prefix_len > ciphertext_len - secret_len)
             GOTO_CLEANUP_CROAK("Ciphertext is too short to be a padded secret");
-         /* allocate secret buffer and set up position pointers */
-         if (inplace) {
-            if (secret_len > secret_out->capacity)
-               GOTO_CLEANUP_CROAK("inplace decryption requires sufficient output capacity");
-         }
-         else
-            secret_buffer_set_len(secret_out, secret_len);
-         secret_pos= (U8*) secret_out->data;
-         secret_lim= secret_pos + secret_len;
-         /* copy across any bytes that were already decrypted and not part of the prefix */
-         if (outlen > prefix_len) {
-            size_t n= outlen - prefix_len;
-            if (n > secret_len)
-               n= secret_len;
-            memcpy(secret_pos, prefix_buf+prefix_len, n);
-            secret_pos += n;
-         }
          ciphertext_pos += outlen;
-         OPENSSL_cleanse(prefix_buf, sizeof(prefix_buf));
-      } else {
-         if (inplace) {
-            if (secret_len > secret_out->capacity)
-               GOTO_CLEANUP_CROAK("inplace decryption requires sufficient output capacity");
-         }
-         else
-            secret_buffer_set_len(secret_out, secret_len);
-         secret_pos= (U8*) secret_out->data;
-         secret_lim= secret_pos + secret_len;
+         /* output data inside prefix_buf gets copied below, after reallocating output buffer */
+      }
+      /* allocate secret buffer and set up position pointers */
+      if (secret_len > secret_out->capacity) {
+         if (inplace)
+            GOTO_CLEANUP_CROAK("inplace decryption requires sufficient output capacity");
+         secret_buffer_alloc_at_least(secret_out, secret_len);
+      }
+      /* ensure sb wipes anything we write beyond the current ->len by growing len,
+       * but don't shrink len yet, or it would break inplace. */
+      if (secret_len > secret_out->len)
+         secret_out->len= secret_len;
+      secret_pos= (U8*) secret_out->data;
+      secret_lim= secret_pos + secret_len;
+      /* copy across any bytes that were already decrypted and not part of the prefix */
+      if ((flags & CMK_FLAG_HAS_PREFIX) && outlen > prefix_len) {
+         size_t n= outlen - prefix_len;
+         if (n > secret_len)
+            n= secret_len;
+         memcpy(secret_pos, prefix_buf+prefix_len, n);
+         secret_pos += n;
       }
       while (ciphertext_pos < ciphertext_lim) {
          if (secret_pos < secret_lim) {
@@ -1852,59 +1939,11 @@ void cmk_symmetric_decrypt(HV *params, secret_buffer *aes_key, const U8 *ciphert
       if (EVP_DecryptFinal_ex(aes_ctx, NULL, &final_len) != 1
          || final_len != 0)
          GOTO_CLEANUP_CROAK("AES-GCM decrypt failed, gcm_tag mismatch");
-      if (inplace)
-         secret_out->len= secret_len;
-   }
-   else { /* branch for block ciphers */
-      size_t block_size = 512;  /* default to 512-byte sectors for dm-crypt compatibility */
-      uint64_t block_idx= 0;
-      size_t num_blocks, block, offset;
-
-      /* Get XTS block size if not default of 512 */
-      svp= hv_fetchs(params, "block_size", 0);
-      if (svp && *svp && SvOK(*svp)) {
-         IV block_size_iv = SvIV(*svp);
-         if (block_size_iv < 16 || block_size_iv > 1024*1024
-            || round_up_to_pow2((size_t)block_size_iv) != (size_t)block_size_iv)
-            GOTO_CLEANUP_CROAK("block_size must be a power of 2 between 16 and 1MiB");
-         block_size = (size_t)block_size_iv;
-      }
-
-      num_blocks= ciphertext_len / block_size;
-      if (num_blocks * block_size != ciphertext_len)
-         GOTO_CLEANUP_CROAK("ciphertext must be an even multiple of block_size");
-      secret_buffer_set_len(secret_out, ciphertext_len);
-
-      /* get block index */
-      svp= hv_fetchs(params, "block_idx", 0);
-      if (svp && *svp && SvOK(*svp)) {
-         IV block_idx_iv = SvIV(*svp);
-         if (block_idx_iv < 0)
-            GOTO_CLEANUP_CROAK("block_idx must be non-negative");
-         block_idx = (uint64_t)block_idx_iv;
-      }
-
-      if (!(aes_ctx = EVP_CIPHER_CTX_new()))
-         GOTO_CLEANUP_CROAK("AES-XTS context creation failed");
-
-      offset= 0;
-      for (block = 0; block < num_blocks; offset += block_size, block++) {
-         /* XTS uses the block number as the 'tweak' value */
-         uint64_t tweak[2]= { htole64(block_idx + block), 0 };
-
-         if (EVP_DecryptInit_ex(aes_ctx, cipher, NULL, aes_key->data, (U8*)tweak) != 1)
-            GOTO_CLEANUP_CROAK("AES-XTS decrypt init failed");
-
-         if (EVP_DecryptUpdate(aes_ctx, secret_out->data + offset, &outlen,
-                               ciphertext + offset, (int)block_size) != 1
-            || (size_t)outlen != block_size)
-            GOTO_CLEANUP_CROAK("AES-XTS decrypt failed");
-
-         if (EVP_DecryptFinal_ex(aes_ctx, NULL, &final_len) != 1)
-            GOTO_CLEANUP_CROAK("AES-XTS decrypt final failed");
-      }
+      /* capacity was ensured earlier */
+      secret_buffer_set_len(secret_out, secret_len);
    }
 cleanup:
+   OPENSSL_cleanse(prefix_buf, sizeof(prefix_buf));
    if (aes_ctx) EVP_CIPHER_CTX_free(aes_ctx);
    if (err) {
       secret_buffer_set_len(secret_out, 0); /* calls OPENSSL_cleanse */
