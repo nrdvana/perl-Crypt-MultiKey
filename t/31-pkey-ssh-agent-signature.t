@@ -15,12 +15,11 @@ use Crypt::MultiKey::PKey::SSHAgentSignature;
       bless {}, $class;
    }
 
-   sub get_key_list {
-      return [
+   sub list_keys {
+      return
          { type => 'ecdsa-sha2-nistp256', pubkey_base64 => 'NOPE', comment => 'ignored' },
          { type => 'ssh-ed25519', pubkey_base64 => 'AAA_KEY_1', comment => 'first-key' },
-         { type => 'ssh-rsa', pubkey_base64 => 'AAA_KEY_2', comment => 'deploy-key' },
-      ];
+         { type => 'ssh-rsa', pubkey_base64 => 'AAA_KEY_2', comment => 'deploy-key' };
    }
 
    sub sign {
@@ -71,11 +70,10 @@ $ambiguous->{agent}= bless {}, 'TestAgentDup';
    use strict;
    use warnings;
 
-   sub get_key_list {
-      return [
+   sub list_keys {
+      return
          { type => 'ssh-rsa', pubkey_base64 => 'A1', comment => 'dup-key' },
-         { type => 'ssh-dsa', pubkey_base64 => 'A2', comment => 'dup-key' },
-      ];
+         { type => 'ssh-dsa', pubkey_base64 => 'A2', comment => 'dup-key' };
    }
 
    sub sign {

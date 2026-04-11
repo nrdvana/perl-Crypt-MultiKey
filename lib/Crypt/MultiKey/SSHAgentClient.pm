@@ -5,8 +5,8 @@ package Crypt::MultiKey::SSHAgentClient;
 =head1 SYNOPSIS
 
   my $agent= Crypt::MultiKey::SSHAgentClient->new;
-  my $keys= $agent->get_key_list;
-  my $signature_bytes= $agent->sign($keys->[0], $data_bytes);
+  my @keys= $agent->list_keys;
+  my $signature_bytes= $agent->sign($keys[0], $data_bytes);
 
 =head1 DESCRIPTION
 
@@ -20,6 +20,7 @@ back to running the L<ssh-add(1)> and L<ssh-keygen(1)> commands.
 use v5.10;
 use warnings;
 use Carp;
+use Time::HiRes qw( time );
 use Crypt::SecretBuffer qw( secret );
 use IO::Socket::UNIX;
 use MIME::Base64;
@@ -29,8 +30,8 @@ use IPC::Open3;
 
 =constructor new
 
-Create a new object.  This object connects to the agent on demand, so it creating the object
-might succeed but then throw an exception during C<get_key_list> if it can't connect and the
+Create a new object.  This object connects to the agent on demand, so creating the object
+might succeed but then throw an exception during C<list_keys> if it can't connect and the
 C<ssh-add> program isn't found or C<ssh-keygen> doesn't support C<-Y>.
 
 =cut
@@ -84,9 +85,9 @@ sub ssh_keygen_cmd {
    : ($_[0]{ssh_keygen_cmd} || $Crypt::MultiKey::command_path{'ssh-keygen'} || 'ssh-keygen')
 }
 
-=method get_key_list
+=method list_keys
 
-  my @keys= $agent->get_key_list;
+  my @keys= $agent->list_keys;
   # (
   #   { type          => $algo,
   #     pubkey_base64 => $base64,
@@ -98,13 +99,23 @@ sub ssh_keygen_cmd {
 Return a list of keys available in the agent.  C<type>, C<pubkey_base64>, and C<comment> are
 the exact strings seen in the output of C<< ssh-add -L >>.
 
+This list is cached for 0.1s to avoid spamming the connection if many PKeys are being checked.
+
 =cut
 
-sub get_key_list {
+sub list_keys {
    my $self= shift;
-   my $list= eval { $self->_get_key_list_via_agent_socket };
-   return $list if $list;
-   return $self->_get_key_list_via_ssh_add;
+   return @{$self->{_keys_cache}}
+      if defined $self->{_keys_cache}
+         && $self->{_keys_cache_ts} >= time - .1
+         && $self->{_keys_cache_ts} <= time; # guard against clock changes
+   my $list;
+   unless (eval { $list= $self->_get_key_list_via_agent_socket; 1 }) {
+      $list= $self->_get_key_list_via_ssh_add;
+   }
+   $self->{_keys_cache}= $list;
+   $self->{_keys_cache_ts}= time;
+   return @$list;
 }
 
 =method sign
@@ -112,7 +123,7 @@ sub get_key_list {
   my $signature_bytes= $agent->sign($pubkey, $data_bytes, $namespace);
 
 The C<$pubkey> can be either the base64 string of the public key, or the hashref for that key
-returned by C<get_key_list>.  C<$data_bytes> can be any scalar containing bytes.
+returned by C<list_keys>.  C<$data_bytes> can be any scalar containing bytes.
 The C<$namespace> defaults to C<"Crypt::MultiKey">.
 
 =cut
@@ -364,8 +375,8 @@ sub _run_cmd {
    croak "Failed to execute '$_[0]': $cmd"
       unless $pid;
    local $/;
-   my $out= <$rdr> // '';
-   my $err= <$err> // '';
+   $out= <$out> // '';
+   $err= <$err> // '';
    waitpid($pid, 0);
    return ($?, $out, $err);
 }

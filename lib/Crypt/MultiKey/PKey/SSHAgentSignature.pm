@@ -43,9 +43,13 @@ a custom SSH socket or path to the ssh-add and ssh-keygen commands.
 
 =over
 
+=item has_agent
+
+True if the agent has been lazy-built, or assigned
+
 =item usable_agent_keys
 
-Call C<< ->agent->get_key_list >> and filter for key types with a deterministic signature
+Call C<< ->agent->list_keys >> and filter for key types with a deterministic signature
 algorithm. (ssh-rsa, ssh-dsa, ssh-ed25519)
 
 =back
@@ -53,14 +57,24 @@ algorithm. (ssh-rsa, ssh-dsa, ssh-ed25519)
 =cut
 
 sub agent {
-   require Crypt::MultiKey::SSHAgentClient;
-   $_[0]{agent} ||= Crypt::MultiKey::SSHAgentClient->new;
+   @_ > 1? shift->_set_agent(@_)
+   : ($_[0]{agent} //= do {
+      require Crypt::MultiKey::SSHAgentClient;
+      Crypt::MultiKey::SSHAgentClient->new;
+     });
+}
+sub has_agent { defined $_[0]{agent} }
+sub _set_agent {
+   my ($self, $val)= @_;
+   blessed($val) && $val->can('list_keys') && $val->can('sign')
+      or croak "Expected an instance of Crypt::MultiKey::SSHAgentClient";
+   $self->{agent}= $val;
 }
 
 our %usable_type= ( map +($_ => 1), qw( ssh-rsa ssh-dsa ssh-ed25519 ) );
 sub usable_agent_keys {
    my $self= shift;
-   grep $usable_type{$_->{type}}, @{ $self->agent->get_key_list };
+   grep $usable_type{$_->{type}}, $self->agent->list_keys;
 }
 
 =attribute agent_pubkey
@@ -87,14 +101,17 @@ sub _set_kdf_salt { $_[0]{kdf_salt}= $_[1] }
 
 Returns true if the resources needed for obtaining the private half of the PKey are available.
 For SSHAgentSignature, this means that the SSH agent is available and C<< "ssh-add -L" >>
-includes the L</agent_pubkey>.
+includes the L</agent_pubkey>.  Returns C<undef> on a permanent error like if no ssh-agent can
+be contacted.
 
 =cut
 
 sub can_obtain_private {
    my $self= shift;
    my $key= $self->agent_pubkey;
-   return scalar grep $_->{pubkey_base64} eq $key, eval { $self->usable_agent_keys };
+   my @usable_keys;
+   return undef unless eval { @usable_keys= $self->usable_agent_keys; 1 } && $key;
+   return !!grep $_->{pubkey_base64} eq $key, @usable_keys;
 }
 
 =method obtain_private

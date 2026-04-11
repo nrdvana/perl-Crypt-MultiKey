@@ -6,6 +6,7 @@ use v5.10;
 use warnings;
 use Carp;
 use Symbol ();
+use Time::HiRes qw( time );
 use MIME::Base64 qw( encode_base64 decode_base64 );
 use IPC::Open3 ();
 use Crypt::SecretBuffer qw( secret HEX ISO8859_1 );
@@ -111,7 +112,10 @@ sub _set_kdf_salt {
 
 sub _update_device_list {
    my $self= shift;
-   $self->{_device_list}= [ Crypt::MultiKey::YubicoOTP::list_devices() ];
+   $self->{_device_list}= [ Crypt::MultiKey::YubicoOTP::list_devices() ]
+      unless $self->{_device_list} && $self->{_device_list_ts}
+         && $self->{_device_list_ts} <= time && $self->{_device_list_ts} >= time - .1;
+   $self->{_device_list};
 }
 
 =method list_yubikeys
@@ -130,13 +134,20 @@ sub list_yubikeys {
 =method can_obtain_private
 
 Returns true if the configured YubiKey serial number is connected.
+Returns C<undef> on a permanent error like if the Yubico OTP tools can't be found.
 
 =cut
 
 sub can_obtain_private {
-   my $self= shift;
+   my ($self, %options)= @_;
    my $want= $self->yubikey_serial;
-   defined $want && grep $_->serial == $want, @{ $self->_update_device_list };
+   return undef unless Crypt::MultiKey::YubicoOTP::available() && defined $want;
+   # caller can supply the list of devices to avoid a re-scan
+   if ($options{yubico_otp_devices}) {
+      @{ $self->{_device_list} }= @{ $options{yubico_otp_devices} };
+      $self->{_device_list_ts}= time;
+   }
+   return !!grep $_->serial == $want, @{ $self->_update_device_list };
 }
 
 =method obtain_private

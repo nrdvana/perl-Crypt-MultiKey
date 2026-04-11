@@ -262,15 +262,17 @@ sub encrypt_private {
 =method can_obtain_private
 
 Returns true if FIDO2 support is available and at least one FIDO2 device with a matching
-L</fido_aaguid> is connected to the system.
+L</fido_aaguid> is connected to the system.  Returns false on a temporary error (like no
+matching fido device currently connected) or C<undef> on a fatal error like no FIDO2 library
+support.
 
 =cut
 
 sub can_obtain_private {
-   my $self= shift;
-   Crypt::MultiKey::FIDO2::enabled()
-      && defined $self->fido2_aaguid
-      && !!grep $_->aaguid eq $self->fido2_aaguid, Crypt::MultiKey::FIDO2::list_devices();
+   my ($self, %options)= @_;
+   return undef unless Crypt::MultiKey::FIDO2::available() && defined $self->fido2_aaguid;
+   my $dev_list= $options{fido2_devices} // [ Crypt::MultiKey::FIDO2::list_devices() ];
+   return !!grep $_->aaguid eq $self->fido2_aaguid, @$dev_list;
 }
 
 =method obtain_private

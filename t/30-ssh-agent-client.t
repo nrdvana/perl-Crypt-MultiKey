@@ -28,7 +28,7 @@ use Crypt::MultiKey::SSHAgentClient;
 }
 
 my $ok= TestClient->new;
-is($ok->get_key_list->[0]{comment}, 'sock', 'prefers socket keys');
+is( ($ok->list_keys)[0]{comment}, 'sock', 'prefers socket keys');
 my $sig_ok= $ok->sign('AAAATEST', 'data');
 ok($sig_ok->isa('Crypt::SecretBuffer'), 'prefers socket sign and returns SecretBuffer');
 my $sig_ok_bytes= '';
@@ -37,7 +37,7 @@ is($sig_ok_bytes, 'socket-signature', 'socket sign bytes');
 
 my $fallback= TestClient->new;
 $fallback->{socket_fail}= 1;
-is($fallback->get_key_list->[0]{comment}, 'fallback', 'falls back to ssh-add');
+is( ($fallback->list_keys)[0]{comment}, 'fallback', 'falls back to ssh-add');
 my $sig_fallback= $fallback->sign('AAAATEST', 'data');
 ok($sig_fallback->isa('Crypt::SecretBuffer'), 'falls back to ssh-keygen and returns SecretBuffer');
 my $sig_fallback_bytes= '';
