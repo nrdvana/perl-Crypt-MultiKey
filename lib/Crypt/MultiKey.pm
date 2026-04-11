@@ -4,7 +4,7 @@ package Crypt::MultiKey;
 
 =head1 SYNOPSIS
 
-  use Crypt::MultiKey qw( pkey coffer );
+  use Crypt::MultiKey qw( pkey coffer interactive_unlock );
   use Crypt::SecretBuffer qw( secret );
   
   # Encrypt data with your public key
@@ -51,7 +51,7 @@ L<age(1)> or libsodium) packaged as an object resembling a password safe
 (L<Coffer|Crypt::MultiKey::Coffer>) and also as an object representing encrypted block storage
 (L<Vault|Crypt::MultiKey::Vault>, similar to Linux LUKS) and comes with a handy
 L<PKey|Crypt::MultiKey::PKey> object that can load a variety of existing public/private key
-formats and use a variety of methods to decrypt them, such as
+formats and use a variety of methods to protect them, such as
 L<::PKey::FIDO2|Crypt::MultiKey::PKey::FIDO2> for using hardware authenticators as passwords.
 
 Since there are so many "secrets" and "keys" involved in this system, I'm using the following
@@ -138,7 +138,7 @@ use Carp;
 use Scalar::Util qw( blessed looks_like_number );
 use parent qw( DynaLoader Exporter );
 use MIME::Base64 qw/ encode_base64 decode_base64 /;
-use Crypt::SecretBuffer 0.020;
+use Crypt::SecretBuffer 0.024;
 use Crypt::SecretBuffer qw( secret span );
 use Encode ();
 sub dl_load_flags {0x01} # Share extern symbols with other modules
@@ -201,7 +201,9 @@ sub vault {
   #   kdf_salt       - salt bytes, will be generated if not provided
 
 This runs OpenSSL's C<EVP_PKEY_HKDF> with C<EVP_sha256>, supplying 'info' and 'salt' and storing
-the output into a new SecretBuffer object.
+the output into a new SecretBuffer object.  If kdf_salt was not provided in C<%params>, it will
+receive a randomly generated value, which you then need to save.  You can request "no salt" by
+setting kdf_salt to an empty string.
 
 =head2 sha256
 
@@ -228,34 +230,391 @@ The buffer contains raw bytes, not hex or base64.
   # or
   symmetric_encrypt(\%params, $aes_key, $secret, $ciphertext_out);
   # %params:
-  #   cipher     - Currently must be AES-256-GCM; will be assigned if unset
-  #   pad        - optionally harden the secret with a prefix of random bytes
-  #                and pad to specified length.
-  #   auth_data  - optional Additional Authenticated Data (AAD) for AES-GCM
-  #                to include in the validation tag of the ciphertext.
-  #                In other words, cause decryption to fail if it isn't given
-  #                identical 'auth_data'.  The failure will be indistinguishable
-  #                from an incorrect $aes_key.
-This performs encryption using a cipher (currently always C<AES-256-GCM>) and optional padding
+  #   cipher      - 'AES-256-GCM' or 'AES-256-XTS'; will be assigned if unset
+  #   pad         - optionally harden the secret with a prefix of random bytes
+  #                 and pad to specified length.
+  #   auth_data   - optional Additional Authenticated Data (AAD) for AES-GCM
+  #                 to include in the validation tag of the ciphertext.
+  #                 In other words, cause decryption to fail if it isn't given
+  #                 identical 'auth_data'.  The failure will be indistinguishable
+  #                 from an incorrect $aes_key.
+  #   sector_size - for XTS, specify the encryption size
+  #   sector_idx  - for XTS, specify the sector number of the first sector
+
+This performs encryption using a cipher (C<AES-256-GCM> or C<AES-256-XTS>) and optional padding
 to obscure the length of the secret.
 The ciphertext is returned, or written into C<$ciphertext_out> if supplied
 (which may be a byte scalar or C<Crypt::SecretBuffer>).
-You must preserve both C<%params> and the ciphertext to be passed to C<symmetric_decrypt>.
+You must preserve (or reconstruct) C<%params> in order to decrypt the ciphertext with
+C<symmetric_decrypt>.
+
 The C<$aes_key> should be a L<SecretBuffer|Crypt::SecretBuffer> object and must be the correct
 length for the cipher.  Use L</hkdf> to get a key the correct length.
 
 If you use C<auth_data>, you should I<not> serialize that alongside the other parameters, and
 instead reconstruct the C<auth_data> before decryption.
 
+For XTS encryption, the secret's length must be a multiple of the C<sector_size>.  Each sector
+gets encrypted individually, using the sector number as an initialization vector.  Unless you
+are encrypting from sector 0, you need to specify C<sector_idx>.
+
+This function can encrypt in-place (passing the same SecretBuffer for C<$secret> and
+C<ciphertext_out>) so long as there is sufficient spare capacity in the buffer for the extra GCM
+suffix (30 bytes) and you don't enable 'pad'.
+
 =head2 symmetric_decrypt
 
   my %params= ...;         # previous encryption parameter hashref
   my $ciphertext= ...;     # previous ciphertext bytes
-  $params{auth_data}= ...; # if you used auth_data during encryption
   my $secret= symmetric_decrypt(\%params, $aes_key, $ciphertext);
+  # or
+  symmetric_decrypt(\%params, $aes_key, $ciphertext, $secret_out);
 
 This decrypts the previous result of C<symmetric_encrypt>.  If using C<AES-GCM>, it will also
-verify whether the C<$aes_key> was the correct key, and croak on failure.
+verify whether the C<$aes_key> is the correct key, and croak on failure.
+
+=head2 interactive_unlock
+
+  $bool= interactive_unlock($thing_to_unlock, %options);
+  # where $thing_to_unlock may be a Coffer, Vault, or arrayref of arrayrefs of PKey objects:
+  # [
+  #   [ $pkey1, $pkey2 ],
+  #   [ $pkey1, $pkey3 ],
+  #   [ $pkey2, $pkey3, $pkey4 ],
+  # ]
+
+This begins a console/tty interactive process to call C<obtain_private> on one or more sets
+of PKey objects, succeeding as soon as one of the sets is fully assembled.  For Coffer and
+Vault, the C<locks> are inspected to determine the sets of PKey objects to process.  If the
+Coffer or Vault are not already associated with PKey objects (they may only serialize the
+fingerprint) you need to specify those with the C<keys> option.
+
+The PKey objects may already have the private halves loaded, in which case some sets may already
+be complete, and this function returns success immediately.  Otherwise, it groups the
+private-lacking PKey objects by mechanism:
+
+=over
+
+=item Password
+
+If any PKey can be decrypted by a plain password, the interactive loop will prompt for passwords
+and then test each remaining password-encrypted key to see if the password can decrypt it.
+
+=item SSHAgentSignature
+
+If an SSH Agent is available, it will check for any PKey that can be decrypted by a signature
+from any of the keys in your agent.  It will re-check that list once per second, allowing you
+to add them to your agent on the fly.
+
+=item YKChalResp
+
+If any PKey requires the YubiKey OTP Chal/Resp protocol, it scans for attached YubiKeys of a
+matching serial number.  If found, it starts a "ykchalresp" in a background thread/process
+which succeeds as soon as you touch the button on the YubiKey.  It re-checks for matching
+devices every second.
+
+=item FIDO2
+
+If any PKey requires the FIDO2 protocol, it scans for attached FIDO2 devices of a matching
+C<aaguid>.  If found, it requests an assertion from the device in a background thread/process
+which succeeds as soon as you touch the button, unless the credentials aren't on that device
+in which case the device is ignored.  If the assertion fails due to lack of a PIN, it prompts
+for the PIN and tries again.  It re-scans for new devices once a second.
+
+=back
+
+In addition to the password prompt, it prints status messages about the remaining number and
+type of PKeys it is attempting to obtain private halves for.
+
+This function may return false if the user presses ^C or hits enter on a blank line.
+
+=cut
+
+sub interactive_unlock {
+   my ($target, %options)= @_;
+   my @access_options; # will be an array of array of PKey
+   my $mech;
+   my $out= $options{out_fh} // \*main::STDOUT;
+   my $fail= sub {
+      my $msg= shift;
+      $out->print($msg."\n"); #emit message
+      if (defined $options{err_out}) {
+         ${$options{err_out}}= $msg;
+         return !!0;
+      } else {
+         croak $msg;
+      }
+   };
+   my %pw_state;
+   my $clear_pw_line= sub {
+      if (keys %pw_state)  {
+         $out->print("\b \b"x120);
+         $out->flush;
+         $pw_state{re_prompt}= 1;
+      }
+   };
+   # User may provide this list directly
+   if (ref $target eq 'ARRAY') {
+      @access_options= @$target;
+   }
+   elsif (blessed($target)) {
+      $mech= $target->can('lock_mechanism')? $target->loch_mechanism
+           : $target->can('insert_keys')? $target
+           : croak("Expect arrayref, LockMechanism, or object with ->lock_mechanism");
+      my ($complete, $incomplete)= $mech->insert_keys;
+      return $fail->("No lock has all its keys present")
+         if @$incomplete && !@$complete;
+      @access_options= map [ map $_->{key}, @{$_->{tumblers}} ], @$complete;
+   }
+   my ($complete, @fido_devs, $ssh_agent, %scheme_avail, %pkey_dups, %pkey_access);
+   # First pass: look for distinct PKey objects that describe the same key
+   for my $access (@access_options) {
+      for my $pkey (@$access) {
+         push @{ $pkey_dups{$pkey->fingerprint} }, $pkey;
+         push @{ $pkey_access{$pkey->fingerprint} }, $access;
+      }
+   }
+   my $check_complete= sub {
+      my $pkey= shift;
+      # If there are multiple objects with same fingerprint, apply this private key
+      # to the rest of them, too.
+      if (my $dups= $pkey_dups{$pkey->fingerprint}) {
+         for my $dup (grep $_ != $pkey && !$_->has_private, @$dups) {
+            $dup->public eq $pkey->public
+               or croak "Keys have same fingerprint but different public key!";
+            $dup->private($pkey->private);
+         }
+      }
+      # Now check if any of the access options have been completed
+      for my $access (@{ $pkey_access{$pkey->fingerprint} }) {
+         if (!grep !$_->has_private, @$access) {
+            $complete= $access;
+            return 1;
+         }
+      }
+      return 0;
+   };
+   my $eliminate_pkey= sub {
+      my $pkey= shift;
+      my %rm= map +(0+$_ => $_ ), @{$pkey_access{$pkey}};
+      @access_options= grep !$rm{0+$_}, @access_options;
+   };
+   # clean up dups
+   for my $fingerprint (keys %pkey_dups) {
+      my $dups= $pkey_dups{$fingerprint};
+      if (@$dups > 1) {
+         # was any instance already decrypted?
+         if (my @unlocked= grep $_->has_private, @$dups) {
+            $check_complete->($unlocked[0]);
+            # no need to track it anymore
+            delete $pkey_dups{$fingerprint};
+         }
+      } else {
+         delete $pkey_dups{$fingerprint};
+      }
+   }
+   # Second pass: check if any access options are already resolved
+   # If so, we can skip unnecessary probing of external things.
+   for my $access (@access_options) {
+      if (!grep !$_->has_private, @$access) {
+         $complete= $access;
+         last;
+      }
+   }
+   # Third pass, weed out access lists that can't be resolved due to missing external resources
+   unless ($complete) {
+      for my $access (@access_options) {
+         for my $pkey (grep !$_->has_private, @$access) {
+            my $permanent_fail;
+            my $scheme= $pkey->protection_scheme;
+            if (!defined $scheme) {
+               # Public key without any way to obtain private half
+               $permanent_fail= 1;
+            } else {
+               # optimization: cache results for known schemes
+               unless (exists $scheme_avail{$scheme}) {
+                  if ($scheme eq 'SSHAgentSignature') {
+                     # This can't succeed unless we have access to an agent
+                     $ssh_agent //= $options{ssh_agent} // $pkey->agent;
+                     $scheme_avail{$scheme}= !!eval { $ssh_agent->list_keys; 1; }
+                        or $out->print("No SSH Agent available\n");
+                  } elsif ($pkey->protection_scheme eq 'FIDO2') {
+                     # Can't succeed unless fido2 support compiled
+                     $scheme_avail{$scheme}= !!Crypt::MultiKey::FIDO2->available
+                        or $out->print("FIDO2 support is not available\n");
+                  } elsif ($pkey->protection_scheme eq 'YKChalResp') {
+                     # Can't succeed unless Yubico OTP tools installed, or on Linux with HIDRAW.
+                     $scheme_avail{$scheme}= !!Crypt::MultiKey::YubicoOTP->available
+                        or $out->print("Yubico OTP support is not available\n");
+                  } else {
+                     # else assume scheme is available, but not conclusive
+                     $scheme_avail{$scheme}= undef;
+                  }
+               }
+               $permanent_fail= $scheme_avail{$scheme};
+               unless (defined $permanent_fail) {
+                  $permanent_fail= !defined $pkey->can_obtain_private
+                     and $out->print("Discarding key ".$pkey->fingerprint." ($scheme); permanent error\n");
+               }
+            }
+            $eliminate_pkey->($pkey), last if $permanent_fail;
+         }
+      }
+      # iterate until user aborts or one of the @access_options has all private keys available.
+      my (@yk_devs, @fido_devs, $pw_buf);
+      poll: while (@access_options && !$complete) {
+         my ($poll_new_agent_keys, $poll_new_fido2, $poll_new_yk);
+         # Group keys by protection scheme
+         my %prot_keys;
+         for my $access (@access_options) {
+            for (grep !$_->has_private, @$access) {
+               # Make sure only one attempt per key fingerprint.
+               # Duplicates are handled during $check_complete.
+               $prot_keys{$_->protection_scheme}{$_->fingerprint} //= $_;
+            }
+         }
+         # convert hashrefs to arrays
+         $_ = [ values %$_ ] for values %prot_keys;
+         # Test all the ssh-agent ones first because they likely don't need any interaction
+         if (my $pkeys= delete $prot_keys{'SSHAgentSignature'}) {
+            my @agent_keys= $ssh_agent->list_keys;
+            my @ready= grep $_->can_obtain_private(ssh_agent_keys => \@agent_keys), @$pkeys;
+            if (@ready) {
+               $clear_pw_line->();
+               $out->print("Requesting SSH Agent signature\n");
+               for (@ready) {
+                  if (eval { $_->obtain_private }) {
+                     last search if $check_complete->($_);
+                  } else {
+                     # We already checked 'can_obtain_private', so failure here means the signing
+                     # request failed.  That probably means this key won't ever work.
+                     $out->print("SSH Agent Signature failed: $@");
+                     $eliminate_pkey->($_);
+                  }
+               }
+            }
+            # if some weren't ready, they could be added to the agent, so continue to poll.
+            $poll_new_agent_keys= @ready != @$pkeys;
+         }
+         # Check for newly inserted hardware keys, next
+         if (my $pkeys= delete $prot_keys{'FIDO2'}) {
+            my @prev= @fido_devs; 
+            @fido_devs= Crypt::MultiKey::FIDO2::list_devices();
+            # FIDO devices aren't uniquely identifiable, so we just have to poll fast enough to
+            # detect differences in the length of the list and then test them all.
+            if (@prev != @fido_devs && @fido_devs) {
+               # we can issue all challenges to a device at once if they have the same challenge
+               my %per_aaguid_challenge;
+               for (@$pkeys) {
+                  push @{ $per_aaguid_challenge{$_->fido2_aaguid . $_->challenge} }, $_;
+               }
+               for my $pkey_group (values %per_aaguid_challenge) {
+                  my @devs= grep $_->aaguid eq $pkey_group->[0]->fido2_aaguid, @fido_devs;
+                  if (@devs) {
+                     $clear_pw_line->();
+                     $out->print("Making request to attached FIDO2 device\n");
+                     for (@devs) {
+                        if (my ($secret, $cred_used)= eval {
+                           $_->assert_hmac_secret(
+                              credential => [ map $_->fido2_credential, @$pkey_group ],
+                              challenge => $pkey_group->[0]->challenge
+                           );
+                        }) {
+                           for (grep $_->credential == $cred_used, @$pkey_group) {
+                              if (eval { $_->obtain_private(hmac_secret => $secret); 1 }) {
+                                 $check_complete->($_);
+                              } else {
+                                 # If the credential succeeded but the password did not, that's
+                                 # a fatal failure.
+                                 $out->print("FIDO2 HMAC failed to decrypt the private key: $@");
+                                 $eliminate_pkey->($_);
+                              }
+                           }
+                        } else {
+                           # TODO: handle requesting PIN from user
+                           #if ($@ =~ /\bPIN\b/i) {
+                           $out->print("$@");
+                        }
+                     }
+                  }
+               }
+            }
+            $poll_new_fido2= !!grep !$_->has_private, @$pkeys;
+         }
+         if (my $pkeys= delete $prot_keys{'YKChalResp'}) {
+            # has list of devices changed since last iteration?
+            my $prev= join ',', map $_->serial, @yk_devs;
+            @yk_devs= Crypt::MultiKey::YubicoOTP::list_devices();
+            if ($prev ne join(',', map $_->serial, @yk_devs)) {
+               # check each PKey which has its key present.
+               for my $pkey (grep $_->can_obtain_private(yubico_otp_devices => \@yk_devs), @$pkeys) {
+                  $clear_pw_line->();
+                  $out->print("Making request to YubiKey\n");
+                  if (eval { $pkey->obtain_private(yubico_otp_devices => \@yk_devs); 1 }) {
+                     $check_complete->($pkey);
+                  } else {
+                     $out->print("$@");
+                     # might fail because user didn't press button in time.  Keep trying it
+                     # after a remove/insert is observed.
+                  }
+               }
+            }
+            $poll_new_yk= !!grep !$_->has_private, @$pkeys;
+         }
+         if (my $pkeys= delete $prot_keys{'Password'}) {
+            # prompt for password.
+            $pw_buf //= secret(stringify_mask => '[PASSWORD]');
+            my $result= $pw_buf->append_console_line(
+               char_mask => '*',
+               prompt => "Enter password (^C to cancel): ",
+               timeout => .2,
+               state => \%pw_state
+            );
+            if ($result) {
+               my $used= 0;
+               # Try password against all keys
+               for my $pkey (@$pkeys) {
+                  if (eval { $pkey->decrypt_private($pw_buf); 1 }) {
+                     $used++;
+                     $check_complete->($pkey);
+                  }
+                  # no harm in incorrect passwords
+               }
+               $out->print("Password does not match any PKey\n") unless $used;
+               $pw_buf->length(0);
+            }
+            elsif (defined $result) {
+               $pw_buf->length(0);
+               # defined-false means got ^C, so abort
+               last poll;
+            }
+         }
+         # Unknown types of keys will just have to intelligently handle frequent requests
+         # as we loop.
+         for (map @$_, values %prot_keys) {
+            my $ready= $_->can_obtain_private;
+            if ($ready) {
+               $check_complete->($_) if eval { $_->obtain_private($_); 1 };
+            } elsif (!defined $ready) {
+               # permanent failure
+               $clear_pw_line->();
+               $out->print("Discarding key ".$_->fingerprint." (".$_->protection_scheme."); permanent error\n");
+            }
+         }
+      }
+      return $fail->("No remaining options to perform unlock")
+         unless @access_options;
+   }
+   if ($complete) {
+      # If supplied a lock mechanism, unlock it
+      if ($mech) {
+         $mech->unlock(@$complete)
+            or return $fail->("Assembled a complete set of keys, but they failed to unlock the mechanism");
+      }
+      return $complete;
+   }
+   return $fail->("Aborted");
+}
 
 =head2 lazy_load
 
