@@ -157,7 +157,12 @@ True if the Coffer is in an unlocked state, meaning content can be read and writ
 sub lock_mechanism { $_[0]{lock_mechanism} //= Crypt::MultiKey::LockMechanism->new }
 sub _set_primary_skey { shift->lock_mechanism->_set_primary_skey(@_) }
 sub locks { shift->lock_mechanism->locks(@_) }
-sub _set_locks { shift->lock_mechanism->_set_locks(@_) }
+sub _set_lock_mechanism {
+   my ($self, $val)= @_;
+   blessed($val) && $val->can('primary_skey')
+      or croak "Expected instance of Crypt::MultiKey::LockMechanism";
+   $_[0]{lock_mechanism}= $_[1]
+}
 sub add_access { shift->lock_mechanism->add_access(@_) }
 sub insert_keys { shift->lock_mechanism->insert_keys(@_) }
 sub unlock {
@@ -746,7 +751,7 @@ sub decrypt {
 }
 
 our %_importable_attributes= map +($_ => 1),
-   qw( locks user_meta cipher_data content_type );
+   qw( lock_mechanism user_meta cipher_data content_type );
 # Extract Coffer attributes from a Crypt::SecretBuffer::PEM object
 sub _attrs_from_pem {
    my ($self, $pem, $path)= @_;
@@ -777,23 +782,7 @@ sub _attrs_from_pem {
    # ...but the MAC can't be validated until we decrypt the coffer.
 
    my $attrs= Crypt::MultiKey::_inflate_pem_header_kv(@{$header_kv}[4..($#$header_kv-2)]);
-   # Ensure structure of locks is valid
-   Crypt::MultiKey::LockMechanism->_validate_locks($attrs->{locks});
-   # base64-decode the byte strings
-   for my $lock (@{ $attrs->{locks} }) {
-      for my $tmbl (@{ $lock->{tumblers} }) {
-         for (qw( ephemeral_pubkey rsa_key_ciphertext kem_ciphertext )) {
-            $tmbl->{$_}= decode_base64($tmbl->{$_})
-               if defined $tmbl->{$_};
-         }
-      }
-      # base64 decode binary fields
-      for (qw( kdf_salt ciphertext )) {
-         $lock->{$_}= decode_base64($lock->{$_})
-            if defined $lock->{$_};
-      }
-   }
-
+   $attrs->{lock_mechanism}= Crypt::MultiKey::LockMechanism->new->_import_attrs($attrs);
    # PEM object provides a Span with encoding=BASE64.  Need to decode that to bytes.
    my $ciphertext= $pem->content;
    if (_isa_secret_span($ciphertext) && $ciphertext->encoding == BASE64) {
@@ -815,29 +804,13 @@ sub _attrs_from_pem {
 
 sub _export_pem {
    my $self= shift;
-   my @locks_export= @{ $self->locks };
-   for my $lock (@locks_export) {
-      $lock= { %$lock };
-      for (qw( kdf_salt ciphertext )) {
-         $lock->{$_}= encode_base64($lock->{$_}, '')
-            if defined $lock->{$_};
-      }
-      for my $tmbl (@{ $lock->{tumblers}= [ @{$lock->{tumblers}} ] }) {
-         $tmbl= { %$tmbl };
-         # Need to remove the key objects from the locks definition before serializing.
-         delete $tmbl->{key};
-         for (qw( ephemeral_pubkey rsa_key_ciphertext kem_ciphertext )) {
-            $tmbl->{$_}= encode_base64($tmbl->{$_}, '')
-               if defined $tmbl->{$_};
-         }
-      }
-   }
    my %cipher_data_export= %{ $self->cipher_data };
    my $ciphertext= delete $cipher_data_export{ciphertext};
    my @header_kv= Crypt::MultiKey::_flatten_to_pem_header_kv(
       version        => '0.001',
       writer_version => __PACKAGE__->VERSION,
       user_meta      => $self->user_meta,
+      %{ $self->lock_mechanism->_export_attrs },
       locks          => \@locks_export,
       content_type   => $self->content_type,
       cipher_data    => \%cipher_data_export,
