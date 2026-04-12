@@ -231,6 +231,12 @@ True if the Coffer is in an unlocked state, meaning content can be read and writ
 =cut
 
 sub lock_mechanism { $_[0]{lock_mechanism} //= Crypt::MultiKey::LockMechanism->new }
+sub _set_lock_mechanism {
+   my ($self, $val)= @_;
+   blessed($val) && $val->can('primary_skey')
+      or croak "Expected instance of Crypt::MultiKey::LockMechanism";
+   $_[0]{lock_mechanism}= $_[1]
+}
 sub _set_primary_skey { shift->lock_mechanism->_set_primary_skey(@_) }
 sub locks { shift->lock_mechanism->locks(@_) }
 sub _set_locks { shift->lock_mechanism->_set_locks(@_) }
@@ -378,7 +384,7 @@ sub _load {
    $self->_set_cipher($attrs->{cipher});
    $self->_set_sector_size($attrs->{sector_size});
    $self->_set_data_offset($data_offset);
-   $self->_set_locks($attrs->{locks});
+   $self->_set_lock_mechanism($attrs->{lock_mechanism});
    $self->_set_user_meta($attrs->{user_meta} || {});
    $self->{authentication}= $attrs->{authentication};
    if ($self->bundled_keys) {
@@ -464,41 +470,13 @@ sub _attrs_from_pem {
    }
    my ($mac_algo,$mac_base64)= split ':', $header_kv->[-1], 2;
    my $attrs= Crypt::MultiKey::_inflate_pem_header_kv(@{$header_kv}[4..($#$header_kv-2)]);
-   Crypt::MultiKey::LockMechanism->_validate_locks($attrs->{locks});
-   for my $lock (@{ $attrs->{locks} || [] }) {
-      for my $tmbl (@{ $lock->{tumblers} || [] }) {
-         for (qw( ephemeral_pubkey rsa_key_ciphertext kem_ciphertext )) {
-            $tmbl->{$_}= decode_base64($tmbl->{$_})
-               if defined $tmbl->{$_};
-         }
-      }
-      for (qw( kdf_salt ciphertext )) {
-         $lock->{$_}= decode_base64($lock->{$_})
-            if defined $lock->{$_};
-      }
-   }
+   $attrs->{lock_mechanism}= Crypt::MultiKey::LockMechanism->new->_import_attrs($attrs);
    $attrs->{authentication}= [ $header_text, $mac_algo, decode_base64($mac_base64) ];
    return $attrs;
 }
 
 sub _export_pem {
    my $self= shift;
-   my @locks_export= @{ $self->locks };
-   for my $lock (@locks_export) {
-      $lock= { %$lock };
-      for (qw( kdf_salt ciphertext )) {
-         $lock->{$_}= encode_base64($lock->{$_}, '')
-            if defined $lock->{$_};
-      }
-      for my $tmbl (@{ $lock->{tumblers}= [ @{$lock->{tumblers}} ] }) {
-         $tmbl= { %$tmbl };
-         delete $tmbl->{key};
-         for (qw( ephemeral_pubkey rsa_key_ciphertext kem_ciphertext )) {
-            $tmbl->{$_}= encode_base64($tmbl->{$_}, '')
-               if defined $tmbl->{$_};
-         }
-      }
-   }
    my @header_kv= Crypt::MultiKey::_flatten_to_pem_header_kv(
       version        => '0.001',
       writer_version => __PACKAGE__->VERSION,
@@ -506,7 +484,7 @@ sub _export_pem {
       sector_size    => $self->sector_size,
       data_start_block => int($self->data_offset / $self->sector_size),
       user_meta      => $self->user_meta,
-      locks          => \@locks_export,
+      %{ $self->lock_mechanism->_export_attrs }
    );
    my $header_text= '';
    for (0..$#header_kv) {
@@ -925,5 +903,9 @@ sub create_block_device {
    }
 }
 
-
-1;
+# Avoid dependency on namespace::clean
+delete @Crypt::MultiKey::Vault::{qw(
+   carp confess croak
+   encode_base64 decode_base64
+   blesed looks_like_number basename
+   secret span HEX BASE64 ISO8859_1 )};

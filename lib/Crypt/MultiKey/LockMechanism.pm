@@ -32,6 +32,7 @@ use v5.10;
 use warnings;
 use Carp;
 use Scalar::Util qw( blessed );
+use MIME::Base64 qw( encode_base64 decode_base64 );
 use Crypt::SecretBuffer qw( secret );
 sub _isa_secret { blessed($_[0]) && $_[0]->isa('Crypt::SecretBuffer') }
 
@@ -378,4 +379,64 @@ sub _validate_locks {
    return 1;
 }
 
-1;
+# Export attributes to JSON-friendly data structure.
+# The only attribute right now is 'locks'.
+sub _export_attrs {
+   my $self= shift;
+   # Perform deep clone of locks, and convert binary strings to base64.
+   # Also exclude PKey objects and only export the key fingerprint.
+   my @locks= @{ $self->locks };
+   for my $lock (@locks) {
+      $lock= { %$lock };
+      for (qw( kdf_salt ciphertext )) {
+         $lock->{$_}= encode_base64($lock->{$_}, '')
+            if defined $lock->{$_};
+      }
+      for my $tmbl (@{ $lock->{tumblers}= [ @{$lock->{tumblers}} ] }) {
+         $tmbl= { %$tmbl };
+         # Need to remove the key objects from the locks definition before serializing.
+         delete $tmbl->{key};
+         for (qw( ephemeral_pubkey rsa_key_ciphertext kem_ciphertext )) {
+            $tmbl->{$_}= encode_base64($tmbl->{$_}, '')
+               if defined $tmbl->{$_};
+         }
+      }
+   }
+   return { locks => \@locks };
+}
+
+# Import attributes from text-friendly structure to actual runtime structure.
+# which can be passed to constructor.  This *removes* and modifies a subset of
+# the provided attribute hash.
+sub _import_attrs {
+   my ($self, $attrs)= @_;
+   my $locks= delete $attrs->{locks};
+   # Ensure structure of locks is valid
+   $self->_validate_locks($locks);
+   # base64-decode the byte strings
+   for my $lock (@$locks) {
+      # base64 decode binary fields
+      for (qw( kdf_salt ciphertext )) {
+         $lock->{$_}= decode_base64($lock->{$_})
+            if defined $lock->{$_};
+      }
+      for my $tmbl (@{$lock->{tumblers}}) {
+         for (qw( ephemeral_pubkey rsa_key_ciphertext kem_ciphertext )) {
+            $tmbl->{$_}= decode_base64($tmbl->{$_})
+               if defined $tmbl->{$_};
+         }
+      }
+   }
+   if (ref $self) {
+      @{$self->locks}= @$locks;
+      return $self;
+   } else {
+      return { locks => $locks };
+   }
+}
+
+# Avoid dependency on namespace::clean
+delete @Crypt::MultiKey::LockMechanism::{qw(
+   blessed carp croak confess
+   secret encode_base64 decode_base64
+)};
