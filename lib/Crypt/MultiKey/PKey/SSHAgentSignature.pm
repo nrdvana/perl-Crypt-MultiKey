@@ -222,4 +222,7 @@ sub _export_pem_headers {
       if defined $self->kdf_salt;
 }
 
-1;
+# Avoid depending on namespace::clean
+delete @Crypt::MultiKey::PKey::SSHAgentSignature::{qw(
+   blessed carp confess croak secret decode_base64 encode_base64 sha256_base64
+)};

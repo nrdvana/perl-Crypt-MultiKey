@@ -52,4 +52,7 @@ sub obtain_private {
    $self->decrypt_private($pw);
 }
 
-1;
+# Avoid depending on namespace::clean
+delete @Crypt::MultiKey::PKey::Password::{qw(
+   carp confess croak
+)};

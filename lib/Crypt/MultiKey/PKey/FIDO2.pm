@@ -383,4 +383,7 @@ sub _export_pem_headers {
    $pem->headers->append(cmk_kdf_salt => encode_base64($self->kdf_salt, ''));
 }
 
-1;
+# Avoid depending on namespace::clean
+delete @Crypt::MultiKey::PKey::FIDO2::{qw(
+   blessed carp confess croak secret decode_base64 encode_base64
+)};

@@ -254,4 +254,9 @@ sub _export_pem_headers {
    $pem->headers->append(cmk_kdf_salt => $self->kdf_salt);
 }
 
-1;
+# Avoid depending on namespace::clean
+delete @Crypt::MultiKey::PKey::YKChalResp::{qw(
+   blessed carp confess croak
+   secret HEX ISO8859_1
+   decode_base64 encode_base64
+)};

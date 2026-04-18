@@ -104,4 +104,3 @@ sub _parse_guid {
 require Crypt::MultiKey::FIDO2::Device;
 # avoid dependency on namespace::clean
 delete @{Crypt::MultiKey::FIDO2::}{qw( croak )};
-1;

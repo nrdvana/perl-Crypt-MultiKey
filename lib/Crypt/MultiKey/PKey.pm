@@ -766,4 +766,9 @@ C<$secret_out> if supplied.
 
 =cut
 
-1;
+# Avoid depending on namespace::clean
+delete @Crypt::MultiKey::PKey::{qw(
+   blessed carp confess croak
+   BASE64 ISO8859_1 secret span
+   sha256_base64 decode_base64 encode_base64
+)};
