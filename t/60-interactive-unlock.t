@@ -4,7 +4,6 @@ use Test2AndUtils;
 use Crypt::MultiKey qw( pkey );
 use Crypt::MultiKey::LockMechanism;
 use Crypt::MultiKey::InteractiveUnlock;
-use Carp::Always;
 
 my $user_entered_pw;
 local *Crypt::MultiKey::InteractiveUnlock::_try_pkeys_Password= sub {
