@@ -60,7 +60,7 @@ and JSON is easier to store user metadata without PEM header restrictions.
   \0
   [optional bundled PKey objects in PEM format]
   \n
-  \n (repeating until 20 bytes before data_start_block)
+  \n (repeating until 32 bytes before data_sector)
   $HMAC_BYTES
   [binary data begins at data_sector declared above]
 
@@ -72,6 +72,7 @@ use version;
 use Carp;
 use Fcntl ();
 use MIME::Base64 qw/ encode_base64 decode_base64 /;
+use JSON::PP;
 use File::Basename qw/ basename /;
 use Crypt::MultiKey;
 use Crypt::MultiKey::LockMechanism;
@@ -84,6 +85,8 @@ use constant {
    STAGING_BUFFER_SHIFT => 20,
    DEFAULT_SECTOR_SIZE => 512,
    DEFAULT_DATA_OFFSET => 65536,
+   HEADER_MARKER => "\0===== Crypt::MultiKey::Vault =====\n",
+   HEADER_MAC_SIZE => 32,
 };
 
 =attribute path
@@ -257,7 +260,7 @@ sub insert_keys { shift->lock_mechanism->insert_keys(@_) }
 sub unlock {
    my $self= shift;
    $self->lock_mechanism->unlock(@_);
-   $self->_authenticate;
+   $self->_authenticate(1) if $self->{authentication};
    $self;
 }
 
@@ -268,13 +271,13 @@ sub unlocked {
 
 =attribute user_meta
 
-An arbitrary hashref of name/value strings that will be added to the exported PEM as headers
-of the form C<< user_meta.$name = $value >>.  Note that headers are B<plaintext>.
+An arbitrary hashref of JSON-compatible metadata that will be added to the Vault header.
+Note that headers are B<plaintext>.
 If you wish to store secret user metadata it needs to be part of L</content>, which can be
 accomplished conveniently using L</content_dict>.
 
 Warning: the authenticity of C<user_meta> does not get checked until you have
-L<unlocked|/unlock> the coffer.  Never trust C<user_meta> on a locked Coffer unless the file
+L<unlocked|/unlock> the Vault.  Never trust C<user_meta> on a locked Vault unless the file
 was stored securely.
 
 =attribute name
@@ -296,6 +299,13 @@ sub name { @_ > 1? shift->_set_name(@_) : $_[0]->user_meta->{name} }
 sub _set_name { $_[0]->user_meta->{name}= $_[1]; $_[0] }
 
 sub file_preamble { @_ > 1? shift->_set_file_preamble(@_) : $_[0]{file_preamble} }
+sub _set_file_preamble {
+   my ($self, $val)= @_;
+   croak "file_preamble may not contain the Vault header marker"
+      if defined($val) && index($val, HEADER_MARKER) >= 0;
+   $self->{file_preamble}= $val;
+   $self;
+}
 
 =constructor new
 
@@ -356,15 +366,21 @@ sub open {
 sub _load {
    my $self= shift;
    my $fh= $self->handle or croak "No handle";
+   my $path= $self->path // 'handle';
    my $at= sysseek($fh, 0, Fcntl::SEEK_SET())
       // croak "seek: $!";
    $at == 0 or croak "seek returned wrong address";
-   # Start with the first 64KiB, then keep reading until we have at least one
-   # complete VAULT PEM stanza.
+
+   # Read until we have the marker and the NUL byte that terminates the JSON header.
    my $header_buf= secret;
-   my $end_marker= "-----END CRYPT MULTIKEY VAULT-----";
    my $tmp= '';
-   while (index($tmp, $end_marker) < 0) {
+   my ($marker_at, $json_start, $json_end);
+   while (1) {
+      $marker_at= index($tmp, HEADER_MARKER);
+      $json_start= $marker_at >= 0? $marker_at + length(HEADER_MARKER) : -1;
+      $json_end= $json_start >= 0? index($tmp, "\0", $json_start) : -1;
+      last if $json_end >= 0;
+
       my $want= $header_buf->length? 16384 : 65536;
       my $n= sysread($fh, my $chunk= '', $want);
       defined $n or croak "read: $!";
@@ -374,46 +390,46 @@ sub _load {
       croak "Vault header appears unreasonably large"
          if $header_buf->length > 0x400000;
    }
-   my ($vault_pem)= do {
-      my ($pem_text)= $tmp =~ /(-----BEGIN CRYPT MULTIKEY VAULT-----.*?-----END CRYPT MULTIKEY VAULT-----\s*)/s;
-      defined $pem_text
-         ? grep $_->label eq 'CRYPT MULTIKEY VAULT', Crypt::SecretBuffer::PEM->parse_all(span($pem_text))
-         : ();
-   };
-   croak "No CRYPT MULTIKEY VAULT pem block in file"
-      unless defined $vault_pem;
-   my $attrs= $self->_attrs_from_pem($vault_pem, $self->path // 'handle');
-   my $data_offset= $attrs->{data_start_block} * $attrs->{sector_size};
-   my $tail= '';
-   my $tail_at= sysseek($fh, $data_offset - 2, Fcntl::SEEK_SET())
-      // croak "seek: $!";
-   $tail_at == ($data_offset - 2)
-      or croak "seek returned wrong address";
-   my $n= sysread($fh, $tail, 2);
-   croak "read: unexpected EOF"
-      unless defined($n) && $n == 2;
-   croak "Bytes before data_start are not \"\\n\\0\""
-      unless $tail eq "\n\0";
+   croak "No Crypt::MultiKey::Vault marker in file"
+      unless ($marker_at // -1) >= 0;
+   croak "No complete Crypt::MultiKey::Vault JSON header in file"
+      unless ($json_end // -1) >= 0;
+
+   my $preamble= substr($tmp, 0, $marker_at);
+   my $attrs= $self->_attrs_from_json(substr($tmp, $json_start, $json_end - $json_start), $path);
+   my $data_offset= $attrs->{data_sector} * $attrs->{sector_size};
+   croak "Vault data_sector places data before header authentication code"
+      if $data_offset < HEADER_MAC_SIZE;
+
+   # Load the complete header so bundled keys and the header MAC can be inspected later.
+   if ($header_buf->length < $data_offset) {
+      my $at= sysseek($fh, $header_buf->length, Fcntl::SEEK_SET())
+         // croak "seek: $!";
+      $at == $header_buf->length
+         or croak "seek returned wrong address";
+      while ($header_buf->length < $data_offset) {
+         $header_buf->append_sysread($fh, $data_offset - $header_buf->length)
+            or croak "read: ".($! || "unexpected EOF");
+      }
+   }
+
    $self->_set_cipher($attrs->{cipher});
    $self->_set_sector_size($attrs->{sector_size});
    $self->_set_data_offset($data_offset);
    $self->_set_lock_mechanism($attrs->{lock_mechanism});
    $self->_set_user_meta($attrs->{user_meta} || {});
-   #$self->{authentication}= $attrs->{authentication};
-   if ($self->bundled_keys) {
-      if ($header_buf->length < $data_offset) {
-         my $at= sysseek($fh, $header_buf->length, Fcntl::SEEK_SET())
-            // croak "seek: $!";
-         $at == $header_buf->length
-            or croak "seek returned wrong address";
-         while ($header_buf->length < $data_offset) {
-            $header_buf->append_sysread($fh, $data_offset - $header_buf->length)
-               or croak "read: ".($! || "unexpected EOF");
-         }
-      }
+   $self->_set_file_preamble($preamble) if length $preamble;
+   $self->{authentication}= [
+      $header_buf->span(pos => 0, len => $data_offset - HEADER_MAC_SIZE)->copy,
+      $header_buf->span(pos => $data_offset - HEADER_MAC_SIZE, len => HEADER_MAC_SIZE)->copy,
+   ];
+
+   if ($self->bundled_keys && $json_end + 1 < $data_offset - HEADER_MAC_SIZE) {
       my @pkey_pem= grep {
          $_->label eq 'ENCRYPTED PRIVATE KEY' || $_->label eq 'PUBLIC KEY'
-      } Crypt::SecretBuffer::PEM->parse_all($header_buf->span(pos => 0, len => $data_offset-1));
+      } Crypt::SecretBuffer::PEM->parse_all(
+         $header_buf->span(pos => $json_end + 1, len => $data_offset - HEADER_MAC_SIZE - $json_end - 1)
+      );
       my @pkeys;
       for my $pk_pem (@pkey_pem) {
          eval { push @pkeys, Crypt::MultiKey::PKey->load($pk_pem) }
@@ -427,16 +443,62 @@ sub _load {
 
 sub _generate_header {
    my $self= shift;
-   my $pem= $self->_export_pem;
-   my $header= $pem->serialize;
-   $header->append($self->_export_bundled_keys)
+   my $body= secret->append(
+      (defined $self->file_preamble? $self->file_preamble : ''),
+      HEADER_MARKER,
+      "version: 0.001\n",
+      "writer_version: ".__PACKAGE__->VERSION."\n",
+      $self->_export_json,
+      "\0"
+   );
+   $body->append($self->_export_bundled_keys)
       if $self->bundled_keys;
-   my $pad= $self->data_offset - $header->length;
+   my $pad= $self->data_offset - $body->length - HEADER_MAC_SIZE;
    croak "Header does not fit in reserved area"
-      if $pad < 2;
-   $header->append(("\n" x ($pad-1)), "\0")
+      if $pad < 0;
+   $body->append("\n" x $pad)
       if $pad > 0;
-   return $header;
+   my $mac= Crypt::MultiKey::hmac_sha256($self->lock_mechanism->hmac_skey, $body);
+   $body->append($mac);
+   return $body;
+}
+
+sub _attrs_from_json {
+   my ($self, $text, $path)= @_;
+   my ($min_version)= $text =~ /\Aversion:\s*([^\n]+)\n/
+      or croak "Vault header does not start with a version declaration";
+   $text =~ s/\Aversion:\s*[^\n]+\n//
+      or croak "Vault header does not start with a version declaration";
+   $text =~ s/\Awriter_version:\s*[^\n]+\n//
+      or croak "Vault header does not include a writer_version declaration";
+   $min_version= version->parse($min_version);
+   carp "'$path' requires version $min_version of Crypt::MultiKey::Vault but this is only version "
+      .__PACKAGE__->VERSION
+      if $min_version > __PACKAGE__->VERSION;
+
+   my $attrs= JSON::PP->new->utf8(0)->decode($text);
+   croak "Vault JSON header must be an object"
+      unless ref $attrs eq 'HASH';
+   $attrs->{data_sector}= delete $attrs->{data_start_block}
+      if !defined($attrs->{data_sector}) && defined($attrs->{data_start_block});
+   for my $required (qw( cipher sector_size data_sector locks )) {
+      croak "Vault JSON header missing '$required'"
+         unless defined $attrs->{$required};
+   }
+   $attrs->{lock_mechanism}= Crypt::MultiKey::LockMechanism->new->_import_attrs($attrs);
+   return $attrs;
+}
+
+sub _export_json {
+   my $self= shift;
+   my $attrs= {
+      cipher      => $self->cipher,
+      sector_size => $self->sector_size,
+      data_sector => int($self->data_offset / $self->sector_size),
+      user_meta   => $self->user_meta,
+      %{ $self->lock_mechanism->_export_attrs },
+   };
+   return JSON::PP->new->ascii(1)->canonical(1)->pretty(1)->encode($attrs);
 }
 
 sub _export_bundled_keys {
@@ -466,76 +528,23 @@ sub _export_bundled_keys {
    return $ret;
 }
 
-sub _attrs_from_pem {
-   my ($self, $pem, $path)= @_;
-   my $header_kv= $pem->header_kv;
-   croak "Headers must start with version and writer_version"
-      unless @$header_kv > 4 && $header_kv->[0] eq 'version' && $header_kv->[2] eq 'writer_version';
-   my $min_version= version->parse($header_kv->[1]);
-   carp "'$path' requires version $min_version of Crypt::MultiKey::Vault but this is only version "
-      .__PACKAGE__->VERSION
-      if $min_version > __PACKAGE__->VERSION;
-   #croak "Headers must end with header_authentication"
-   #   unless @$header_kv > 2 && $header_kv->[-2] eq 'header_authentication';
-   my $header_text= '';
-   for (0..$#$header_kv) {
-      $header_text .= $header_kv->[$_] . ($_ & 1? "\n" : ": ");
-   }
-   #my ($mac_algo,$mac_base64)= split ':', $header_kv->[-1], 2;
-   my $attrs= Crypt::MultiKey::_inflate_pem_header_kv(@{$header_kv}[4..$#$header_kv]);
-   $attrs->{lock_mechanism}= Crypt::MultiKey::LockMechanism->new->_import_attrs($attrs);
-   #$attrs->{authentication}= [ $header_text, $mac_algo, decode_base64($mac_base64) ];
-   return $attrs;
-}
-
-sub _export_pem {
-   my $self= shift;
-   my @header_kv= Crypt::MultiKey::_flatten_to_pem_header_kv(
-      version        => '0.001',
-      writer_version => __PACKAGE__->VERSION,
-      cipher         => $self->cipher,
-      sector_size    => $self->sector_size,
-      data_start_block => int($self->data_offset / $self->sector_size),
-      user_meta      => $self->user_meta,
-      %{ $self->lock_mechanism->_export_attrs }
-   );
-   my $header_text= '';
-   for (0..$#header_kv) {
-      $header_text .= $header_kv[$_] . ($_ & 1? "\n" : ": ");
-   }
-   my $header_mac= 'HMAC-SHA256:';
-   Crypt::MultiKey::hmac_sha256($self->lock_mechanism->hmac_skey, $header_text)
-      ->span->append_to($header_mac, encoding => BASE64);
-   #push @header_kv, 'header_authentication' => $header_mac;
-   return Crypt::SecretBuffer::PEM->new(
-      label     => 'CRYPT MULTIKEY VAULT',
-      header_kv => \@header_kv,
-   );
-}
-
 sub _authenticate {
    my ($self, $croak)= @_;
-   # TODO: new format will authenticate entire header minus 32 bytes against the HMAC
-   # stores in the last 32 bytes.
-#   my $auth= $self->authentication;
-#   unless (defined $auth) {
-#      croak 'No authentication attribute available' if $croak;
-#      return 0;
-#   }
-#   unless (defined $self->lock_mechanism->primary_skey) {
-#      croak 'No primary_skey available for authentication' if $croak;
-#      return 0;
-#   }
-#   unless ($auth->[1] eq 'HMAC-SHA256') {
-#      croak 'Only HMAC-SHA256 is supported' if $croak;
-#      return 0;
-#   }
-#   my $mac= Crypt::MultiKey::hmac_sha256($self->lock_mechanism->hmac_skey, $auth->[0]);
-#   unless ($mac->memcmp($auth->[2]) == 0) {
-#      croak 'Header MAC failed; Vault headers have been modified since file was written.'
-#         if $croak;
-#      return 0;
-#   }
+   my $auth= $self->{authentication};
+   unless (defined $auth) {
+      croak 'No authentication attribute available' if $croak;
+      return 0;
+   }
+   unless (defined $self->lock_mechanism->primary_skey) {
+      croak 'No primary_skey available for authentication' if $croak;
+      return 0;
+   }
+   my $mac= Crypt::MultiKey::hmac_sha256($self->lock_mechanism->hmac_skey, $auth->[0]);
+   unless ($mac->memcmp($auth->[1]) == 0) {
+      croak 'Header MAC failed; Vault header has been modified since file was written.'
+         if $croak;
+      return 0;
+   }
    return 1;
 }
 
