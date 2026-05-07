@@ -189,7 +189,7 @@ sub _set_locks {
 
 =method add_access
 
-  $coffer->add_access($key1, ... $keyN);
+  $lockmech->add_access($key1, ... $keyN);
 
 This creates a new L</locks> entry, which provides a new way to access the Coffer independent of
 other locks.  The new lock can be opened when the private half of all N keys are passed to the
@@ -222,7 +222,7 @@ sub add_access {
 
 =method insert_keys
 
-  (\@complete_locks, \@incomplete_locks)= $coffer->insert_keys(@pkeys);
+  (\@complete_locks, \@incomplete_locks)= $lockmech->insert_keys(@pkeys);
 
 When deserialized from a PEM file, the tumblers of the L</locks> attribute reference keys by
 their C<SHA-256> fingerprint.  Those need upgraded to L<PKey objects|Crypt::MultiKey::PKey>
@@ -263,7 +263,7 @@ sub insert_keys {
 =method unlock
 
   
-  $coffer->unlock($key1, ... $keyN);
+  $lockmech->unlock($key1, ... $keyN);
 
 This attempts to find a lock which can be unlocked by this list of keys, or a subset of them.
 If found, the L</primary_skey> attribute is set, after which decryption and encryption methods
@@ -324,6 +324,24 @@ sub _hkdf_for_lock {
    # Salt isn't very useful when the tumbers are made from nonces and single-use ephemeral keys
    local $lock->{kdf_salt}= '' unless defined $lock->{kdf_salt};
    return Crypt::MultiKey::hkdf($lock, $key_material);
+}
+
+=method interactive_unlock
+
+  $bool= $lockmech->interactive_unlock(%options);
+
+Shortcut for
+
+  my $iu= Crypt::MultiKey::InteractiveUnlock->new(target => $lockmech, %options);
+  $iu->run;
+
+=cut
+
+sub interactive_unlock {
+   my ($self, %options)= @_;
+   require Crypt::MultiKey::InteractiveUnlock;
+   my $iu= Crypt::MultiKey::InteractiveUnlock->new(target => $self, %options);
+   $iu->run;
 }
 
 =method lock
