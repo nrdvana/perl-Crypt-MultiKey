@@ -72,7 +72,7 @@ subtest 'encrypt_private + obtain_private with mock device object' => sub {
 
    {
       no warnings 'redefine';
-      local *Crypt::MultiKey::FIDO2::enabled= sub { 1 };
+      local *Crypt::MultiKey::FIDO2::available= sub { 1 };
       local *Crypt::MultiKey::FIDO2::list_devices= sub { ($dev) };
       ok($key->can_obtain_private, 'can_obtain_private finds matching AAGUID');
       $key->obtain_private;
