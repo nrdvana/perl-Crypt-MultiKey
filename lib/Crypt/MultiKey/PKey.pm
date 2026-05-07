@@ -673,6 +673,9 @@ Using the supplied password, decrypt attribute C<private_encrypted> and import i
 Ideally, C<$password> is a C<SecretBuffer> object, but scalars are also accepted.
 The password must be bytes, not wide characters.
 
+Dies on failure.  If the password is incorrect, the error will match C<< qr/^password/ >>.
+Note that in many cases it is hard to distinguish an incorrect password from a corrupt file.
+
 =cut
 
 sub decrypt_private {

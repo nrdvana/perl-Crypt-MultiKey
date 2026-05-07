@@ -68,7 +68,8 @@ _import_pkcs8(pkey, buffer, pass_sv=&PL_sv_undef)
       const U8 *buf= (const U8*) secret_buffer_SvPVbyte(buffer, &len);
       const char *pass= SvOK(pass_sv)? secret_buffer_SvPVbyte(pass_sv, &pass_len) : NULL;
    PPCODE:
-      cmk_pkey_import_pkcs8(pkey, buf, len, pass, pass_len);
+      if (!cmk_pkey_import_pkcs8(pkey, buf, len, pass, pass_len))
+         croak(pass? "password incorrect" : "password required");
 
 void
 _import_openssh_privkey(pkey, buffer, pass_sv=&PL_sv_undef)
@@ -80,7 +81,8 @@ _import_openssh_privkey(pkey, buffer, pass_sv=&PL_sv_undef)
       const U8 *buf= (const U8*) secret_buffer_SvPVbyte(buffer, &len);
       const char *pass= SvOK(pass_sv)? secret_buffer_SvPVbyte(pass_sv, &pass_len) : NULL;
    PPCODE:
-      cmk_pkey_import_openssh_privkey(pkey, buf, len, pass, pass_len);
+      if (!cmk_pkey_import_openssh_privkey(pkey, buf, len, pass, pass_len))
+         croak(pass? "password incorrect" : "password required");
 
 void
 _import_openssh_pubkey(pkey, buffer)

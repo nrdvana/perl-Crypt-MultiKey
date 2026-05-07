@@ -757,8 +757,9 @@ cmk_pkey_export_spki(cmk_pkey *pk, SV *buf_out) {
  * The buffer should contain ASN.1 DER bytes of PKCS#8 which may be storing an encrypted private
  * key that requires a password to decrypt.  PKCS#8 also stores the PDK iterations and other
  * encryption parameters, so only the original password is required.
+ * Returns false on incorrect password, and dies on any other type of error.
  */
-void
+bool
 cmk_pkey_import_pkcs8(cmk_pkey *pk, const U8 *buf, STRLEN buf_len, const char *pw, STRLEN pw_len) {
    const char *err= NULL;
    PKCS8_PRIV_KEY_INFO *p8inf= NULL;
@@ -773,12 +774,12 @@ cmk_pkey_import_pkcs8(cmk_pkey *pk, const U8 *buf, STRLEN buf_len, const char *p
    if (p8) {
       /* Successfully decoded as X509_SIG - this means it's encrypted */
       if (!pw_len)
-         GOTO_CLEANUP_CROAK("PKCS8 private key is encrypted but no password was provided");
+         goto cleanup; /* requires password */
 
       /* Decrypt to get PKCS8_PRIV_KEY_INFO */
       p8inf = PKCS8_decrypt(p8, pw, pw_len);
       if (!p8inf)
-         GOTO_CLEANUP_CROAK("PKCS8 decryption failed (wrong password?)");
+         goto cleanup; /* wrong password */
    }
    else {
       /* Failed to decode as X509_SIG, try as unencrypted PKCS8_PRIV_KEY_INFO */
@@ -805,8 +806,12 @@ cleanup:
       X509_SIG_free(p8);
    if (err)
       cmk_croak_with_ssl_error("import_pkcs8", err);
-   if (*pk) EVP_PKEY_free(*pk);
-   *pk= pkey;
+   if (pkey) {
+      if (*pk) EVP_PKEY_free(*pk);
+      *pk= pkey;
+      return true;
+   } else
+      return false;
 }
 
 /* Save the private key from ::PKey MAGIC into the supplied buffer.

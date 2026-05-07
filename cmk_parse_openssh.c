@@ -228,7 +228,7 @@ cleanup:
  *     mpint   private_scalar
  *
  */
-void
+bool
 cmk_pkey_import_openssh_privkey(cmk_pkey *pk, const U8 *data, STRLEN data_len,
                                 const char *pw, STRLEN pw_len
 ) {
@@ -287,7 +287,7 @@ cmk_pkey_import_openssh_privkey(cmk_pkey *pk, const U8 *data, STRLEN data_len,
    else if (!pw) {
       /* Encrypted, but caller didn't supply password, so just load the public key. */
       cmk_pkey_import_openssh_pubkey(pk, pubblob0, (STRLEN)pubblob0_len);
-      return;
+      return true;
    }
    else {
       /* caller supplied a password -> MUST either decrypt+parse or die */
@@ -297,14 +297,21 @@ cmk_pkey_import_openssh_privkey(cmk_pkey *pk, const U8 *data, STRLEN data_len,
                                                   privblob, privblob_len,
                                                   (const U8*)pw, (size_t)pw_len,
                                                   &err);
-      if (!plain_sb)
+      if (!plain_sb) /* failure here means openssl failures or unsupported formats */
          croak("Failed to decrypt OpenSSH private key: %s", err);
 //      warn("# decrypted privblob %ld bytes into %ld bytes of 'inner'\n", (long)privblob_len, (long)plain_sb->len);
       inner.pos = plain_sb->data;
       inner.lim = plain_sb->data + plain_sb->len;
    }
-   if (!cmk_parse_openssh_privkey_inner(&inner, pk))
+   if (!cmk_parse_openssh_privkey_inner(&inner, pk)) {
+      /* The decryption above can't determine if the password is correct.
+       * If the "check ints" are wrong, assume it was because of an incorrect password.
+       */
+      if (strstr(inner.error, "checkint") && plain_sb)
+         return false;
       croak("Failed to parse OpenSSH private key: %s", inner.error);
+   }
+   return true;
 }
 
 bool

@@ -50,8 +50,9 @@ extern void cmk_pkey_export_spki(cmk_pkey *pk, SV *buf_out);
  * The buffer should contain ASN.1 DER bytes of PKCS#8 which may be storing an encrypted private
  * key that requires a password to decrypt.  It also stores the PDK iterations and other
  * encryption parameters, so only the original password is required.
+ * Returns false on incorrect password, and dies on any other type of error.
  */
-extern void cmk_pkey_import_pkcs8(cmk_pkey *pk, const U8 *buf, STRLEN buf_len, const char *pw, STRLEN pw_len);
+extern bool cmk_pkey_import_pkcs8(cmk_pkey *pk, const U8 *buf, STRLEN buf_len, const char *pw, STRLEN pw_len);
 
 /* Save the private key from ::PKey MAGIC into the supplied buffer.
  * The pasword parameter is optional, and if supplied results in an encrypted private key.
@@ -65,10 +66,10 @@ extern void cmk_pkey_import_openssh_pubkey(cmk_pkey *pk, const U8 *buf, STRLEN b
 /* Import a key from OpenSSH private key format (having already decoded the base64).
  * This can fall back to loading a public key if the key is encrypted and the password is NULL,
  * because the public keys are stored in the unencrypted half of the file.
- * If the password is provided and is incorrect, this croaks instead of falling back to loading
- * the public key.
+ * If the password is provided and is incorrect, this return false instead of falling back to
+ * loadingthe public key.
  */
-extern void cmk_pkey_import_openssh_privkey(cmk_pkey *pk, const U8 *buf, STRLEN buf_len, const char *pw, STRLEN pw_len);
+extern bool cmk_pkey_import_openssh_privkey(cmk_pkey *pk, const U8 *buf, STRLEN buf_len, const char *pw, STRLEN pw_len);
 
 /* Generate symmetric key material from the public key and store the public data in tumbler_out.
  * This appends bytes to skey_buf, so multiple keys can concatenate to the same buffer
