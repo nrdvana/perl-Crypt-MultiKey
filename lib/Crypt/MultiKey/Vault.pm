@@ -12,45 +12,57 @@ on the Vault file.
 
 =head1 FILE FORMAT
 
-A Vault is defined in terms of a C<sector_size>.  The header occupies an integer number of blocks
-such that the data starts on a 4KiB boundary.  The header is a variable-length PEM text followed
-by "\n" characters and one NUL byte that pad it to the beginning of the data.  You may actually
-put your own Unix "#!" interpreter directive at the start of the file if you wish, so long as
-the PEM text begins within the first 4KiB of the file.
+A Vault is defined in terms of a C<sector_size>.  The header occupies an integer number of
+sectors, but also ensures that the data starts on a 4KiB boundary.  The header has an optional
+user-defined "preamble" (useful for fun things like a shebang that makes the vault executable)
+followed by a format marker, followed by a version declaration, followed by a JSON object
+holding the rest of the header data.  The JSON can optionally be followed by serialized PKey
+objects (having encrypted private halves) if you wish to keep your keys close to the thing
+they unlock.  The remainder of the header is padded with \n bytes, up to the last 32 bytes which
+hold an C<HMAC-SHA256> of all bytes in the header up to the HMAC.
 
-The purpose of this format is so you can see what is inside it using a text editor, easily parse
-it if you need to, and have all the binary data pushed off the bottom of the screen by the run
-of "\n" characters to reduce the chance that you corrupt your terminal.  The run of "\n"
-characters also provide padding so that the header can usually be rewritten without needing to
-replace the entire file.
+The purpose of this format is to allow you to see what is inside it using a text editor, easily
+parse it with other tools if you need to, and have all the binary data pushed off the bottom of
+the screen by the run of "\n" characters to reduce the chance that you corrupt your terminal.
+The run of "\n" characters also provide padding so that the header can be rewritten without
+needing to replace the entire file.  I departed from PEM encoding because the primary purpose of
+PEM is to be ascii-safe during transmission, but a Vault will always need full 8-bit capability,
+and JSON is easier to store user metadata without PEM header restrictions.
 
+  $optional_preamble
   \0
-  -----BEGIN CRYPT MULTIKEY VAULT-----
+  ===== Crypt::MultiKey::Vault =====
   version: 0.001
   writer_version: 0.001
-  cipher: AES-256-XTS
-  sector_size: 4096
-  data_start_block: 2
-  user_meta.name: Example
-  locks.0.cipher: AES-256-GCM
-  locks.0.ciphertext: base64==
-  locks.0.tumblers.0.ephemeral_pubkey: base64==
-  locks.0.tumblers.0.key_fingerprint: SHA256:base64==
-  locks.1.cipher: AES-256-GCM
-  locks.1.ciphertext: base64==
-  locks.1.tumblers.0.ephemeral_pubkey: base64==
-  locks.1.tumblers.0.key_fingerprint: SHA256:base64==
-  locks.1.tumblers.1.ephemeral_pubkey: base64==
-  locks.1.tumblers.1.key_fingerprint: SHA256:base64==
-  header_authentication: HMAC-SHA256:base64==
-  
-  -----END CRYPT MULTIKEY VAULT-----
+  {
+    "cipher": "AES-256-XTS",
+    "sector_size": 4096,
+    "data_sector": 2,
+    "user_meta": {
+      "name": "Example"
+    },
+    "locks": [
+      { "cipher": "AES-256-GCM",
+        "ciphertext": $base64,
+        "tumblers": [
+          { "ephemeral_pubkey": $base64, "key_fingerprint": "SHA256:base64==" }
+        ]
+      },
+      { "cipher": "AES-256-GCM",
+        "ciphertext": $base64,
+        "tumblers": [
+          { "ephemeral_pubkey": $base64, "key_fingerprint": "SHA256:base64==" },
+          { "ephemeral_pubkey": $base64, "key_fingerprint": "SHA256:base64==" }
+        ]
+      }
+    ]
+  }
+  \0
+  [optional bundled PKey objects in PEM format]
   \n
-  \n
-  \n
-  ....
-  \n\0
-  [binary data begins at a 4K and sector_size boundary]
+  \n (repeating until 20 bytes before data_start_block)
+  $HMAC_BYTES
+  [binary data begins at data_sector declared above]
 
 =cut
 
@@ -96,7 +108,7 @@ This can be changed during L</save> if you are saving to a new file.
 
 =attribute data_offset
 
-The byte offset at which data blocks begin.  This must be a multiple of the block size, and by
+The byte offset at which data blocks begin.  This must be a multiple of the sector size, and by
 default will not be smaller than 64KiB to leave room for the header to grow without needing to
 rewrite the file.
 This can be changed during L</save> if you are saving to a new file.
@@ -156,7 +168,7 @@ sub _get_data_size_from_handle {
    return $pos - $self->data_offset;
 }
 
-sub authentication { $_[0]{authentication} }
+#sub authentication { $_[0]{authentication} }
 sub _cipher_skey {
    my $self= shift;
    my $skey= $self->lock_mechanism->primary_skey
@@ -245,9 +257,7 @@ sub insert_keys { shift->lock_mechanism->insert_keys(@_) }
 sub unlock {
    my $self= shift;
    $self->lock_mechanism->unlock(@_);
-   # If 'authentication' is set, it means we need to validate the MAC of the
-   # PEM file headers, which couldn't be done until we know the primary_skey.
-   $self->authenticate if defined $self->authentication;
+   $self->_authenticate;
    $self;
 }
 
@@ -263,10 +273,6 @@ of the form C<< user_meta.$name = $value >>.  Note that headers are B<plaintext>
 If you wish to store secret user metadata it needs to be part of L</content>, which can be
 accomplished conveniently using L</content_dict>.
 
-Because PEM has no escaping system, the names and values may not contain control characters or
-begin or end with space characters.  The names also may not contain '.' or be purely numeric,
-because these are used for encoding the structure of the data.
-
 Warning: the authenticity of C<user_meta> does not get checked until you have
 L<unlocked|/unlock> the coffer.  Never trust C<user_meta> on a locked Coffer unless the file
 was stored securely.
@@ -276,6 +282,11 @@ was stored securely.
 A shortcut for C<< ->user_meta->{name} >>.  This helps encourage you to at least provide a label
 for the file indicating its purpose or contents.  This defaults to the basename of the L</path>.
 
+=attribute file_preamble
+
+A user-defined text to write at the beginning of the Vault file.   The text may not include the
+string C<"\0===== Crypt::MultiKey::Vault =====\n">.
+
 =cut
 
 sub user_meta { @_ > 1? shift->_set_user_meta(@_) : ($_[0]{user_meta} ||= {}) }
@@ -283,6 +294,8 @@ sub _set_user_meta { $_[0]{user_meta}= $_[1]; $_[0] }
 
 sub name { @_ > 1? shift->_set_name(@_) : $_[0]->user_meta->{name} }
 sub _set_name { $_[0]->user_meta->{name}= $_[1]; $_[0] }
+
+sub file_preamble { @_ > 1? shift->_set_file_preamble(@_) : $_[0]{file_preamble} }
 
 =constructor new
 
@@ -386,7 +399,7 @@ sub _load {
    $self->_set_data_offset($data_offset);
    $self->_set_lock_mechanism($attrs->{lock_mechanism});
    $self->_set_user_meta($attrs->{user_meta} || {});
-   $self->{authentication}= $attrs->{authentication};
+   #$self->{authentication}= $attrs->{authentication};
    if ($self->bundled_keys) {
       if ($header_buf->length < $data_offset) {
          my $at= sysseek($fh, $header_buf->length, Fcntl::SEEK_SET())
@@ -462,16 +475,16 @@ sub _attrs_from_pem {
    carp "'$path' requires version $min_version of Crypt::MultiKey::Vault but this is only version "
       .__PACKAGE__->VERSION
       if $min_version > __PACKAGE__->VERSION;
-   croak "Headers must end with header_authentication"
-      unless @$header_kv > 2 && $header_kv->[-2] eq 'header_authentication';
+   #croak "Headers must end with header_authentication"
+   #   unless @$header_kv > 2 && $header_kv->[-2] eq 'header_authentication';
    my $header_text= '';
-   for (0..$#$header_kv-2) {
+   for (0..$#$header_kv) {
       $header_text .= $header_kv->[$_] . ($_ & 1? "\n" : ": ");
    }
-   my ($mac_algo,$mac_base64)= split ':', $header_kv->[-1], 2;
-   my $attrs= Crypt::MultiKey::_inflate_pem_header_kv(@{$header_kv}[4..($#$header_kv-2)]);
+   #my ($mac_algo,$mac_base64)= split ':', $header_kv->[-1], 2;
+   my $attrs= Crypt::MultiKey::_inflate_pem_header_kv(@{$header_kv}[4..$#$header_kv]);
    $attrs->{lock_mechanism}= Crypt::MultiKey::LockMechanism->new->_import_attrs($attrs);
-   $attrs->{authentication}= [ $header_text, $mac_algo, decode_base64($mac_base64) ];
+   #$attrs->{authentication}= [ $header_text, $mac_algo, decode_base64($mac_base64) ];
    return $attrs;
 }
 
@@ -493,36 +506,56 @@ sub _export_pem {
    my $header_mac= 'HMAC-SHA256:';
    Crypt::MultiKey::hmac_sha256($self->lock_mechanism->hmac_skey, $header_text)
       ->span->append_to($header_mac, encoding => BASE64);
-   push @header_kv, 'header_authentication' => $header_mac;
+   #push @header_kv, 'header_authentication' => $header_mac;
    return Crypt::SecretBuffer::PEM->new(
       label     => 'CRYPT MULTIKEY VAULT',
       header_kv => \@header_kv,
    );
 }
 
-sub authenticate {
+sub _authenticate {
    my ($self, $croak)= @_;
-   my $auth= $self->authentication;
-   unless (defined $auth) {
-      croak 'No authentication attribute available' if $croak;
-      return 0;
-   }
-   unless (defined $self->lock_mechanism->primary_skey) {
-      croak 'No primary_skey available for authentication' if $croak;
-      return 0;
-   }
-   unless ($auth->[1] eq 'HMAC-SHA256') {
-      croak 'Only HMAC-SHA256 is supported' if $croak;
-      return 0;
-   }
-   my $mac= Crypt::MultiKey::hmac_sha256($self->lock_mechanism->hmac_skey, $auth->[0]);
-   unless ($mac->memcmp($auth->[2]) == 0) {
-      croak 'Header MAC failed; Vault headers have been modified since file was written.'
-         if $croak;
-      return 0;
-   }
+   # TODO: new format will authenticate entire header minus 32 bytes against the HMAC
+   # stores in the last 32 bytes.
+#   my $auth= $self->authentication;
+#   unless (defined $auth) {
+#      croak 'No authentication attribute available' if $croak;
+#      return 0;
+#   }
+#   unless (defined $self->lock_mechanism->primary_skey) {
+#      croak 'No primary_skey available for authentication' if $croak;
+#      return 0;
+#   }
+#   unless ($auth->[1] eq 'HMAC-SHA256') {
+#      croak 'Only HMAC-SHA256 is supported' if $croak;
+#      return 0;
+#   }
+#   my $mac= Crypt::MultiKey::hmac_sha256($self->lock_mechanism->hmac_skey, $auth->[0]);
+#   unless ($mac->memcmp($auth->[2]) == 0) {
+#      croak 'Header MAC failed; Vault headers have been modified since file was written.'
+#         if $croak;
+#      return 0;
+#   }
    return 1;
 }
+
+=method save
+
+  $vault->save(%options);
+  #options:
+  #  path             - path and file name to write
+  #  sector_size      - power of 2 between 512 and 4096
+  #  data_offset      - file offset which must point to a sector boundary
+  #  user_meta        - arbitrary JSON-compatible perl data
+  #  cipher           - currently must be 'AES-256-XTS'
+
+Write out a new Vault file, or write changes to the metadata of an existing file.
+If you request changes to C<data_offset>, C<sector_size>, or C<cipher> (or enlarge C<user_meta>
+beyond what fits before C<data_offset>) this will trigger a complete rewrite of the file.
+A complete rewrite requires you to supply a C<path> for the new file and it must not already
+exist.
+
+=cut
 
 sub save {
    my ($self, @args)= @_;
