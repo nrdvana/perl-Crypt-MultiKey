@@ -193,7 +193,9 @@ data even before the private half has been obtained.
 =item password
 
 If the private key is encrypted, this attempts a L</decrypt_private> before the constructor
-returns and dies if the password is incorrect.
+returns and dies if the password is incorrect.  In the opposite case, if you are calling the
+constructor with C<< { generate => $type } >>, specifying a password will make an automatic
+call to L</encrypt_private>.
 
 =back
 
@@ -222,6 +224,7 @@ our %_attr_pri= (
    public => -3,
    generate => -1,
    # default = 0
+   encrypt_private => 1,
    save => 100,
 );
 sub _init {
@@ -502,9 +505,13 @@ sub generate {
    $type ||= 'x25519';
    $type= $type_alias{lc $type} || $type;
    $self->_keygen($type);
-   $self->{type}= $type;
    delete $self->{fingerprint};
    delete $self->{private_encrypted};
+   # If run from the constructor with a { password => 'xxx' } and the protection_scheme
+   # isn't defined, automatically encrypt_private.
+   if (defined $_ctor_password && !defined $self->protection_scheme) {
+      $self->encrypt_private($_ctor_password);
+   }
    $self;
 }
 
