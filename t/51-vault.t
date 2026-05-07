@@ -40,11 +40,9 @@ subtest save_open_and_patch_header => sub {
    ok( $v2->save(), 'in-place header patch' );
    is( $v2->read(3, 11)->copy->memcmp("hello world"), 0, 'data preserved after patch save' );
    my $bytes= slurp($path);
-   is(
-      substr($bytes, $v2->data_offset - 2, 2),
-      "\n\0",
-      'header ends with newline + NUL at data_start boundary'
-   );
+   like( $bytes, qr/^\0===== Crypt::MultiKey::Vault =====\nversion: /, 'vault uses JSON header marker' );
+   unlike( $bytes, qr/-----BEGIN CRYPT MULTIKEY VAULT-----/, 'vault header is not PEM encoded' );
+   is( length(substr($bytes, $v2->data_offset - 32, 32)), 32, 'header ends with HMAC bytes' );
 };
 
 subtest save_to_new_path_with_overrides => sub {
@@ -81,6 +79,28 @@ subtest patch_header_overflow_croaks => sub {
       dies { $v->save },
       qr/Header does not fit in reserved area/,
       'save without path croaks when header no longer fits'
+   );
+};
+
+subtest header_authentication => sub {
+   my $tmpdir= File::Temp->newdir;
+   my $path= "$tmpdir/vault.dat";
+   my $key= Crypt::MultiKey::PKey->generate;
+
+   my $v= Crypt::MultiKey::Vault->new(path => $path, user_meta => { role => 'test' });
+   $v->add_access($key);
+   $v->write(0, secret("authenticated data"));
+   $v->save;
+
+   my $bytes= slurp($path);
+   substr($bytes, index($bytes, '"test"') + 1, 1)= 'T';
+   mkfile($path, $bytes);
+
+   my $v2= Crypt::MultiKey::Vault->open(path => $path);
+   like(
+      dies { $v2->unlock($key) },
+      qr/Header MAC failed/,
+      'unlock rejects a vault whose JSON header was modified'
    );
 };
 
