@@ -268,6 +268,10 @@ True if the C<content> or C<content_dict> attributes are defined, meaning that e
 is decrypted or has been initialized to a new value.  Maybe unintuitively, it returns false for
 an unlocked coffer where the content hasn't been lazy-decrypted yet.
 
+=item initialized
+
+True if C<has_content> or C<has_ciphertext>, meaning that content has been added to this Coffer.
+
 =back
 
 =attribute content_dict

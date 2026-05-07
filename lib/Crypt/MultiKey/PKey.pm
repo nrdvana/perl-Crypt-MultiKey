@@ -543,7 +543,7 @@ it.
 Export the PKey as a L<PEM object|Crypt::SecretBuffer::PEM> of C<PKCS#8> data, B<unencrypted>,
 and B<without> any PEM headers so that L<openssl(1)> can read it.
 
-=method export_pem_openssl_private_key
+=method export_pem_openssl_encrypted_private_key
 
 Export the PKey as a L<PEM object|Crypt::SecretBuffer::PEM> of password-encrypted C<PKCS#8>
 data, B<without> any PEM headers so that L<openssl(1)> can read it.

@@ -45,12 +45,12 @@ sub fido_err { $_[0]{fido_err} }
 
 =attribute aaguid
 
+A hardware identifier for the model/version of the authenticator, as raw 16 bytes.
+
+=attribute aaguid_hex
+
 A hardware identifier for the model/version of the authenticator, formatted in standard GUID
 hex notation.
-
-=attributes aaguid_bytes
-
-A hardware identifier for the model/version of the authenticator, as raw 16 bytes.
 
 =attribute algorithms
 
