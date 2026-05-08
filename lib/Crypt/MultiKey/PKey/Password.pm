@@ -2,7 +2,7 @@ package Crypt::MultiKey::PKey::Password;
 # VERSION
 # ABSTRACT: Default PKey protection scheme - encrypt private half with a password
 
-use v5.10;
+use v5.12;
 use warnings;
 use Carp;
 use parent 'Crypt::MultiKey::PKey';

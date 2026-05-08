@@ -17,7 +17,7 @@ back to running the L<ssh-add(1)> and L<ssh-keygen(1)> commands.
 
 =cut
 
-use v5.10;
+use v5.12;
 use warnings;
 use Carp;
 use Time::HiRes qw( time );
@@ -372,7 +372,7 @@ sub _run_cmd {
    $cmd[0]= $path if defined $path;
    my ($out, $err)= (undef, Symbol::gensym());
    my $pid= eval { IPC::Open3::open3(undef, $out, $err, @cmd) };
-   croak "Failed to execute '$_[0]': $cmd"
+   croak "Failed to execute '$_[0]': ".join(' ', @cmd)
       unless $pid;
    local $/;
    $out= <$out> // '';

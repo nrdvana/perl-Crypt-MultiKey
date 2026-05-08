@@ -2,7 +2,7 @@ package Crypt::MultiKey::Coffer;
 our $VERSION= '0.001'; # VERSION
 # ABSTRACT: Encrypted container that can be unlocked with various combinations of keys
 
-use v5.10;
+use v5.12;
 use warnings;
 use Carp;
 use version;
@@ -815,7 +815,6 @@ sub _export_pem {
       writer_version => __PACKAGE__->VERSION,
       user_meta      => $self->user_meta,
       %{ $self->lock_mechanism->_export_attrs },
-      locks          => \@locks_export,
       content_type   => $self->content_type,
       cipher_data    => \%cipher_data_export,
    );

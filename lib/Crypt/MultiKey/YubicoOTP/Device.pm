@@ -2,7 +2,7 @@ package Crypt::MultiKey::YubicoOTP::Device;
 # VERSION
 # ABSTRACT: Represents a YubiKey discovered through the OTP interface
 
-use v5.10;
+use v5.12;
 use warnings;
 use Crypt::MultiKey::YubicoOTP;
 

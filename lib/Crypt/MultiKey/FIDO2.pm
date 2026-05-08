@@ -44,7 +44,7 @@ If there is only one to choose from, it is returned immediately without waiting 
 
 =cut
 
-use v5.10;
+use v5.12;
 use warnings;
 use Time::HiRes qw( time sleep );
 use Carp qw( croak );

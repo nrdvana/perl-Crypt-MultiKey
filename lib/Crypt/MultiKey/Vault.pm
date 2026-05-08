@@ -66,7 +66,7 @@ and JSON is easier to store user metadata without PEM header restrictions.
 
 =cut
 
-use v5.10;
+use v5.12;
 use warnings;
 use version;
 use Carp;

@@ -2,7 +2,7 @@ package Crypt::MultiKey::PKey::YKChalResp;
 # VERSION
 # ABSTRACT: Use a YubiKey OTP challenge/response to encrypt/decrypt the private key
 
-use v5.10;
+use v5.12;
 use warnings;
 use Carp;
 use Symbol ();

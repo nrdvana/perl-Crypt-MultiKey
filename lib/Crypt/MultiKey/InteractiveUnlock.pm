@@ -38,7 +38,7 @@ and overridden as needed.
 
 =cut
 
-use v5.10;
+use v5.12;
 use warnings;
 use Carp;
 use Scalar::Util qw( blessed refaddr );
@@ -426,6 +426,7 @@ sub exclude_pkey {
 # destructive-backspace over the prompt line, then flag append_console_line that it will need
 # to re-render the prompt.
 sub _clear_prompt_line {
+   my $self= shift;
    my $pst= $self->prompt_state;
    if (keys %$pst) { # empty state means no password prompt in progress
       my $out= $pst->{prompt_fh};
@@ -647,7 +648,7 @@ sub _try_pkeys_FIDO2 {
    my ($self, $pkeys, $options)= @_;
    my @fido_devs= Crypt::MultiKey::FIDO2::list_devices();
    my $prev= $self->{_prev_fido2_devices} || [];
-   $self->{_prev_fido2_devices}= \@fido2_devs;
+   $self->{_prev_fido2_devices}= \@fido_devs;
    # FIDO devices aren't uniquely identifiable, so we just have to poll fast enough to
    # detect differences in the length of the list and then test them all.
    return unless @$prev != @fido_devs && @fido_devs;

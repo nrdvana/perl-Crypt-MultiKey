@@ -132,7 +132,7 @@ This module collection facilitates all of that.
 
 =cut
 
-use strict;
+use v5.12;
 use warnings;
 use Carp;
 use Scalar::Util qw( blessed looks_like_number );

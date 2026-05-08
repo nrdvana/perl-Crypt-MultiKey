@@ -2,7 +2,7 @@ package Crypt::MultiKey::FIDO2::Device;
 # VERSION
 # ABSTRACT: Represent a connected fido_dev_t struct of libfido2
 
-use v5.10;
+use v5.12;
 use warnings;
 use Carp 'croak';
 use Crypt::MultiKey::FIDO2;

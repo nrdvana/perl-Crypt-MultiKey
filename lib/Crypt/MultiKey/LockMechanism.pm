@@ -28,7 +28,7 @@ This class is only the lock mechanism, and does not handle serialization.
 
 =cut
 
-use v5.10;
+use v5.12;
 use warnings;
 use Carp;
 use Scalar::Util qw( blessed );
