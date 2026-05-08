@@ -103,16 +103,18 @@ sub _set_primary_skey {
 }
 
 sub cipher_skey {
-   my $skey= $_[0]->primary_skey || croak "Coffer is locked";
+   my ($self, $size)= @_;
+   my $skey= $self->primary_skey || croak "Coffer is locked";
    return Crypt::MultiKey::hkdf(
-      { size => 32, kdf_info => 'Crypt::MultiKey/cipher_skey', kdf_salt => '' },
+      { size => $size//32, kdf_info => 'Crypt::MultiKey/cipher_skey', kdf_salt => '' },
       $skey
    );
 }
 sub hmac_skey {
-   my $skey= $_[0]->primary_skey || croak "Coffer is locked";
+   my ($self, $size)= @_;
+   my $skey= $self->primary_skey || croak "Coffer is locked";
    return Crypt::MultiKey::hkdf(
-      { size => 32, kdf_info => 'Crypt::MultiKey/hmac_skey', kdf_salt => '' },
+      { size => $size//32, kdf_info => 'Crypt::MultiKey/hmac_skey', kdf_salt => '' },
       $skey
    );
 }

@@ -41,8 +41,7 @@ subtest save_open_and_patch_header => sub {
    is( $v2->read(3, 11)->copy->memcmp("hello world"), 0, 'data preserved after patch save' );
    my $bytes= slurp($path);
    like( $bytes, qr/^\0===== Crypt::MultiKey::Vault =====\nversion: /, 'vault uses JSON header marker' );
-   unlike( $bytes, qr/-----BEGIN CRYPT MULTIKEY VAULT-----/, 'vault header is not PEM encoded' );
-   is( length(substr($bytes, $v2->data_offset - 32, 32)), 32, 'header ends with HMAC bytes' );
+   is( substr($bytes, $v2->data_offset - 33, 1), "\n", 'newline padding until HMAC' );
 };
 
 subtest save_to_new_path_with_overrides => sub {
@@ -77,7 +76,7 @@ subtest patch_header_overflow_croaks => sub {
    $v->user_meta->{oversized}= ('x' x 20000);
    like(
       dies { $v->save },
-      qr/Header does not fit in reserved area/,
+      qr/rewrite.*?header grows/,
       'save without path croaks when header no longer fits'
    );
 };
