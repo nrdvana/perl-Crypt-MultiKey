@@ -11,7 +11,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        perl: ['latest','5.10']
+        perl: ['latest','5.12']
         threads: [ true, false ]
         exclude:
           - perl: 'latest'
@@ -24,7 +24,7 @@ jobs:
           perl-version: ${{ matrix.perl }}
           multi-thread: ${{ matrix.threads }}
       - name: Install deps
-        run: cpm install -g
+        run: cpanm --installdeps --notest .
       - name: Build
         run: perl Makefile.PL
       - name: Test

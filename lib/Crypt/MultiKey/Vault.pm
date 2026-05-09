@@ -412,7 +412,7 @@ sub _load {
          if (($ver_end= $header_buf->index("\n", $header_offset + length(HEADER_MARKER))) >= 0) {
             $header_buf->span(pos => $header_offset + length(HEADER_MARKER), lim => $ver_end)
                ->copy_to(my $ver_buf);
-            $ver_buf =~ /^version: (\d+\.[\d_]+)\z/a
+            $ver_buf =~ /^version: ([0-9]+\.[0-9_]+)\z/
                or croak "Invalid version encountered: '$ver_buf'";
             $version= version->parse($1);
             croak "Vault '$path' requires Crypt::MultiKey::Vault $version but this is only version $VERSION"
@@ -565,7 +565,7 @@ sub _authenticate {
    # authenticate all bytes up to data_offset - HEADER_MAC_SIZE
    my $mac= Crypt::MultiKey::hmac_sha256(
       $self->lock_mechanism->hmac_skey,
-      $header->span(0, -HEADER_MAC_SIZE)
+      $header->span(0, - HEADER_MAC_SIZE)
    );
    unless ($mac->memcmp($header->span(-HEADER_MAC_SIZE)) == 0) {
       croak 'Header MAC failed; Vault header has been modified since file was written.'

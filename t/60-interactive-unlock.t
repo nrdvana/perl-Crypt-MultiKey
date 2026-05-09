@@ -6,6 +6,7 @@ use Crypt::MultiKey::LockMechanism;
 use Crypt::MultiKey::InteractiveUnlock;
 
 my $user_entered_pw;
+no warnings 'redefine';
 local *Crypt::MultiKey::InteractiveUnlock::_try_pkeys_Password= sub {
    my ($self, $pkeys, $options)= @_;
    note 'trying to collect password for '.@$pkeys.' PKeys';
