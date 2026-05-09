@@ -2,6 +2,12 @@ use FindBin;
 use lib "$FindBin::Bin/lib";
 use Test2AndUtils;
 use Crypt::SecretBuffer qw( secret );
+use Crypt::MultiKey::FIDO2;
+BEGIN { # De-constify the 'available' flag, to enable mocking
+   my $avail= Crypt::MultiKey::FIDO2::available();
+   no warnings;
+   *Crypt::MultiKey::FIDO2::available= sub { $avail };
+}
 use Crypt::MultiKey::PKey;
 use Crypt::MultiKey::PKey::FIDO2;
 
