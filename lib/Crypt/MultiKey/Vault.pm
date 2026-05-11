@@ -576,7 +576,7 @@ sub _export_bundled_keys {
       my $pem= !defined($k->protection_scheme)
          ? $k->export_pem_openssl_public_key
          : $k->$method;
-      $buf->append($pem->serialize);
+      $buf->append("\n", $pem->serialize); # ensure -----BEGIN is the start of a text line
    }
    return $buf;
 }
