@@ -4,11 +4,12 @@ our $VERSION= '0.001'; # VERSION
 
 =head1 DESCRIPTION
 
-This is like Coffer, but instead of managing a single secret in memory, it reads and writes
-blocks of the source file.  The initial few blocks of the file are plain text and store the
-details of the key-wrapping implementation, followed by blocks of binary data.  The block
-encryption algorithm is compatible with Linux crypt-dm, allowing the kernel to directly operate
-on the Vault file.
+Vault is similar to L<Coffer|Crypt::MultiKey::Coffer>, but instead of managing a single secret
+in memory, it encrypts and decrypts random-access sectors of the source file.  The initial few
+sectors of the file are plain text and store the details of the key-wrapping implementation,
+followed by sectors of encrypted binary data.  The sector encryption algorithm is compatible
+with Linux crypt-dm, allowing you to map the Vault as a Linux block device with transparent
+encryption, if you want to.
 
 =head1 FILE FORMAT
 
@@ -389,7 +390,7 @@ sub load {
    my $class_or_self= shift;
    my %opts;
    if (@_ & 1) {
-      if (ref($_[0]) eq 'GLOB' || ref($_[0])->can('sysread')) {
+      if (ref($_[0]) eq 'GLOB' || ref($_[0]) && ref($_[0])->can('sysread')) {
          %opts= ( handle => @_ );
       } elsif (-e $_[0]) {
          %opts= ( path => @_ );
@@ -835,10 +836,10 @@ more efficient when aligned.  The file will be enlarged if you write beyond the 
 sub write {
    my ($self, $ofs, $data)= @_;
    croak "negative data offset" if $ofs < 0;
-   my $lim= $ofs + $data->length;
-   my $skey= $self->_cipher_skey;
    $data= span($data); # Now we have a ::Span object
    return $self unless $data->length;
+   my $lim= $ofs + $data->length;
+   my $skey= $self->_cipher_skey;
    if (my $fh= $self->handle) {
       # real file
       my $sz= $self->sector_size;
