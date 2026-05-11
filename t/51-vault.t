@@ -31,7 +31,7 @@ subtest save_open_and_patch_header => sub {
    ok( $v->save, 'first save' );
    ok( -f $path, 'file created' );
 
-   my $v2= Crypt::MultiKey::Vault->open(path => $path);
+   my $v2= Crypt::MultiKey::Vault->load(path => $path);
    is( $v2->unlocked, F, 'opened vault is locked' );
    ok( $v2->unlock($key), 'unlock opened vault' );
    is( $v2->read(3, 11)->copy->memcmp("hello world"), 0, 'read/write round trip' );
@@ -61,7 +61,7 @@ subtest save_to_new_path_with_overrides => sub {
    is( $v->path, $path2, 'path now points at new file' );
    is( $v->sector_size, 1024, 'sector size overridden' );
 
-   my $v2= Crypt::MultiKey::Vault->open(path => $path2);
+   my $v2= Crypt::MultiKey::Vault->load(path => $path2);
    $v2->unlock($key);
    is( $v2->read(0, 15)->copy->memcmp("abcdefghijklmno"), 0, 'content moved to new file' );
 };
@@ -95,7 +95,7 @@ subtest header_authentication => sub {
    substr($bytes, index($bytes, '"test"') + 1, 1)= 'T';
    mkfile($path, $bytes);
 
-   my $v2= Crypt::MultiKey::Vault->open(path => $path);
+   my $v2= Crypt::MultiKey::Vault->load(path => $path);
    like(
       dies { $v2->unlock($key) },
       qr/Header MAC failed/,
@@ -114,7 +114,7 @@ subtest bundled_keys => sub {
    $v->write(0, secret("bundled data"));
    $v->save;
 
-   my $v2= Crypt::MultiKey::Vault->open(path => $path, bundled_keys => 1);
+   my $v2= Crypt::MultiKey::Vault->load(path => $path, bundled_keys => 1);
    my $tmbl_key= $v2->locks->[0]{tumblers}[0]{key};
    ok( $tmbl_key, 'bundled key parsed from header area' );
    ok( $tmbl_key->decrypt_private('secret-passphrase'), 'decrypt bundled private key' );

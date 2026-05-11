@@ -164,30 +164,33 @@ They cannot be called as class methods.
 
 =head2 pkey
 
-Shortcut for C<< Crypt::MultiKey::PKey->new(@_) >>.
+With an odd number of arguments, this is a shortcut for C<< Crypt::MultiKey::PKey->load(@_) >>.
+Otherwise, it is a shortcut for C<< Crypt::MultiKey::PKey->new(@_) >>.
 
 =head2 coffer
 
-Shortcut for C<< Crypt::MultiKey::Coffer->new(@_) >>.
+With an odd number of arguments, this is a shortcut for C<< Crypt::MultiKey::Coffer->load(@_) >>.
+Otherwise, it is a shortcut for C<< Crypt::MultiKey::Coffer->new(@_) >>.
 
 =head2 vault
 
-Shortcut for C<< Crypt::MultiKey::Vault->new(@_) >>.
+With an odd number of arguments, this is a shortcut for C<< Crypt::MultiKey::Vault->load(@_) >>.
+Otherwise, it is a shortcut for C<< Crypt::MultiKey::Vault->new(@_) >>.
 
 =cut
 
 sub pkey {
-   Crypt::MultiKey::PKey->new(@_);
+   @_ & 1? Crypt::MultiKey::PKey->load(@_) : Crypt::MultiKey::PKey->new(@_);
 }
 
 sub coffer {
    require Crypt::MultiKey::Coffer;
-   Crypt::MultiKey::Coffer->new(@_);
+   @_ & 1? Crypt::MultiKey::Coffer->load(@_) : Crypt::MultiKey::Coffer->new(@_);
 }
 
 sub vault {
    require Crypt::MultiKey::Vault;
-   Crypt::MultiKey::Vault->new(@_);
+   @_ & 1? Crypt::MultiKey::Vault->load(@_) : Crypt::MultiKey::Vault->new(@_);
 }
 
 =head2 hkdf

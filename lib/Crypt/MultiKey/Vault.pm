@@ -333,12 +333,13 @@ sub _set_name { $_[0]->user_meta->{name}= $_[1]; $_[0] }
 This creates a new uninitialized Vault.  Any configuration or data writes to this object will
 be cached in memory until you call L</save>.
 
-=constructor open
+=constructor load
 
-  $vault= Crypt::MultiKey::Vault->open(path => $x);
-  $vault= Crypt::MultiKey::Vault->open(handle => $x);
+  $vault= Crypt::MultiKey::Vault->load($path, %attributes);
+  $vault= Crypt::MultiKey::Vault->load($handle, %attributes);
+  $vault= Crypt::MultiKey::Vault->load(%attributes); # with 'handle' or 'path'
 
-This opens an existing Vault file and unpacks its metadata.  The data canot be
+This loads an existing Vault file and unpacks its metadata.  The data canot be
 read until you call L</unlock>.
 
 =cut
@@ -368,8 +369,20 @@ sub new {
    return $self;
 }
 
-sub open {
-   my ($class_or_self, %opts)= @_;
+sub load {
+   my $class_or_self= shift;
+   my %opts;
+   if (@_ & 1) {
+      if (ref($_[0]) eq 'GLOB' || ref($_[0])->can('sysread')) {
+         %opts= ( handle => @_ );
+      } elsif (-e $_[0]) {
+         %opts= ( path => @_ );
+      } else {
+         croak "Odd number of parameters must start with a handle or path to existing file";
+      }
+   } else {
+      %opts= @_;
+   }
    my $self= ref($class_or_self)? $class_or_self : $class_or_self->new;
    my $fh= delete $opts{handle};
    my $path= delete $opts{path};
@@ -379,7 +392,7 @@ sub open {
    croak "Unknown options: ".join(', ', sort keys %opts)
       if keys %opts;
    unless (defined $fh) {
-      CORE::open $fh, '+<:raw', $path
+      open($fh, '+<:raw', $path)
          or croak "open($path): $!";
    }
    $self->{path}= $path if defined $path;
