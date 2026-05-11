@@ -6,6 +6,7 @@ use v5.12;
 use warnings;
 use Carp;
 use Symbol ();
+use Scalar::Util qw( blessed );
 use Time::HiRes qw( time );
 use MIME::Base64 qw( encode_base64 decode_base64 );
 use IPC::Open3 ();
@@ -174,28 +175,41 @@ sub obtain_private {
 Encrypt the private key using a password derived from YubiKey challenge/response.
 
   $pkey->encrypt_private;
-  $pkey->encrypt_private($serial_number);
+  $pkey->encrypt_private($serial_number_or_yk_device);
 
 If no serial is provided, this picks the first detected key and records its serial.
 
 =cut
 
+sub _resolve_device {
+   my ($self, $device_spec)= @_;
+   return $device_spec
+      if blessed($device_spec) && $device_spec->isa('Crypt::MultiKey::YubicoOTP::Device');
+   my @devs= @{ $self->_update_device_list }
+      or croak "No YubiKey supporting OTP is connected";
+   if (defined $device_spec) {
+      croak "YubiKey selector must be a Device or decimal serial number"
+         unless $device_spec =~ /^[0-9]+\z/;
+      @devs= grep defined($_->serial) && $_->serial eq $device_spec, @devs
+         or croak "Required YubiKey ($device_spec) is not connected";
+   }
+   return @devs;
+}
+
 sub encrypt_private {
    my ($self, $selector)= @_;
-   my $serial;
-   if (defined $selector) {
-      $selector =~ /^\d+\z/
-         or croak "YubiKey selector must be a numeric serial";
-      $serial= $selector;
-   }
-   my $pw= $self->_derive_password_from_yubikey($serial);
+   my $pw= $self->_derive_password_from_yubikey($selector);
    $self->next::method($pw, 0);
 }
 
 # If serial / slot / salt are not defined, they will be initialized.
 # Subsequent calls will return the same password.
 sub _derive_password_from_yubikey {
-   my ($self, $serial, $slot)= @_;
+   my ($self, $device_spec, $slot)= @_;
+   # Search for the required YubiKey, or if this is the first time, look for a
+   # usable slot on a YubiKey.
+   my @devs= $self->_resolve_device($device_spec // $self->yubikey_serial);
+
    my ($bytes, $salt);
    if (defined $self->kdf_salt) {
       $salt= decode_base64($self->kdf_salt);
@@ -210,12 +224,9 @@ sub _derive_password_from_yubikey {
    length($salt) == 16 or croak "Salt must be 16 bytes";
    $self->_export_spki(my $raw_pubkey_bytes);
    $bytes= Crypt::MultiKey::sha256($raw_pubkey_bytes, $salt);
-   # Search for the required YubiKey, or if this is the first time, look for a
-   # usable slot on a YubiKey.
-   $serial //= $self->yubikey_serial;
+
    $slot //= $self->yubikey_slot;
-   for my $device (@{ $self->_update_device_list }) {
-      next if defined $serial && $device->serial ne $serial;
+   for my $device (@devs) {
       my $response= defined $slot? $device->challenge_response($slot, $bytes)
          : eval { $slot= 1; $device->challenge_response(1, $bytes) }
            // eval { $slot= 2; $device->challenge_response(2, $bytes) }
@@ -229,8 +240,7 @@ sub _derive_password_from_yubikey {
       );
       return Crypt::MultiKey::hkdf(\%kdf_params, $response);
    }
-   croak "Required YubiKey ($serial) is not connected" if defined $serial;
-   croak "No YubiKey supporting OTP is connected";
+   croak "No selected YubiKey permits challenge-response";
 }
 
 # When parent class loads PEM file, capture additional attributes
