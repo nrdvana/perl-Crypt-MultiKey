@@ -1,0 +1,202 @@
+#! /usr/bin/env perl
+use v5.12;
+use warnings;
+use Pod::Usage;
+use Getopt::Long;
+use Crypt::SecretBuffer qw/ secret /;
+use MIME::Base64 qw( encode_base64 decode_base64 );
+use Crypt::MultiKey::PKey;
+use Crypt::MultiKey::FIDO2;
+
+=head1 USAGE
+
+  crypt-multikey-new-pkey
+
+=cut
+
+my %fido2_cred;
+GetOptions(
+   'type|t=s'              => \my $opt_type,
+   'protection-scheme|p=s' => \my $opt_prot,
+   'output|o=s'            => \my $opt_output,
+   'fido2-cred-id=s'       => \$fido2_cred{id},
+   'fido2-cred-pubkey=s'   => \$fido2_cred{pubkey},
+   'fido2-cred-cose-alg=s' => \$fido2_cred{cose_alg},
+   'help'                  => sub { pod2usage(1) },
+) or pod2usage(2);
+$opt_output= shift if !defined $opt_output && @ARGV == 1;
+pod2usage(-exitval => 2, -message => "Unexpected non-option arguments")
+   if @ARGV;
+
+# Ensure the requested filename doesn't already exist.
+# (code below checks again before writing it, but this stops mistakes early)
+die "File $opt_output already exists\n"
+   if defined $opt_output && $opt_output ne '-' && -e $opt_output;
+
+# Normalize protection_scheme, and default is Password.
+# "none" is required to request an unprotected private key.
+my %prot_scheme= map +(lc($_) => $_), qw( Password FIDO2 SSHAgentSignature YKChalResp );
+$prot_scheme{none}= undef;
+
+$opt_prot= lc($opt_prot // 'Password');
+exists $prot_scheme{$opt_prot}
+   or die "Available protection-scheme values:\n"
+        . "  Password\n"
+        . (Crypt::MultiKey::FIDO2->available? "  FIDO2\n" : "")
+        . "  SSHAgentSignature\n"
+        . "  YKChalResp\n"
+        . "  none\n"
+        . "\n";
+
+my $pkey= Crypt::MultiKey::PKey->new(
+   generate          => $opt_type,
+   protection_scheme => $prot_scheme{$opt_prot},
+);
+say "generated ".$pkey->algorithm." public/private key pair";
+
+$|= 1; # for prompts that don't end with \n
+
+if (!defined $pkey->protection_scheme) {
+   say "Generated an unprotected private key.  Ensure the file has sensible permissions.";
+}
+elsif ($pkey->protection_scheme eq 'Password') {
+   my $secret= secret;
+   $secret->append_console_line(prompt => 'password: ')
+      or die "aborted.";
+   $pkey->encrypt_private($secret);
+   say "Verifying...";
+   my $pkey2= Crypt::MultiKey::PKey->load($pkey->export);
+   $secret= secret();
+   $secret->append_console_line(prompt => 're-enter password: ')
+      or die "aborted.";
+   $pkey2->decrypt_private($secret);
+   say "Verified.";
+}
+elsif ($pkey->protection_scheme eq 'SSHAgentSignature') {
+   my $agent= $pkey->agent;
+   my @keys= $pkey->usable_agent_keys
+      or die "No usable keys are loaded in your agent.\n"
+           . "Note that only types ssh-rsa, ssh-dsa, and ssh-ed25519 have a stable\n"
+           . "signature algorithm that can be used for encryption.\n";
+   while (@keys > 1) {
+      print "Choose an agent key to use:\n\n";
+      printf " %2d: %s %s %s\n", $_, @{$keys[$_]}{'type','pubkey_base64','comment'}
+         for 0..$#keys;
+      print "\nenter number [0-$#keys]: ";
+      chomp(my $sel= <STDIN>);
+      if ($sel =~ /^[0-9]+\z/ && $sel <= $#keys) {
+         (@keys)= ($keys[$sel]);
+      } else {
+         say "invalid selection";
+      }
+   }
+   say "If required, authorize signature request";
+   $pkey->encrypt_private($keys[0]);
+   say "Verifying...";
+   my $pkey2= Crypt::MultiKey::PKey->load($pkey->export);
+   say "If required, authorize signature request again";
+   $pkey2->obtain_private;
+   say "Verified.";
+}
+elsif ($pkey->protection_scheme eq 'YKChalResp') {
+   require Crypt::MultiKey::YubicoOTP;
+   die "Can't locate the YubicoOTP commandline tools 'ykinfo' and 'ykchalresp'.\n"
+      ."On Debian, use `apt install yk-personalization`.\n"
+      unless Crypt::MultiKey::YubicoOTP->available;
+   my @devices= Crypt::MultiKey::YubicoOTP::list_devices()
+      or die "No yubico-otp devices found.\n";
+   while (@devices > 1) {
+      say "Multiple devices found:";
+      printf " %2d %12s (%s)\n", $_->idx, $_->serial, $_->path
+         for @devices;
+      print "enter number or serial of device: ";
+      chomp(my $sel= <STDIN>);
+      if (my ($sel_dev)= grep $_->idx eq $sel || $_->serial eq $sel) {
+         @devices= ($sel_dev);
+      } else {
+         say "no such device.";
+      }
+   }
+   say "If required, touch device to authorize challenge/response";
+   $pkey->encrypt_private($devices[0]);
+   say "Verifying...";
+   my $pkey2= Crypt::MultiKey::PKey->load($pkey->export);
+   say "If required, touch device again to verify challenge/response";
+   $pkey2->obtain_private;
+   say "Verified.";
+}
+elsif ($pkey->protection_scheme eq 'FIDO2') {
+   die "Crypt::MultiKey was built without libfido2 support.\n"
+      ."Make sure libfido2 and its headers are installed, then rebuild.\n"
+      ."On Debian, use `apt install libfido2-dev`.\n"
+      unless Crypt::MultiKey::FIDO2->available;
+
+   my @devices= Crypt::MultiKey::FIDO2::list_devices()
+      or die "No FIDO2 devices found\n";
+   my $dev= $devices[0];
+   if (@devices > 1) {
+      say "Found ".scalar(@devices)." authenticators.";
+      say "Please touch desired authenticator...";
+      # request indefinite timeout.  ^C will end the loop and return undef.
+      $dev= Crypt::MultiKey::FIDO2::select_device(undef, \@devices);
+   }
+   die "No device selected.\n" unless defined $dev;
+
+   # If the user specified FIDO2 credential on the command line, use that.
+   # Else prompt to create a new credential.
+   if (defined $fido2_cred{id}) {
+      for ($fido2_cred{id}, $fido2_cred{pubkey}) {
+         $_= decode_base64($_) if defined $_;
+      }
+      # delete unspecified keys
+      defined $fido2_cred{$_} || delete $fido2_cred{$_}
+         for keys %fido2_cred;
+      $pkey->fido2_credential(\%fido2_cred);
+      $pkey->fido2_aaguid($dev->aaguid);
+   } else {
+      say "This will create a new credential, consuming a slot on your device.";
+      print "Proceed? [y/n] ";
+      my $resp= <STDIN>;
+      die "aborted.\n"
+         unless $resp =~ /y/i;
+      say "Creating credential.  Touch device to accept.";
+      $pkey->create_credential($dev);
+      say "You can re-enter this credential with:";
+      for (sort keys %{$pkey->fido2_credential}) {
+         (my $opt= "fido2-cred-$_") =~ s/_/-/g;
+         my $v= $pkey->fido2_credential->{$_};
+         say "  --$opt:".($v =~ /[^\x20-\x7E]/? encode_base64($v, '') : $v);
+      }
+      say;
+   }
+   say "Running challenge/response.  Touch device to accept.";
+   $pkey->encrypt_private($dev);
+   say "Verifying...";
+   my $pkey2= Crypt::MultiKey::PKey->load($pkey->export);
+   say "If required, touch device again to verify";
+   $pkey2->obtain_private(fido2_devices => [$dev]);
+   say "Verified.";
+}
+else {
+   die "unsupported protection_scheme '".$pkey->protection_scheme."'\n";
+}
+
+my $out;
+if (defined $opt_output && $opt_output ne '-') {
+   print 'Saving... ';
+   sysopen($out, $opt_output, Fcntl::O_RDWR() | Fcntl::O_CREAT() | Fcntl::O_EXCL() )
+      or die "open(create exclusive): $!";
+} else {
+   say ''; # add a blank line
+}
+my $buf= $pkey->export;
+my $pos= 0;
+# output could be a pipe, so write in a loop
+while ($pos < $buf->length) {
+   my $wrote= $buf->syswrite($out // \*STDOUT, $buf->len - $pos, $pos)
+      or die "write: $!";
+   $pos += $wrote;
+}
+say "Done" if defined $out;
+
+exit 0;
