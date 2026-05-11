@@ -99,7 +99,7 @@ cancel(dev)
       }
 
 SV*
-_make_hmac_secret_credential(dev, pin_sv, discoverable, rp_domain, rp_name, user_name, user_display_name, user_icon=NULL)
+_make_hmac_secret_credential(dev, pin_sv, discoverable, rp_domain, rp_name, user_name, user_display_name, user_icon_sv= NULL)
    SV *dev
    SV *pin_sv
    bool discoverable
@@ -107,9 +107,10 @@ _make_hmac_secret_credential(dev, pin_sv, discoverable, rp_domain, rp_name, user
    const char *rp_name
    const char *user_name
    const char *user_display_name
-   const char *user_icon
+   SV *user_icon_sv
    INIT:
       const char *pin= SvOK(pin_sv)? SvPV_nolen(pin_sv) : NULL;
+      const char *user_icon= (user_icon_sv && SvOK(user_icon_sv))? SvPV_nolen(user_icon_sv) : NULL;
    CODE:
       RETVAL= cmk_fido2_make_credential(dev, pin, discoverable, rp_domain, rp_name, user_name, user_display_name, user_icon);
    OUTPUT:

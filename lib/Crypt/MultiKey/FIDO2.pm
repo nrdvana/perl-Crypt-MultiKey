@@ -9,7 +9,7 @@ use Crypt::MultiKey; # XS methods get loaded by Crypt::MultiKey
   @devices= Crypt::MultiKey::FIDO2::list_devices();
   if (@devices > 1) {
     say "Please touch desired authenticator";
-    $dev= Crypt::MultiKey::FIDO2::select_device(@devices);
+    $dev= Crypt::MultiKey::FIDO2::select_device($timeout, \@devices);
   }
 
 =head1 DESCRIPTION
@@ -58,16 +58,17 @@ sub list_devices {
 
 sub select_device {
    my ($timeout, $devices)= @_;
-   $timeout //= 7;
+   $timeout //= 7 if @_ == 0; # no params defaults to 7 sec, explicit undef means wait forever
    $devices //= [ Crypt::MultiKey::FIDO2::list_devices() ];
-   my $end_t= time + $timeout;
+   my $end_t= defined $timeout? time + $timeout : undef;
    return undef if !@$devices;
    return $devices->[0] if @$devices == 1;
 
    # Start touch request on all devices
+   local $SIG{INT}= sub { $end_t= 0 };
    my $winner;
    my @active= grep $_->get_touch_begin, @$devices;
-   while (@active > 1 && !defined $winner && time < $end_t) {
+   while (@active > 1 && !defined $winner && (!defined $end_t || time < $end_t)) {
       sleep .2;
       for (@active) {
          my $touched= $_->get_touch_status(0);

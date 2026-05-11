@@ -248,14 +248,15 @@ sub make_hmac_secret_credential {
   ($resp, $cred)= $device->assert_hmac_secret(%options);
   # %options:
   #  credential => $cred_or_arrayref,  # one or more credentials to test
-  #  challenge  => $message,           # string whose sha256 will become HMAC salt
+  #  challenge  => $message,           # sha256($message) will become HMAC salt
   #  rp_domain  => $domain_name,       # must match value used during make_credential
   #  pin        => $pin_password,      # only for authenticators that require it
 
-Assert that the device possesses one of the credentials, and compute hmac-secret on 'challenge'
-using that credential.  The response (HMAC bytes) and which credential was used are returned as
-a list.  This method croaks on errors *unless* the only error was that none of the credentials
-exist on the device, in which case it returns an empty list.
+Assert that the device possesses one of the credentials (each a hashref as returned by
+L</make_hmac_secret_credential>), and compute hmac-secret on 'challenge' using that credential.
+The response (HMAC bytes) and which credential was used (same hashref as provided) are returned
+as a list.  This method croaks on errors I<unless> the only error was that none of the
+credentials exist on the device, in which case it returns an empty list.
 
 This can test a device for multiple credentials in one call, so long as the C<rp_domain> and
 C<challenge> is the same for each of them.  Devices may or may not require the C<pin>.
@@ -270,10 +271,10 @@ sub assert_hmac_secret {
       if keys %options;
    $credential= [ $credential ]
       unless ref $credential eq 'ARRAY';
-   length $challenge == 32
-      or croak "Expected challenge of 32 bytes";
    my ($idx, $resp)= $self->_assert_hmac_secret($pin,
-      $rp_domain // 'crypt-multikey.local', $credential, Crypt::MultiKey::sha256($challenge));
+      $rp_domain // 'crypt-multikey.local',
+      $credential,
+      Crypt::MultiKey::sha256($challenge));
    if (defined $idx) {
       return ($resp, $credential->[$idx]);
    } else {

@@ -82,12 +82,22 @@ result and this module will proceed to decrypt the private half of the PKey.
 If you have multiple ::PKey::FIDO2 objects that are candidates for unlocking a Coffer or Vault,
 testing them one at a time could potentially require multiple button presses by the holder of
 the hardware key as each credential is tested.  To improve the user experience, all of the
-C<fido2_credential_id> can be bundled into a single FIDO2 assertion and then a single hardware
-key button press can test all of them at once.  To do this, call class method
-L</try_all_obtain_private> with a list of all the PKey objects.  If the authenticator contains
-one of those credentials it will let us know which one, and the result of the C<hmac-secret>
-on that credential's secret.  The method then decrypts the PKey object associated with that
-credential_id.
+C<fido2_credential> can be bundled into a single FIDO2 assertion and then a single hardware
+key button press can test all of them at once.  Doing this requires that all the PKeys are using
+the same L</challenge>:
+
+   my ($secret, $cred_used)= $fido2_device->assert_hmac_secret(
+     credential => [ map $_->fido2_credential, @$pkeys ],
+     challenge => $pkeys->[0]->challenge
+   );
+   if (defined $cred_used) {
+     for (grep $_->fido2_credential == $cred_used, @$pkeys) {
+       $_->obtain_private(hmac_secret => $secret);
+       ...
+
+If the authenticator contains one of those credentials it will let us know which one, and the
+result of the C<hmac-secret> on that credential's secret.  You can then decrypt the PKey
+object(s) associated with that credential.
 
 =back
 
@@ -305,7 +315,8 @@ sub obtain_private {
       # If not supplied, need to look for matching devices
       defined $self->fido2_credential && $self->fido2_aaguid
          or croak 'Cannot obtain private key without fido2_credential and fido2_aaguid';
-      my @devs= grep $_->aaguid eq $self->fido2_aaguid, Crypt::MultiKey::FIDO2::list_devices()
+      my $dev_list= $opts{fido2_devices} // [ Crypt::MultiKey::FIDO2::list_devices() ];
+      my @devs= grep $_->aaguid eq $self->fido2_aaguid, @$dev_list
          or croak 'No matching FIDO2 authenticator found';
       $hmac_secret= $self->_get_hmac_secret(\@devs)
          or croak 'No FIDO2 authenticator accepted the hmac-secret request';

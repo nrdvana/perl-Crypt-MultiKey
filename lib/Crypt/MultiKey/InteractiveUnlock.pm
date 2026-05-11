@@ -669,7 +669,7 @@ sub _try_pkeys_FIDO2 {
                   challenge => $pkey_group->[0]->challenge
                );
             }) {
-               for (grep $_->credential eq $cred_used, @$pkey_group) {
+               for (grep $_->fido2_credential == $cred_used, @$pkey_group) {
                   if (eval { $_->obtain_private(hmac_secret => $secret); 1 }) {
                      return if $self->_check_complete($_);
                   } else {
