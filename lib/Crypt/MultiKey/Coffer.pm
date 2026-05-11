@@ -148,6 +148,15 @@ Several methods are directly delegated to this object:
 
 =back
 
+=method interactive_unlock
+
+  $bool= $coffer->interactive_unlock(%options);
+
+Shortcut for
+
+  my $iu= Crypt::MultiKey::InteractiveUnlock->new(target => $coffer, %options);
+  $iu->run;
+
 =attribute unlocked
 
 True if the Coffer is in an unlocked state, meaning content can be read and written.
@@ -172,6 +181,13 @@ sub unlock {
    # PEM file headers, which couldn't be done until we know the primary_skey.
    $self->authenticate if defined $self->authentication;
    $self;
+}
+
+sub interactive_unlock {
+   my ($self, %options)= @_;
+   require Crypt::MultiKey::InteractiveUnlock;
+   my $iu= Crypt::MultiKey::InteractiveUnlock->new(target => $self, %options);
+   $iu->run;
 }
 
 sub unlocked {

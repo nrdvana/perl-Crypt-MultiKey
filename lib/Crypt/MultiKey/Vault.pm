@@ -264,6 +264,15 @@ Several methods are directly delegated to this object:
 
 =back
 
+=method interactive_unlock
+
+  $bool= $vault->interactive_unlock(%options);
+
+Shortcut for
+
+  my $iu= Crypt::MultiKey::InteractiveUnlock->new(target => $vault, %options);
+  $iu->run;
+
 =attribute unlocked
 
 True if the Coffer is in an unlocked state, meaning content can be read and written.
@@ -289,6 +298,13 @@ sub unlock {
    $self->lock_mechanism->unlock(@_);
    $self->_authenticate(1) if $self->_header;
    $self;
+}
+
+sub interactive_unlock {
+   my ($self, %options)= @_;
+   require Crypt::MultiKey::InteractiveUnlock;
+   my $iu= Crypt::MultiKey::InteractiveUnlock->new(target => $self, %options);
+   $iu->run;
 }
 
 sub unlocked {
