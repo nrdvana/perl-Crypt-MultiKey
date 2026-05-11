@@ -170,13 +170,14 @@ static secret_buffer *
 cmk_decode_base64(const U8 *text, STRLEN text_len) {
    /* might be over-allocated, but that's ok */
    secret_buffer *out= secret_buffer_new((text_len + 1) * 3 / 4, NULL);
-   secret_buffer_parse b64, dest;
+   secret_buffer_parse b64;
+   secret_buffer_parse_rw dest;
 
    memset(&b64, 0, sizeof(b64));
    b64.pos= (U8*) text;
    b64.lim= (U8*) text + text_len;
    b64.encoding= SECRET_BUFFER_ENCODING_BASE64;
-   secret_buffer_parse_init(&dest, out, 0, out->capacity, 0);
+   secret_buffer_parse_init((secret_buffer_parse*)&dest, out, 0, out->capacity, 0);
    if (!secret_buffer_transcode(&b64, &dest))
       croak("Malformed base64");
    out->len= dest.pos - (U8*) out->data;
