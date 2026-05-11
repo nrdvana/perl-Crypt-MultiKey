@@ -499,7 +499,7 @@ sub _generate_header {
       $header->append(
          (defined $self->file_preamble? $self->file_preamble : ''),
          HEADER_MARKER,
-         "version: 0.001\n",
+         "version: 0.000\n",
          JSON::PP->new->utf8->canonical->pretty->encode($attrs),
          "\0"
       );

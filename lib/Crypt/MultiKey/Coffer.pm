@@ -811,7 +811,7 @@ sub _export_pem {
    my %cipher_data_export= %{ $self->cipher_data };
    my $ciphertext= delete $cipher_data_export{ciphertext};
    my @header_kv= Crypt::MultiKey::_flatten_to_pem_header_kv(
-      version        => '0.001',
+      version        => '0.000',
       writer_version => __PACKAGE__->VERSION,
       user_meta      => $self->user_meta,
       %{ $self->lock_mechanism->_export_attrs },
