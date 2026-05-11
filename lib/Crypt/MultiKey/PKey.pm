@@ -118,6 +118,13 @@ sub protection_scheme {
 sub _set_protection_scheme {
    my ($self_or_class, $protection_scheme)= @_;
    my $class= ref $self_or_class || $self_or_class;
+   # Handle request for "no protection scheme" (undef or empty string)
+   if (!length($protection_scheme // '')) {
+      my $cur_prot= $self_or_class->protection_scheme;
+      croak "Can't change protection_scheme to 'undef' after it has been set to '$cur_prot'"
+         if defined $cur_prot;
+      return undef;
+   }
    my $subclass= Crypt::MultiKey::lazy_load(__PACKAGE__.'::'.$protection_scheme);
    $subclass eq $class or $subclass->isa($class)
       or croak "protection_scheme $subclass does not derive from $class";
