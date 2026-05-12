@@ -92,8 +92,6 @@ sub primary_skey { @_ > 1? shift->_set_primary_skey(@_) : $_[0]{primary_skey} }
 
 sub locked { $_[0]->initialized && !defined $_[0]{primary_skey} }
 
-sub unlocked { !$_[0]->locked }
-
 sub initialized { defined $_[0]{primary_skey} || $_[0]{locks} && @{$_[0]{locks}} }
 
 sub _set_primary_skey {
@@ -106,7 +104,7 @@ sub _set_primary_skey {
 
 sub cipher_skey {
    my ($self, $size)= @_;
-   my $skey= $self->primary_skey || croak "Coffer is locked";
+   my $skey= $self->primary_skey || croak "Object is locked";
    return Crypt::MultiKey::hkdf(
       { size => $size//32, kdf_info => 'Crypt::MultiKey/cipher_skey', kdf_salt => '' },
       $skey
@@ -114,7 +112,7 @@ sub cipher_skey {
 }
 sub hmac_skey {
    my ($self, $size)= @_;
-   my $skey= $self->primary_skey || croak "Coffer is locked";
+   my $skey= $self->primary_skey || croak "Object is locked";
    return Crypt::MultiKey::hkdf(
       { size => $size//32, kdf_info => 'Crypt::MultiKey/hmac_skey', kdf_salt => '' },
       $skey
@@ -195,9 +193,10 @@ sub _set_locks {
 
   $lockmech->add_access($key1, ... $keyN);
 
-This creates a new L</locks> entry, which provides a new way to access the Coffer independent of
-other locks.  The new lock can be opened when the private half of all N keys are passed to the
-L</unlock> method (or L</insert_keys> method).
+This creates a new L</locks> entry, which provides a new way to access the Coffer/Vault
+independent of other locks.
+The new lock can be opened when the private half of all N keys are passed to the L</unlock>
+method (or L</insert_keys> method).
 
 =cut
 
@@ -210,7 +209,7 @@ sub add_access {
    $self->generate_primary_skey
       unless $self->initialized;
    # Ensure we have the key now
-   croak "Coffer must be unlocked in order to ->add_access"
+   croak "Object must be unlocked in order to ->add_access"
       if $self->locked;
    my @tumblers= map +{ key => $_, key_fingerprint => $_->fingerprint }, @keys;
    my $key_material= secret;
@@ -229,9 +228,11 @@ sub add_access {
   (\@complete_locks, \@incomplete_locks)= $lockmech->insert_keys(@pkeys);
 
 When deserialized from a PEM file, the tumblers of the L</locks> attribute reference keys by
-their C<SHA-256> fingerprint.  Those need upgraded to L<PKey objects|Crypt::MultiKey::PKey>
-before the C<Coffer> can be unlocked.
-This method adds references to PKey objects based on a matching fingerprint.
+their C<SHA-256> fingerprint.  Those need matched to L<PKey objects|Crypt::MultiKey::PKey>
+before L</unlock> can run (though you can also provide the objects at that time).
+This method adds PKey objects to the tumblers so that they are already available when you call
+L</unlock>, very analogous to inserting a physical key into a keyhole but not turning it.
+
 The references persist in the L</locks> attribute, allowing you to call C<insert_keys> multiple
 times if desired to populate additional tumblers.
 If a tumbler already contains a C<PKey> object, it will be replaced by the new object in this
@@ -266,12 +267,13 @@ sub insert_keys {
 
 =method unlock
 
-  
   $lockmech->unlock($key1, ... $keyN);
+  # or if you used insert_keys,
+  $lockmech->unlock;
 
 This attempts to find a lock which can be unlocked by this list of keys, or a subset of them.
 If found, the L</primary_skey> attribute is set, after which decryption and encryption methods
-can be used.
+can be used.  All keys provided as parameters must have the private halves available.
 
 =cut
 
@@ -336,8 +338,9 @@ sub _hkdf_for_lock {
 
 Shortcut for
 
-  my $iu= Crypt::MultiKey::InteractiveUnlock->new(target => $lockmech, %options);
-  $iu->run;
+  Crypt::MultiKey::InteractiveUnlock
+    ->new(target => $lockmech, %options)
+    ->run
 
 =cut
 
@@ -351,6 +354,8 @@ sub interactive_unlock {
 =method lock
 
 Delete the L</primary_skey> attribute and any attributes holding unencrypted secrets.
+If this mechanism is part of a Coffer or Vault, you should call the method of the same name on
+that object to purge any other unencrypted secrets that object might be holding.
 
 =cut
 

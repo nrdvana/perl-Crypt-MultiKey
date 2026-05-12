@@ -196,8 +196,6 @@ sub locked {
    $self->lock_mechanism->locked;
 }
 
-sub unlocked { !shift->locked }
-
 =attribute user_meta
 
 An arbitrary hashref of name/value strings that will be added to the exported PEM as headers
@@ -689,7 +687,8 @@ sub authenticate {
 
 =method lock
 
-Delete the L</primary_skey> attribute and any attributes holding unencrypted secrets.
+Delete the L</primary_skey> attribute from the L</lock_mechanism>, and any attributes holding
+unencrypted secrets.
 
 =cut
 

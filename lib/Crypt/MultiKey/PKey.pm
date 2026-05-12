@@ -16,25 +16,25 @@ use Crypt::MultiKey;
 =head1 SYNOPSIS
 
   # Generate a public/private keypair
-  my $key= Crypt::MultiKey::PKey->generate('x25519');
+  my $pkey= Crypt::MultiKey::PKey->generate('x25519');
   
   # encrypt the private half with a password
   my $pass= Crypt::SecretBuffer->new;
-  $pass->append_console_line(STDIN) or die;
-  $key->encrypt_private($pass);
+  $pass->append_console_line() or die;
+  $pkey->encrypt_private($pass);
   
   # Throw away the private half
-  $key->clear_private;
+  $pkey->clear_private;
   
   # encrypt some other data with the public half of the key
-  my $cipherdata= $key->encrypt("Example Plaintext");
+  my $cipherdata= $pkey->encrypt("Example Plaintext");
   say JSON->new->encode($cipherdata); # It's a hashref that you can serialize
   
   # restore the private key, using the password
-  $key->decrypt_private($pass); # croaks on wrong pass
+  $pkey->decrypt_private($pass); # croaks on wrong password
   
   # Decrypt the data
-  say $key->decrypt($cipherdata); # "Example Plaintext"
+  say $pkey->decrypt($cipherdata); # "Example Plaintext"
 
 =head1 DESCRIPTION
 
@@ -45,26 +45,29 @@ private half must be available to L</decrypt> that data again.
 =attribute protection_scheme
 
 The scheme used to protect and/or obtain the private half of the key.  This is used as a class
-name suffix for the PKey object, such as C<Crypt::MultiKey::PKey::Password>.  The class defines
-the L</obtain_private> and L</can_obtain_private> methods, and may override the behavior of
-L</encrypt_private> or introduce an entirely new workflow for setting up the key.
+name suffix for the PKey object, such as C<'Password'> referring to
+C<Crypt::MultiKey::PKey::Password>.
+The class defines the L</obtain_private> and L</can_obtain_private> methods, and may override
+the behavior of L</encrypt_private> or introduce an entirely new workflow for setting up the key.
 Most schemes derive a password (or equivalent secret) for use with L</encrypt_private>, storing
-the encrypted private key locally.  However, they are not limited to this; the implementation
-could do something entirely different like fetching the private key from remote, or forwarding
-all encryption operations to a device that posesses the private key.
+the encrypted private key locally in attribute L</private_encrypted>.  However, they are not
+limited to this; the implementation could do something entirely different like fetching the
+private key from remote, or forwarding all encryption operations to a device that posesses the
+private key.
 
 Calling L</encrypt_private> on a PKey with no current protection scheme sets the scheme to
 C<'Password'>, which protects the private key by encrypting it using OpenSSL's encrypted
-PKCS#8 support, stores it in the L<private_encrypted> attribute, and obtains it by prompting
+PKCS#8 support, stores it in the L</private_encrypted> attribute, and obtains it by prompting
 the console for the password.
 
 =attribute algorithm
 
-The type of public-key cryptography used.  This is selected during L</generate>.
+The type of public-key cryptography used.  This is selected during L</generate>, or implied if
+you L</load> a pre-existing key.
 
 =attribute fingerprint
 
-SSH-style C<< "sha256:base64..." >> used to help identify the key.
+OpenSSL-style C<< "SHA256:base64..." >> used to help identify the key.
 
 =attribute path
 
@@ -83,8 +86,8 @@ L</decrypt_private>.
 
 =attribute public
 
-Shortcut for L</export_spki> and L</import_spki>.  This is the public key as DER bytes in the
-ASN.1 SubjectPublicKeyInfo structure defined by RFC5280.
+Accessor for the public half of the key, as raw SubjectPublicKeyInfo bytes.
+It reads L</export_spki> and writes L</import_spki>.
 
 =attribute public_b64
 
@@ -92,18 +95,21 @@ Like L</public>, but base64-encoded for use in text formats.
 
 =attribute private
 
-Shortcut for L</export_pkcs8_unencrypted> and L</import_pkcs8> without a password.
+Accessor for the private half of the key, as raw PKCS#8 bytes.
+It reads L</export_pkcs8_unencrypted> and writes L</import_pkcs8>.
 
 =attribute private_encrypted
 
-Encrypted PKCS#8 DER bytes as returned by L</export_pkcs8_encrypted>.  This is the only
-encrypted private-key format written by L</export> or L</save>.
+Encrypted PKCS#8 DER bytes as returned by L</export_pkcs8_encrypted>.  This attribute holds the
+input for the L</decrypt_private> method.  This attribute gets exported by L</export>
+and L</save>, and (when base64-encoded and wrapped with PEM) is the same format used by OpenSSL
+for encrypted private keys.
 
 =attribute private_encrypted_foreign
 
-An encrypted private key in some other recognized input format, kept verbatim so it can be
-decrypted later by L</decrypt_private>.  This attribute is accepted by L</decrypt_private>, but
-is not emitted by L</export> or L</save>.
+An encrypted private key in some other recognized input format (such as SSH encrypted private
+key format), kept verbatim so it can be decrypted later by L</decrypt_private>.  This attribute
+is accepted by L</decrypt_private>, but is not emitted by L</export> or L</save>.
 
 =cut
 
@@ -143,19 +149,6 @@ sub _set_protection_scheme {
    }
 }
 
-sub import_spki {
-   my ($self, $bytes)= @_;
-   $self->_import_spki($bytes);
-   delete $self->{fingerprint};
-   return $self;
-}
-
-sub export_spki {
-   my $self= shift;
-   $self->_export_spki(my $buf);
-   return $buf;
-}
-
 sub public { @_ > 1? shift->_set_public(@_) : shift->export_spki }
 sub _set_public { shift->import_spki(@_) }
 
@@ -166,29 +159,6 @@ sub public_b64 {
 sub _set_public_b64 {
    my ($self, $val)= @_;
    $self->import_spki(_decode_base64($val));
-}
-
-sub import_pkcs8 {
-   my ($self, $bytes, $password)= @_;
-   $self->_import_pkcs8($bytes, defined($password)? $password : ());
-   delete $self->{fingerprint};
-   return $self;
-}
-
-sub export_pkcs8_unencrypted {
-   my $self= shift;
-   my $buf= secret;
-   $self->_export_pkcs8($buf);
-   return $buf;
-}
-
-sub export_pkcs8_encrypted {
-   my ($self, $password, $kdf_iter)= @_;
-   defined $password or croak "Missing password";
-   defined $kdf_iter or croak "Missing kdf_iter";
-   my $buf= '';
-   $self->_export_pkcs8($buf, $password, $kdf_iter);
-   return $buf;
 }
 
 sub private { @_ > 1? shift->_set_private(@_) : shift->export_pkcs8_unencrypted }
@@ -615,6 +585,9 @@ Import a private key from DER-encoded PKCS#8 bytes.  PKCS#8 is the standard priv
 container used by OpenSSL's C<BEGIN PRIVATE KEY> and C<BEGIN ENCRYPTED PRIVATE KEY> PEM files.
 If the PKCS#8 structure is encrypted, C<$password> is required.
 
+Dies on failure.  If the password is incorrect, the error will match C<< qr/^password/ >>.
+Note that in many cases it is hard to distinguish an incorrect password from a corrupt file.
+
 =method export_pkcs8_unencrypted
 
   $secret_buffer= $pkey->export_pkcs8_unencrypted;
@@ -628,6 +601,44 @@ L<SecretBuffer|Crypt::SecretBuffer>.
 
 Export the private key as password-encrypted DER-encoded PKCS#8 bytes.  Both C<$password> and
 C<$kdf_iter> are required.
+
+=cut
+
+sub import_spki {
+   my ($self, $bytes)= @_;
+   $self->_import_spki($bytes);
+   delete $self->{fingerprint};
+   return $self;
+}
+
+sub export_spki {
+   my $self= shift;
+   $self->_export_spki(my $buf);
+   return $buf;
+}
+
+sub import_pkcs8 {
+   my ($self, $bytes, $password)= @_;
+   $self->_import_pkcs8($bytes, defined($password)? $password : ());
+   delete $self->{fingerprint};
+   return $self;
+}
+
+sub export_pkcs8_unencrypted {
+   my $self= shift;
+   my $buf= secret;
+   $self->_export_pkcs8($buf);
+   return $buf;
+}
+
+sub export_pkcs8_encrypted {
+   my ($self, $password, $kdf_iter)= @_;
+   defined $password or croak "Missing password";
+   defined $kdf_iter or croak "Missing kdf_iter";
+   my $buf= '';
+   $self->_export_pkcs8($buf, $password, $kdf_iter);
+   return $buf;
+}
 
 =method export
 
@@ -739,17 +750,18 @@ sub save {
 
   $pkey->encrypt_private($password, $kdf_iter=100_000);
 
-Export the (private) key in PKCS#8 format, encrypted with a password, and stored into attribute
+Export the (private) key in PKCS#8 format encrypted with a password, and store it into attribute
 C<private_encrypted> to be saved out by a subsequent L</export> or L</save>.
 You may customize the number of iterations for the key-derivation-function (KDF) to resist
 brute-force attempts.  If the password is known to be a string of hashed data with
-uniformly-distributed bits, you may reduce the KDF iterations to 1.  (but it cannot be zero,
-due to OpenSSL API).
+uniformly-distributed bits, you may reduce the KDF iterations to 1, but it cannot be zero due
+to OpenSSL API.
+
+The password must be bytes, not wide characters, so make sure to encode it first.
 Ideally, C<$password> is a L<SecretBuffer|Crypt::SecretBuffer> object, but scalars are also
 accepted.
-The password must be bytes, not wide characters, so make sure to encode it first.
 
-If this PKey did not have a L</protection_scheme>, the protection_scheme gets initialized to
+If this PKey did not have a L</protection_scheme>, the C<protection_scheme> gets initialized to
 C<'Password'>.
 
 =cut
@@ -788,8 +800,9 @@ sub clear_private {
 
 Using the supplied password, decrypt attribute C<private_encrypted> or
 C<private_encrypted_foreign> and import it.
-Ideally, C<$password> is a C<SecretBuffer> object, but scalars are also accepted.
+
 The password must be bytes, not wide characters.
+Ideally, C<$password> is a C<SecretBuffer> object, but scalars are also accepted.
 
 Dies on failure.  If the password is incorrect, the error will match C<< qr/^password/ >>.
 Note that in many cases it is hard to distinguish an incorrect password from a corrupt file.

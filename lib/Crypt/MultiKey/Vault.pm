@@ -271,13 +271,19 @@ Several methods are directly delegated to this object:
 
 Shortcut for
 
-  my $iu= Crypt::MultiKey::InteractiveUnlock->new(target => $vault, %options);
-  $iu->run;
+  Crypt::MultiKey::InteractiveUnlock
+    ->new(target => $vault, %options)
+    >run;
 
 =attribute locked
 
 True if the Vault has been initialized with locks but the primary secret key is not currently
 available.  A new, uninitialized Vault is not considered locked.
+
+=method lock
+
+Delete the L</primary_skey> attribute from the L</lock_mechanism>, and any attributes holding
+unencrypted secrets.
 
 =cut
 
@@ -314,10 +320,10 @@ sub locked {
    $self->lock_mechanism->locked;
 }
 
-sub unlocked { !shift->locked }
-
 sub lock {
    my $self= shift;
+   croak "There is staged data not yet written to a file"
+      if $self->{_data};
    $self->lock_mechanism->lock;
    $self;
 }
