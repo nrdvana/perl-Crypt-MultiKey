@@ -2,7 +2,7 @@ use FindBin;
 use lib "$FindBin::Bin/lib";
 use Test2AndUtils;
 use Crypt::SecretBuffer qw( secret );
-use Crypt::MultiKey;
+use Crypt::MultiKey qw( pkey new_pkey load_pkey );
 use Crypt::MultiKey::PKey;
 
 # Hide pem from Git secret-scanning services.
@@ -126,6 +126,53 @@ PEM
          call has_private => T;
       },
       'private key encrypted');
+};
+
+subtest documented_accessors => sub {
+   my $key= Crypt::MultiKey::PKey->generate('x25519');
+   my $public= $key->public;
+   my $private= $key->private;
+
+   is(new_pkey(public => $public),
+      object {
+         call has_public => T;
+         call has_private => F;
+         call public => $public;
+      },
+      'public attribute imports base64 SubjectPublicKeyInfo');
+
+   is(new_pkey(private => $private),
+      object {
+         call has_public => T;
+         call has_private => T;
+         call public => $public;
+      },
+      'private attribute imports PKCS#8 private key bytes');
+};
+
+subtest constructor_helpers => sub {
+   my $key= new_pkey(generate => 'x25519');
+   ok($key->has_private, 'new_pkey delegates to PKey constructor');
+
+   my $pem= $key->export_pem_openssl_public_key->serialize;
+   is(load_pkey($pem),
+      object {
+         call has_public => T;
+         call has_private => F;
+         call public => $key->public;
+      },
+      'load_pkey delegates to PKey loader');
+
+   ok(!eval { new_pkey(generate => 'x25519', save => 'not-written.pem'); 1 },
+      'PKey constructor rejects method-style options other than generate');
+   like($@, qr/Unknown PKey constructor option 'save'/, 'rejection names the unknown option');
+
+   is(pkey(generate => 'x25519'),
+      object { call has_private => T },
+      'pkey keeps existing even-argument constructor dispatch');
+   is(pkey($pem),
+      object { call has_public => T; call has_private => F },
+      'pkey keeps existing odd-argument loader dispatch');
 };
 
 done_testing;

@@ -4,15 +4,15 @@ package Crypt::MultiKey;
 
 =head1 SYNOPSIS
 
-  use Crypt::MultiKey qw( pkey coffer interactive_unlock );
+  use Crypt::MultiKey qw( pkey load_pkey coffer vault );
   use Crypt::SecretBuffer qw( secret );
   
   # Encrypt data with your public key
-  my $pubkey= pkey(load => '~/.ssh/id_rsa.pub');
+  my $pubkey= load_pkey('~/.ssh/id_rsa.pub');
   my $encrypted= $pubkey->encrypt("secret data");
   
   # Load your private key
-  my $privkey= pkey(load => '~/.ssh/id_rsa');
+  my $privkey= load_pkey('~/.ssh/id_rsa');
   
   # If your private key is itself encrypted, prompt for password
   if ($privkey->private_encrypted) {
@@ -26,7 +26,7 @@ package Crypt::MultiKey;
   my $secret= $privkey->decrypt($encrypted);
 
   # Store multiple data strings in a Coffer, locked with a variety of keys
-  my $coffer= coffer(content_kv => {
+  my $coffer= coffer(content_dict => {
     secret1 => "REDACTED",
     secret2 => "REDACTED",
   });
@@ -37,12 +37,12 @@ package Crypt::MultiKey;
   $coffer->save('coffer.pem');
   
   # Open a coffer
-  $coffer= coffer(load => 'coffer.pem');
+  $coffer= coffer('coffer.pem');
   $coffer->unlock($privkey);
   # or $coffer->unlock($key2, $key3);
   
-  # content of a coffer is a SecretBuffer
-  $coffer->content_kv->{secret1}->unmask_to(sub { say $_[0] });
+  # Values stored in a coffer dictionary are SecretBuffers
+  $coffer->get('secret1')->unmask_to(sub { say $_[0] });
   
 =head1 DESCRIPTION
 
@@ -153,8 +153,8 @@ sub _openssl_version {
 }
 
 our @EXPORT_OK= qw(
-   pkey coffer vault sha256 hkdf hmac_sha256 symmetric_encrypt symmetric_decrypt
-   lazy_load lazy_loadable
+   pkey new_pkey load_pkey coffer new_coffer load_coffer vault new_vault load_vault
+   sha256 hkdf hmac_sha256 symmetric_encrypt symmetric_decrypt lazy_load lazy_loadable
 );
 
 =head1 FUNCTIONS
@@ -167,30 +167,75 @@ They cannot be called as class methods.
 With an odd number of arguments, this is a shortcut for C<< Crypt::MultiKey::PKey->load(@_) >>.
 Otherwise, it is a shortcut for C<< Crypt::MultiKey::PKey->new(@_) >>.
 
+=head2 new_pkey
+
+Shortcut for C<< Crypt::MultiKey::PKey->new(@_) >>.
+
+=head2 load_pkey
+
+Shortcut for C<< Crypt::MultiKey::PKey->load(@_) >>.
+
 =head2 coffer
 
 With an odd number of arguments, this is a shortcut for C<< Crypt::MultiKey::Coffer->load(@_) >>.
 Otherwise, it is a shortcut for C<< Crypt::MultiKey::Coffer->new(@_) >>.
+
+=head2 new_coffer
+
+Shortcut for C<< Crypt::MultiKey::Coffer->new(@_) >>.
+
+=head2 load_coffer
+
+Shortcut for C<< Crypt::MultiKey::Coffer->load(@_) >>.
 
 =head2 vault
 
 With an odd number of arguments, this is a shortcut for C<< Crypt::MultiKey::Vault->load(@_) >>.
 Otherwise, it is a shortcut for C<< Crypt::MultiKey::Vault->new(@_) >>.
 
+=head2 new_vault
+
+Shortcut for C<< Crypt::MultiKey::Vault->new(@_) >>.
+
+=head2 load_vault
+
+Shortcut for C<< Crypt::MultiKey::Vault->load(@_) >>.
+
+For example, C<< load_vault('/path/to/existing.vault') >> loads an existing Vault, while
+C<< new_vault(path => '/path/to/new.vault') >> constructs a new unsaved Vault.
+
 =cut
 
 sub pkey {
    @_ & 1? Crypt::MultiKey::PKey->load(@_) : Crypt::MultiKey::PKey->new(@_);
 }
+sub new_pkey { Crypt::MultiKey::PKey->new(@_) }
+sub load_pkey { Crypt::MultiKey::PKey->load(@_) }
 
 sub coffer {
    require Crypt::MultiKey::Coffer;
    @_ & 1? Crypt::MultiKey::Coffer->load(@_) : Crypt::MultiKey::Coffer->new(@_);
 }
+sub new_coffer {
+   require Crypt::MultiKey::Coffer;
+   Crypt::MultiKey::Coffer->new(@_);
+}
+sub load_coffer {
+   require Crypt::MultiKey::Coffer;
+   Crypt::MultiKey::Coffer->load(@_);
+}
 
 sub vault {
    require Crypt::MultiKey::Vault;
    @_ & 1? Crypt::MultiKey::Vault->load(@_) : Crypt::MultiKey::Vault->new(@_);
+}
+sub new_vault {
+   require Crypt::MultiKey::Vault;
+   Crypt::MultiKey::Vault->new(@_);
+}
+sub load_vault {
+   require Crypt::MultiKey::Vault;
+   Crypt::MultiKey::Vault->load(@_);
 }
 
 =head2 hkdf
@@ -199,12 +244,13 @@ sub vault {
   $secret_buffer= hkdf(\%params, $secret_key_material);
   # %params:
   #   size           - number of bytes to generate
-  #   cipher         - substitute for 'size'; name of a cipher with known size requirement
+  #   cipher         - substitute for 'size'; name of a cipher with known key length
   #   kdf_info       - namespace for key derivation
   #   kdf_salt       - salt bytes, will be generated if not provided
 
-This runs OpenSSL's C<EVP_PKEY_HKDF> with C<EVP_sha256>, supplying 'info' and 'salt' and storing
-the output into a new SecretBuffer object.  If kdf_salt was not provided in C<%params>, it will
+This runs OpenSSL's C<EVP_PKEY_HKDF> with C<EVP_sha256>, supplying C<kdf_info> and
+C<kdf_salt> and storing the output into a new SecretBuffer object.  If C<kdf_salt> was
+not provided in C<%params>, it will
 receive a randomly generated value, which you then need to save.  You can request "no salt" by
 setting kdf_salt to an empty string.
 

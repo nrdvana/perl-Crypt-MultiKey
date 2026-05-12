@@ -3,11 +3,12 @@ use lib "$FindBin::Bin/lib";
 use Test2AndUtils;
 use File::Temp;
 use Crypt::SecretBuffer qw( secret );
+use Crypt::MultiKey qw( vault new_vault load_vault );
 use Crypt::MultiKey::Vault;
 use Crypt::MultiKey::PKey;
 
 subtest ctor => sub {
-   is( Crypt::MultiKey::Vault->new(),
+   is( new_vault(),
       object {
          call sector_size => 512;
          call data_offset => 65536;
@@ -21,7 +22,7 @@ subtest save_open_and_patch_header => sub {
    my $tmpdir= File::Temp->newdir;
    my $path= "$tmpdir/vault.dat";
    my $key= Crypt::MultiKey::PKey->generate;
-   my $v= Crypt::MultiKey::Vault->new(
+   my $v= new_vault(
       path => $path,
       name => 'Primary Vault',
       user_meta => { role => 'test' },
@@ -31,7 +32,7 @@ subtest save_open_and_patch_header => sub {
    ok( $v->save, 'first save' );
    ok( -f $path, 'file created' );
 
-   my $v2= Crypt::MultiKey::Vault->load(path => $path);
+   my $v2= load_vault(path => $path);
    is( $v2->unlocked, F, 'opened vault is locked' );
    ok( $v2->unlock($key), 'unlock opened vault' );
    is( $v2->read(3, 11)->copy->memcmp("hello world"), 0, 'read/write round trip' );
@@ -50,7 +51,7 @@ subtest save_to_new_path_with_overrides => sub {
    my $path2= "$tmpdir/vault-b.dat";
    my $key= Crypt::MultiKey::PKey->generate;
 
-   my $v= Crypt::MultiKey::Vault->new(path => $path1);
+   my $v= vault(path => $path1);
    $v->add_access($key);
    $v->write(0, secret("abcdefghijklmno"));
    $v->save;
@@ -61,7 +62,7 @@ subtest save_to_new_path_with_overrides => sub {
    is( $v->path, $path2, 'path now points at new file' );
    is( $v->sector_size, 1024, 'sector size overridden' );
 
-   my $v2= Crypt::MultiKey::Vault->load(path => $path2);
+   my $v2= load_vault(path => $path2);
    $v2->unlock($key);
    is( $v2->read(0, 15)->copy->memcmp("abcdefghijklmno"), 0, 'content moved to new file' );
 };

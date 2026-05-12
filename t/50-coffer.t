@@ -3,10 +3,11 @@ use lib "$FindBin::Bin/lib";
 use Test2AndUtils;
 use File::Temp;
 use Crypt::SecretBuffer qw( secret );
+use Crypt::MultiKey qw( coffer new_coffer load_coffer );
 use Crypt::MultiKey::Coffer;
 
 subtest ctor => sub {
-   is( Crypt::MultiKey::Coffer->new(),
+   is( new_coffer(),
       object {
          call has_content => F;
          call has_ciphertext => F;
@@ -18,7 +19,7 @@ subtest ctor => sub {
       },
       'empty coffer'
    );
-   is( Crypt::MultiKey::Coffer->new(content => "abc"),
+   is( coffer(content => "abc"),
       object {
          call has_content => T;
          call has_ciphertext => F;
@@ -75,7 +76,7 @@ subtest save_load_unlock => sub {
    }
    my $slurp= do { local $/; open my $fh, '<', "$tmpdir/coffer.pem" or die; <$fh> or die; };
    note $slurp;
-   is( my $c2= Crypt::MultiKey::Coffer->load("$tmpdir/coffer.pem"),
+   is( my $c2= load_coffer("$tmpdir/coffer.pem"),
       object {
          call name => 'Example';
          call user_meta => {
