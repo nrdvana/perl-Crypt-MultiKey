@@ -33,8 +33,12 @@ subtest save_open_and_patch_header => sub {
    ok( -f $path, 'file created' );
 
    my $v2= load_vault(path => $path);
-   is( $v2->unlocked, F, 'opened vault is locked' );
+   is( $v2->locked, T, 'opened vault is locked' );
    ok( $v2->unlock($key), 'unlock opened vault' );
+   is( $v2->locked, F, 'unlocked vault is not locked' );
+   ok( $v2->lock, 'lock opened vault' );
+   is( $v2->locked, T, 'vault lock method clears the primary key' );
+   ok( $v2->unlock($key), 'unlock opened vault again' );
    is( $v2->read(3, 11)->copy->memcmp("hello world"), 0, 'read/write round trip' );
 
    $v2->name('Updated Name');

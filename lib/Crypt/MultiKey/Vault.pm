@@ -274,9 +274,10 @@ Shortcut for
   my $iu= Crypt::MultiKey::InteractiveUnlock->new(target => $vault, %options);
   $iu->run;
 
-=attribute unlocked
+=attribute locked
 
-True if the Coffer is in an unlocked state, meaning content can be read and written.
+True if the Vault has been initialized with locks but the primary secret key is not currently
+available.  A new, uninitialized Vault is not considered locked.
 
 =cut
 
@@ -308,9 +309,17 @@ sub interactive_unlock {
    $iu->run;
 }
 
-sub unlocked {
+sub locked {
    my $self= shift;
-   !$self->lock_mechanism->initialized || $self->lock_mechanism->unlocked;
+   $self->lock_mechanism->locked;
+}
+
+sub unlocked { !shift->locked }
+
+sub lock {
+   my $self= shift;
+   $self->lock_mechanism->lock;
+   $self;
 }
 
 sub _cipher_skey { shift->lock_mechanism->cipher_skey(64) }

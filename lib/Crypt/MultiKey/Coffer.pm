@@ -30,7 +30,7 @@ sub _coerce_secret {
   # Coffer is locked/unlocked using public/private keys
   my ($key1, $key2, $key3)= map Crypt::MultiKey::PKey->generate('x25519'), 1..3;
   
-  # initial state of coffer is unlocked, and unsaved
+  # initial state of coffer is not locked, and unsaved
   my $coffer= Crypt::MultiKey::Coffer->new(
     path => './mydata.coffer',
     content => $secret_buffer,
@@ -157,9 +157,10 @@ Shortcut for
   my $iu= Crypt::MultiKey::InteractiveUnlock->new(target => $coffer, %options);
   $iu->run;
 
-=attribute unlocked
+=attribute locked
 
-True if the Coffer is in an unlocked state, meaning content can be read and written.
+True if the Coffer has been initialized with locks but the primary secret key is not currently
+available.  A new, uninitialized Coffer is not considered locked.
 
 =cut
 
@@ -190,10 +191,12 @@ sub interactive_unlock {
    $iu->run;
 }
 
-sub unlocked {
+sub locked {
    my $self= shift;
-   !$self->lock_mechanism->initialized || $self->lock_mechanism->unlocked;
+   $self->lock_mechanism->locked;
 }
+
+sub unlocked { !shift->locked }
 
 =attribute user_meta
 
@@ -282,7 +285,7 @@ trigger a serialization of the data.
 
 True if the C<content> or C<content_dict> attributes are defined, meaning that either the Coffer
 is decrypted or has been initialized to a new value.  Maybe unintuitively, it returns false for
-an unlocked coffer where the content hasn't been lazy-decrypted yet.
+a not-locked coffer where the content hasn't been lazy-decrypted yet.
 
 =item initialized
 
@@ -545,7 +548,7 @@ sub load {
 
 When L<content_type> is C<< application/crypt-multikey-coffer-dict >>, this method can be used to
 retrieve a secret by name.  If the content is not yet decrypted, it will try decrypting it and
-fail unless the Coffer is L</unlocked>.
+fail if the Coffer is L</locked>.
 
 =cut
 
@@ -563,7 +566,7 @@ sub get {
 
 When L<content_type> is C<< application/crypt-multikey-coffer-dict >>, this method can be used
 to store a secret by name.  If the content is not yet decrypted, it will try decrypting it and
-fail unless the Coffer is L</unlocked>.  Using this method when no content or ciphertext are
+fail if the Coffer is L</locked>.  Using this method when no content or ciphertext are
 defined will initialize the content_type to C<< application/crypt-multikey-coffer-dict >> and
 the C<content_dict> attribute to a hashref.
 
@@ -630,13 +633,12 @@ sub export {
       }
       carp "Exporting 'bundled_keys' but $n_missing tumblers lack a PKey object"
          if $n_missing;
-      for my $k (map $keys{$_}, sort keys %keys) { # export in a stable order
-         # Make sure we aren't bundling an unprotected private key
-         if (!defined $_->protection_scheme) {
-            $buf->append($_->export_pem_openssl_public_key->serialize);
-         } else {
-            $buf->append($_->$method->serialize);
-         }
+      for my $fp (sort keys %keys) { # export in a stable order
+         my $k= $keys{$fp};
+         my $pem= !defined($k->protection_scheme)
+            ? $k->export_pem_openssl_public_key
+            : $k->$method;
+         $buf->append("\n", $pem->serialize); # ensure -----BEGIN is the start of a text line
       }
    }
    return $buf;
@@ -753,7 +755,7 @@ chaining.  The L</cipher_data> attribute must be initialized and the correct pri
 must be loaded in the L</lock_mechanism>.
 
 This is called automatically when accessing an uninitialized C<content> or C<content_dict> if the
-Coffer is unlocked.
+Coffer is not locked.
 
 =cut
 
@@ -761,7 +763,7 @@ sub decrypt {
    my $self= shift;
    # preconditions: the cipher_data must have ciphertext and aes_key must be loaded
    croak "Coffer is locked"
-      unless $self->unlocked;
+      if $self->locked;
    croak "No ciphertext defined"
       unless $self->has_ciphertext;
    $self->{content}= Crypt::MultiKey::symmetric_decrypt(

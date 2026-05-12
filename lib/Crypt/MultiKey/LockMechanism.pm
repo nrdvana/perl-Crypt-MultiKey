@@ -62,14 +62,14 @@ sub new {
 A L<Crypt::SecretBuffer> holding the symmetric key used to derive L</cipher_skey> and
 L</hmac_skey>.  This is the main secret that is encrypted and decrypted by the locks.
 
-The C<LockMechanism> is logically "unlocked" when the C<primary_skey> is defined, and "locked"
-(or uninitialized) when it isn't.
+The C<LockMechanism> is logically "locked" when locks are defined but C<primary_skey> is not.
+A fresh, uninitialized object is not considered locked.
 
 =over
 
-=item unlocked
+=item locked
 
-Convenience accessor that returns true if C<primary_skey> is defined.
+Convenience accessor that returns true if locks exist and C<primary_skey> is not defined.
 
 =item initialized
 
@@ -90,7 +90,9 @@ A L<Crypt::SecretBuffer> holding the symmetric key to be used for authenticating
 
 sub primary_skey { @_ > 1? shift->_set_primary_skey(@_) : $_[0]{primary_skey} }
 
-sub unlocked { defined $_[0]{primary_skey} }
+sub locked { $_[0]->initialized && !defined $_[0]{primary_skey} }
+
+sub unlocked { !$_[0]->locked }
 
 sub initialized { defined $_[0]{primary_skey} || $_[0]{locks} && @{$_[0]{locks}} }
 
@@ -209,7 +211,7 @@ sub add_access {
       unless $self->initialized;
    # Ensure we have the key now
    croak "Coffer must be unlocked in order to ->add_access"
-      unless $self->unlocked;
+      if $self->locked;
    my @tumblers= map +{ key => $_, key_fingerprint => $_->fingerprint }, @keys;
    my $key_material= secret;
    $_->{key}->generate_key_material($_, $key_material)
