@@ -28,11 +28,11 @@ sub _coerce_secret {
 =head1 SYNOPSIS
 
   # Coffer is locked/unlocked using public/private keys
-  my ($key1, $key2, $key3)= map Crypt::MultiKey::PKey->new(), 1..3;
+  my ($key1, $key2, $key3)= map Crypt::MultiKey::PKey->generate('x25519'), 1..3;
   
-  # initial state of coffer is unlocked, and unsaved
+  # initial state of coffer is not locked, and unsaved
   my $coffer= Crypt::MultiKey::Coffer->new(
-    path => './mydata.coffer'
+    path => './mydata.coffer',
     content => $secret_buffer,
   );
   $coffer->add_access($key1);        # now coffer can be unlocked by key1
@@ -45,7 +45,7 @@ sub _coerce_secret {
   # Coffer can be used in key/value mode.
   # (multiple named secrets get concatenated and encrypted as one secret)
   my $coffer= Crypt::MultiKey::Coffer->new(
-    path => './mydata.coffer'
+    path => './mydata.coffer',
   );
   $coffer->set("secret1", $secret1);
   $coffer->set("secret2", $secret2);
@@ -85,8 +85,8 @@ which keys can unlock it.
 
 The content is either binary data of your choice, or a key/value format written by this module
 which is just a series of length-delimited strings.  The content is encrypted with AES-256 and
-written as base64 as the body of the PEM file.  The AES key that encrypted the content is
-encrypted in one or more "access" entries and the AES encryption key for each access is
+written as base64 as the body of the PEM file.  The AES-GCM key that encrypted the content is
+encrypted in one or more "lock" entries and the AES encryption key for each access is
 derived from the combined key material from the "tumblers".  A "tumbler" is a set of parameters
 that can be combined with the private half of a public/private key to generate AES-key material.
 
@@ -104,7 +104,7 @@ can be saved separately to be loaded by the application and added with L</insert
 can be appended to the Coffer to be loaded automatically when loading the Coffer, to keep
 everything together in one place.  When this option is set to a true value, the L</export>
 method will write out the Coffer PEM block followed by the PEM serializations of each of the
-L<PKey objects|Crypt::SecretBuffer::PKey/export>.  (They serialize as either public-only or
+L<PKey objects|Crypt::MultiKey::PKey/export>.  (They serialize as either public-only or
 encrypted-private PEM blocks with PKey metadata included.  Obviously it would defeat the purpose
 of the Coffer to serialize unencrypted private keys to the same file)
 
@@ -157,9 +157,10 @@ Shortcut for
   my $iu= Crypt::MultiKey::InteractiveUnlock->new(target => $coffer, %options);
   $iu->run;
 
-=attribute unlocked
+=attribute locked
 
-True if the Coffer is in an unlocked state, meaning content can be read and written.
+True if the Coffer has been initialized with locks but the primary secret key is not currently
+available.  A new, uninitialized Coffer is not considered locked.
 
 =cut
 
@@ -190,10 +191,12 @@ sub interactive_unlock {
    $iu->run;
 }
 
-sub unlocked {
+sub locked {
    my $self= shift;
-   !$self->lock_mechanism->initialized || $self->lock_mechanism->unlocked;
+   $self->lock_mechanism->locked;
 }
+
+sub unlocked { !shift->locked }
 
 =attribute user_meta
 
@@ -282,7 +285,7 @@ trigger a serialization of the data.
 
 True if the C<content> or C<content_dict> attributes are defined, meaning that either the Coffer
 is decrypted or has been initialized to a new value.  Maybe unintuitively, it returns false for
-an unlocked coffer where the content hasn't been lazy-decrypted yet.
+a not-locked coffer where the content hasn't been lazy-decrypted yet.
 
 =item initialized
 
@@ -454,7 +457,7 @@ decrypt the data.  See L</unlock>.
 
 When loading from a file or buffer, the PEM encoding of the Coffer may be followed by PEM
 encodings of the PKey objects.  If you request C<bundled_keys>, they will be inflated to
-L<PKey objects|Crypt::SecretBuffer::PKey> and passed to L</insert_keys>.  This will also
+L<PKey objects|Crypt::MultiKey::PKey> and passed to L</insert_keys>.  This will also
 initialize the L</bundled_keys> attribute of the created object.
 
 Neither 'path' nor 'bundled_keys' attributes are serialized in the Coffer PEM, for security
@@ -545,7 +548,7 @@ sub load {
 
 When L<content_type> is C<< application/crypt-multikey-coffer-dict >>, this method can be used to
 retrieve a secret by name.  If the content is not yet decrypted, it will try decrypting it and
-fail unless the Coffer is L</unlocked>.
+fail if the Coffer is L</locked>.
 
 =cut
 
@@ -563,7 +566,7 @@ sub get {
 
 When L<content_type> is C<< application/crypt-multikey-coffer-dict >>, this method can be used
 to store a secret by name.  If the content is not yet decrypted, it will try decrypting it and
-fail unless the Coffer is L</unlocked>.  Using this method when no content or ciphertext are
+fail if the Coffer is L</locked>.  Using this method when no content or ciphertext are
 defined will initialize the content_type to C<< application/crypt-multikey-coffer-dict >> and
 the C<content_dict> attribute to a hashref.
 
@@ -630,13 +633,12 @@ sub export {
       }
       carp "Exporting 'bundled_keys' but $n_missing tumblers lack a PKey object"
          if $n_missing;
-      for my $k (map $keys{$_}, sort keys %keys) { # export in a stable order
-         # Make sure we aren't bundling an unprotected private key
-         if (!defined $_->protection_scheme) {
-            $buf->append($_->export_pem_openssl_public_key->serialize);
-         } else {
-            $buf->append($_->$method->serialize);
-         }
+      for my $fp (sort keys %keys) { # export in a stable order
+         my $k= $keys{$fp};
+         my $pem= !defined($k->protection_scheme)
+            ? $k->export_pem_openssl_public_key
+            : $k->$method;
+         $buf->append("\n", $pem->serialize); # ensure -----BEGIN is the start of a text line
       }
    }
    return $buf;
@@ -708,7 +710,7 @@ sub lock {
 
 Regenerate the L</cipher_data> attribute from L</content> (or C<content_dict>) attribute.
 The C<content> or C<content_dict> attributes must be initialized.
-This will use a fresh AES key if all lock tublers have public keys present.
+This will use a fresh AES key if all lock tumblers have public keys present.
 
 This is called automatically during L</save> if the Coffer is aware that the L</cipher_data>
 is not current.
@@ -749,11 +751,11 @@ sub encrypt {
   $coffer->decrypt;
 
 Regenerate the C<content> attribute from the C<cipher_data> attribute.  Returns C<$coffer> for
-chaining.  The L</cipher_data> attribute must be initialized and the correct L</primary_skey>
-must be loaded.
+chaining.  The L</cipher_data> attribute must be initialized and the correct primary secret key
+must be loaded in the L</lock_mechanism>.
 
 This is called automatically when accessing an uninitialized C<content> or C<content_dict> if the
-Coffer is unlocked.
+Coffer is not locked.
 
 =cut
 
@@ -761,7 +763,7 @@ sub decrypt {
    my $self= shift;
    # preconditions: the cipher_data must have ciphertext and aes_key must be loaded
    croak "Coffer is locked"
-      unless $self->unlocked;
+      if $self->locked;
    croak "No ciphertext defined"
       unless $self->has_ciphertext;
    $self->{content}= Crypt::MultiKey::symmetric_decrypt(

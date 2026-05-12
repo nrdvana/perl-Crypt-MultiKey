@@ -37,7 +37,7 @@ and JSON is easier to store user metadata without PEM header restrictions.
   {
     "cipher": "AES-256-XTS",
     "sector_size": 4096,
-    "data_sector": 2,
+    "data_sector": 128,
     "user_meta": {
       "name": "Example"
     },
@@ -56,14 +56,14 @@ and JSON is easier to store user metadata without PEM header restrictions.
         ]
       }
     ],
-    "writer_version": "0.001"
+    "writer": "Crypt::MultiKey::Vault 0.001"
   }
   \0
   [optional bundled PKey objects in PEM format]
   \n
   \n (repeating until 32 bytes before data_sector)
   $HMAC_BYTES
-  [binary data begins at data_sector declared above]
+  [binary data begins at data_sector * sector_size]
 
 =cut
 
@@ -274,9 +274,10 @@ Shortcut for
   my $iu= Crypt::MultiKey::InteractiveUnlock->new(target => $vault, %options);
   $iu->run;
 
-=attribute unlocked
+=attribute locked
 
-True if the Coffer is in an unlocked state, meaning content can be read and written.
+True if the Vault has been initialized with locks but the primary secret key is not currently
+available.  A new, uninitialized Vault is not considered locked.
 
 =cut
 
@@ -308,9 +309,17 @@ sub interactive_unlock {
    $iu->run;
 }
 
-sub unlocked {
+sub locked {
    my $self= shift;
-   !$self->lock_mechanism->initialized || $self->lock_mechanism->unlocked;
+   $self->lock_mechanism->locked;
+}
+
+sub unlocked { !shift->locked }
+
+sub lock {
+   my $self= shift;
+   $self->lock_mechanism->lock;
+   $self;
 }
 
 sub _cipher_skey { shift->lock_mechanism->cipher_skey(64) }
@@ -319,8 +328,8 @@ sub _cipher_skey { shift->lock_mechanism->cipher_skey(64) }
 
 An arbitrary hashref of JSON-compatible metadata that will be added to the Vault header.
 Note that headers are B<plaintext>.
-If you wish to store secret user metadata it needs to be part of L</content>, which can be
-accomplished conveniently using L</content_dict>.
+If you wish to store secret metadata, write it into the encrypted data area rather than into
+the plaintext header.
 
 Warning: the authenticity of C<user_meta> does not get checked until you have
 L<unlocked|/unlock> the Vault.  Never trust C<user_meta> on a locked Vault unless the file
@@ -356,7 +365,7 @@ be cached in memory until you call L</save>.
   $vault= Crypt::MultiKey::Vault->load($handle, %attributes);
   $vault= Crypt::MultiKey::Vault->load(%attributes); # with 'handle' or 'path'
 
-This loads an existing Vault file and unpacks its metadata.  The data canot be
+This loads an existing Vault file and unpacks its metadata.  The data cannot be
 read until you call L</unlock>.
 
 =cut
@@ -754,8 +763,8 @@ sub resize {
 
 Read (and decrypt) a region of the data area.  This does not need to be block-aligned, but is
 more efficient when aligned.  Note that there is B<no integrity check> for data blocks.
-If you reach the end of the file, the read will be truncated.  If you request from beyond the
-end of the file it will return undef.
+If the requested range extends past the end of the data area, the read will be truncated.
+Requesting an offset beyond the end of the data area croaks.
 
 =cut
 

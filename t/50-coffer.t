@@ -3,14 +3,15 @@ use lib "$FindBin::Bin/lib";
 use Test2AndUtils;
 use File::Temp;
 use Crypt::SecretBuffer qw( secret );
+use Crypt::MultiKey qw( coffer new_coffer load_coffer );
 use Crypt::MultiKey::Coffer;
 
 subtest ctor => sub {
-   is( Crypt::MultiKey::Coffer->new(),
+   is( new_coffer(),
       object {
          call has_content => F;
          call has_ciphertext => F;
-         call unlocked => T;
+         call locked => F;
          call initialized => F;
          call locks => [];
          call content_type => undef;
@@ -18,11 +19,11 @@ subtest ctor => sub {
       },
       'empty coffer'
    );
-   is( Crypt::MultiKey::Coffer->new(content => "abc"),
+   is( coffer(content => "abc"),
       object {
          call has_content => T;
          call has_ciphertext => F;
-         call unlocked => T;
+         call locked => F;
          call initialized => T;
          call content_type => undef;
          call content => object { call [ memcmp => "abc" ], 0; };
@@ -33,7 +34,7 @@ subtest ctor => sub {
       object {
          call has_content => T;
          call has_ciphertext => F;
-         call unlocked => T;
+         call locked => F;
          call initialized => T;
          call content_type => 'application/crypt-multikey-coffer-dict';
          call content_dict => {
@@ -75,7 +76,7 @@ subtest save_load_unlock => sub {
    }
    my $slurp= do { local $/; open my $fh, '<', "$tmpdir/coffer.pem" or die; <$fh> or die; };
    note $slurp;
-   is( my $c2= Crypt::MultiKey::Coffer->load("$tmpdir/coffer.pem"),
+   is( my $c2= load_coffer("$tmpdir/coffer.pem"),
       object {
          call name => 'Example';
          call user_meta => {
@@ -83,7 +84,7 @@ subtest save_load_unlock => sub {
             a => 1,
             b => [ 1, 2, 3 ],
          };
-         call unlocked => F;
+         call locked => T;
          call has_content => F;
          call has_ciphertext => T;
       }
@@ -95,6 +96,30 @@ subtest save_load_unlock => sub {
    ok( $c2->unlock($key), 'unlock' );
    #note explain $c2;
    is( $c2->content->memcmp($data), 0, 'content matches' );
+};
+
+
+subtest bundled_keys => sub {
+   my $tmpdir= File::Temp->newdir;
+   my $path= "$tmpdir/coffer.pem";
+   my $key= Crypt::MultiKey::PKey->generate;
+   $key->encrypt_private('secret-passphrase');
+
+   my $c= Crypt::MultiKey::Coffer->new(
+      path => $path,
+      bundled_keys => 1,
+      content => 'bundled data',
+      content_type => 'text/plain',
+   );
+   $c->add_access($key);
+   ok( $c->save, 'save coffer with bundled key' );
+
+   my $c2= Crypt::MultiKey::Coffer->load($path, bundled_keys => 1);
+   my $tmbl_key= $c2->locks->[0]{tumblers}[0]{key};
+   ok( $tmbl_key, 'bundled key parsed after coffer PEM' );
+   ok( $tmbl_key->decrypt_private('secret-passphrase'), 'decrypt bundled private key' );
+   ok( $c2->unlock(), 'unlock using bundled key object' );
+   is( $c2->content->memcmp('bundled data'), 0, 'bundled-key coffer content readable' );
 };
 
 done_testing;
