@@ -11,23 +11,26 @@ special cases:
 
 =item *
 
-Checking for newly-plugged-in hardware authenticators needs to happen frequently, and might
-need to interupt password entry, and might need to collect a PIN from the user.
+If hardware authenticators are required, we need to poll frequently for whether one has been
+plugged in.  This might also need to interrupt a password prompt that was already printed
+to the terminal, and might need to collect a PIN from the user.
 
 =item *
 
-If one of the locks has a single tumbler that can't be unlocked, we shouldn't prompt the user
-for any of the other tumbers in that lock.
+If one of the locks has a single tumbler that we know can't be unlocked, the rest of its tumblers
+should be removed from consideration, though the PKeys for those other tumblers might still be
+needed for other locks.
 
 =item *
 
 If one of the locks can be opened without interaction, we should use it immediately without
-probing hardware authenticators.
+probing anything else that might trigger a user interaction.
 
 =item *
 
-Multiple PKey objects might refer to the same private key, in which case we should only decrypt
-one of them and then copy the private key instead of trying to unlock the rest.
+Multiple PKey objects might refer to the same private key, and if we obtain the private half for
+one of them we should copy that private half to the rest instead of continuing to attempt to
+C<obtain_private> them.
 
 =back
 
@@ -46,24 +49,15 @@ use MIME::Base64 qw( encode_base64 decode_base64 );
 use Crypt::SecretBuffer qw( secret );
 use Time::HiRes qw( time sleep );
 
-=head1 CONSTRUCTOR
+=constructor new
 
-=head2 new
-
-  $un= Crypt::MultiKey::InteractiveUnlock->new($target, %attributes);
   $un= Crypt::MultiKey::InteractiveUnlock->new(%attributes);
 
-Return a new InteractiveUnlock object.  No action is taken until you call L</run>.
+Return a new C<InteractiveUnlock> object.  No action is taken until you call L</run>.
 
+The L</goals> attribute is required, but it can be derived from the L</target>
+attribute.
 
-  For Coffer and
-Vault, the C<locks> are inspected to determine the sets of PKey objects to process.  If the
-Coffer or Vault are not already associated with PKey objects (they may only serialize the
-fingerprint) you need to specify those with the C<keys> option.
-
-
-  $bool= interactive_unlock($thing_to_unlock, %options);
-  # where $thing_to_unlock may be a Coffer, Vault, or arrayref of arrayrefs of PKey objects:
 =cut
 
 our %_attr_priority= ( pkeys => -1, goals => 1 );
@@ -71,9 +65,6 @@ sub new {
    my $class= shift;
    my %attrs= !(@_ & 1)? @_
             : @_ == 1 && ref $_[0] eq 'HASH'? %{$_[0]}
-            # automatic recognition of 'target' attribute
-            : blessed($_[0]) && ($_[0]->can('lock_mechanism') || $_[0]->can('insert_keys'))?
-               ( target => @_ )
             : croak "Expected hashref, or even-length list of attribute key/values";
 
    my $self= bless { pkeys => {} }, $class;
@@ -82,8 +73,9 @@ sub new {
       $setter->($self, $attrs{$_});
    }
    if (!$self->{goals}) {
-      $self->target? $self->_set_goals($self->_goals_from_target($self->target))
-                   : croak "attribute 'goals' is required";
+      croak "attribute 'goals' is required"
+         unless $self->target;
+      $self->_set_goals($self->_goals_from_target($self->target));
    }
    $self;
 }
@@ -107,7 +99,7 @@ sub _goals_from_target {
 
 An instance of L<Crypt::MultiKey::LockMechanism> or object with C<< ->lock_mechanism >>
 attribute.  If supplied, L</goals> will be derived from the C<LockMechanism> and a successful
-L</run> will call C<unlock> on the C<LockMechanism>.
+L</run> will call C<unlock> on the target object.
 
 If not specified, you can supply the L</goals> directly and a successful L</run> just leaves you
 with a usable set of PKey objects.
@@ -127,7 +119,8 @@ or PKey fingerprints.  You may assign new goals, but do not modify the existing 
 
 =head2 pkeys
 
-This is a set of PKey objects which the algorithm is attempting to obtain private halves for.
+This is a set of L<PKey objects|Crypt::MultiKey::PKey> for which the algorithm is attempting to
+obtain private halves.
 You can supply this to the constructor as an arrayref or hashref, but it is returned from this
 attribute accessor as a de-duplicated arrayref.  You may add additional PKey objects with
 L</add_pkeys> or exclude existing ones with L</exclude_pkey>, but modifying the arrayref has
@@ -542,8 +535,15 @@ sub run {
    }
    # apply the solution to the target
    if (defined $self->unlocked) {
-      _lock_mech_from_target($self->target)->unlock(@{ $self->unlocked })
-         if $self->target;
+      if (defined(my $target= $self->target)) {
+         # use the object method rather than reaching into the lock mechanism
+         # in case it does additional things like authenticate the Coffer.
+         if ($target->can('unlock')) {
+            $target->unlock(@{ $self->unlocked });
+         } else {
+            _lock_mech_from_target($target)->unlock(@{ $self->unlocked });
+         }
+      }
       return 1; # success
    } elsif (@{ $self->_achievable_goals } && $options{one_iteration}) {
       return undef; # try again

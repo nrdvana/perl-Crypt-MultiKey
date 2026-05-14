@@ -29,19 +29,19 @@ my $lm= Crypt::MultiKey::LockMechanism->new;
 $lm->add_access($pk1, $pk2);
 $lm->add_access($pk2, $pk3);
 
-ok( my $iu= Crypt::MultiKey::InteractiveUnlock->new($lm), 'constructor' );
+ok( my $iu= Crypt::MultiKey::InteractiveUnlock->new(target => $lm), 'constructor' );
 ok( $iu->run, 'succeeds, because keys already have private half' );
 ok( $iu->unlocked, 'unlocked' );
 
 $pk1->clear_private;
 
-ok( $iu= Crypt::MultiKey::InteractiveUnlock->new($lm), 'constructor' );
+ok( $iu= Crypt::MultiKey::InteractiveUnlock->new(target => $lm), 'constructor' );
 ok( $iu->run, 'succeeds, because keys 2+3 already have private half' );
 ok( $iu->unlocked, 'unlocked' );
 
 $pk3->clear_private;
 
-ok( $iu= Crypt::MultiKey::InteractiveUnlock->new($lm), 'constructor' );
+ok( $iu= Crypt::MultiKey::InteractiveUnlock->new(target => $lm), 'constructor' );
 
 $user_entered_pw= 'test';
 ok( !$iu->run(one_iteration => 1), 'run fails, wrong password' );
