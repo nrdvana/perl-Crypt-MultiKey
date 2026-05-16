@@ -3,6 +3,7 @@ use v5.12;
 use warnings;
 use Pod::Usage;
 use Getopt::Long;
+use IO::Handle;
 use Crypt::SecretBuffer qw/ secret /;
 use MIME::Base64 qw( encode_base64 decode_base64 );
 use Crypt::MultiKey::PKey;
@@ -10,7 +11,47 @@ use Crypt::MultiKey::FIDO2;
 
 =head1 USAGE
 
-  crypt-multikey-new-pkey
+  crypt-multikey-new-pkey [OPTIONS] [FILENAME]
+
+=head1 OPTIONS
+
+=over
+
+=item --type (-t) ALGORITHM
+
+Specify the public key cryptography algorithm: C<rsa>, C<secp256k1>, C<x25519>,
+C<ml-kem>, or a more speciic type from C<perldoc Crypt::MultiKey::PKey>.
+C<ml-kem> is a post-quantum algorithm that requires OpenSSL 3.5 or newer.
+
+=item --protection-scheme (-p) SCHEME
+
+Specify the method for encrypting or otherwise protecting the private half of
+the key: C<none>, C<Password>, C<SSHAgentSignature>, C<YKChalResp>, C<FIDO2>.
+
+The default is C<Password>.
+
+=item --output (-o) FILENAME
+
+Specify the output filename.  C<-> means STDOUT.
+
+=item --fido2-create-cred
+
+Implies 'Y' to the prompt asking whether to create a new FIDO2 credential.
+
+=item --fido2-cred-id BASE64
+
+Specify a pre-existing FIDO2 credential, for use with C<< -p FIDO2 >>.
+You will also need to specify C<--fido2-cred-pubkey>.
+
+=item --fido2-cred-pubkey BASE64
+
+Specify the public key of a pre-existing FIDO2 credential.
+
+=item --fido2-cred-cose-alg NAME
+
+Specify an alternate algorithm for the FIDO2 credential.
+
+=back
 
 =cut
 
@@ -22,6 +63,7 @@ GetOptions(
    'fido2-cred-id=s'       => \$fido2_cred{id},
    'fido2-cred-pubkey=s'   => \$fido2_cred{pubkey},
    'fido2-cred-cose-alg=s' => \$fido2_cred{cose_alg},
+   'fido2-create-cred'     => \my $opt_fido2_create_cred,
    'help'                  => sub { pod2usage(1) },
 ) or pod2usage(2);
 $opt_output= shift if !defined $opt_output && @ARGV == 1;
@@ -48,55 +90,76 @@ exists $prot_scheme{$opt_prot}
         . "  none\n"
         . "\n";
 
+# talk to the terminal/console, not STDOUT, if the output of the command is redirected.
+my $in_fh= -t STDIN? \*STDIN : undef;
+my $prompt_fh= -t STDOUT? \*STDOUT : -t STDERR? \*STDERR : undef;
+if (!defined $in_fh || !defined $prompt_fh) {
+   if ($^O eq 'MSWin32') {
+      open($in_fh, '+<', 'CONIN$') || die 'open(CONIN$): '.$!
+         unless defined $in_fh;
+      open($prompt_fh, '>', 'CONOUT$') || die 'open(CONOUT$): '.$!
+         unless defined $prompt_fh;
+   } else {
+      open(my $tty, '+<', '/dev/tty') || die "open(/dev/tty): $!";
+      $in_fh //= $tty;
+      $prompt_fh //= $tty;
+   }
+}
+$prompt_fh->autoflush(1); # for prompts that don't end with \n
+
 my $pkey= Crypt::MultiKey::PKey->new(
    generate          => $opt_type,
    protection_scheme => $prot_scheme{$opt_prot},
 );
-say "generated ".$pkey->algorithm." public/private key pair";
-
-$|= 1; # for prompts that don't end with \n
+warn "generated ".$pkey->algorithm." public/private key pair\n";
 
 if (!defined $pkey->protection_scheme) {
-   say "Generated an unprotected private key.  Ensure the file has sensible permissions.";
+   warn "Generated an unprotected private key; ensure the file has sensible permissions.\n";
 }
 elsif ($pkey->protection_scheme eq 'Password') {
    my $secret= secret;
-   $secret->append_console_line(prompt => 'password: ')
-      or die "aborted.";
+   $secret->append_console_line(
+      input_fh => $in_fh, prompt_fh => $prompt_fh,
+      prompt => 'password: '
+   ) or die "aborted.\n";
+   $secret->length
+      or die "aborted.  (use '-p none' to export an unencrypted key)\n";
    $pkey->encrypt_private($secret);
-   say "Verifying...";
+   warn "Verifying...\n";
    my $pkey2= Crypt::MultiKey::PKey->load($pkey->export);
    $secret= secret();
-   $secret->append_console_line(prompt => 're-enter password: ')
-      or die "aborted.";
+   $secret->append_console_line(
+      input_fh => $in_fh, prompt_fh => $prompt_fh,
+      prompt => 're-enter password: '
+   ) or die "aborted.\n";
    $pkey2->decrypt_private($secret);
-   say "Verified.";
+   warn "Verified.\n";
 }
 elsif ($pkey->protection_scheme eq 'SSHAgentSignature') {
    my $agent= $pkey->agent;
    my @keys= $pkey->usable_agent_keys
       or die "No usable keys are loaded in your agent.\n"
            . "Note that only types ssh-rsa, ssh-dsa, and ssh-ed25519 have a stable\n"
-           . "signature algorithm that can be used for encryption.\n";
+           . " signature algorithm that can be used for encryption.\n";
    while (@keys > 1) {
-      print "Choose an agent key to use:\n\n";
-      printf " %2d: %s %s %s\n", $_, @{$keys[$_]}{'type','pubkey_base64','comment'}
+      $prompt_fh->print("Choose an agent key to use:\n\n");
+      $prompt_fh->printf(" %2d: %s %s %s\n", $_, @{$keys[$_]}{'type','pubkey_base64','comment'})
          for 0..$#keys;
-      print "\nenter number [0-$#keys]: ";
-      chomp(my $sel= <STDIN>);
+      $prompt_fh->print("\nenter number [0-$#keys]: ");
+      chomp(my $sel= <$in_fh>);
       if ($sel =~ /^[0-9]+\z/ && $sel <= $#keys) {
          (@keys)= ($keys[$sel]);
       } else {
-         say "invalid selection";
+         $prompt_fh->print("invalid selection\n");
       }
    }
-   say "If required, authorize signature request";
+   warn "If required, authorize signature request\n";
    $pkey->encrypt_private($keys[0]);
-   say "Verifying...";
+   warn "Verifying...\n";
    my $pkey2= Crypt::MultiKey::PKey->load($pkey->export);
-   say "If required, authorize signature request again";
+   warn "If required, authorize signature request again\n";
    $pkey2->obtain_private;
-   say "Verified.";
+   warn "Verified.\n";
 }
 elsif ($pkey->protection_scheme eq 'YKChalResp') {
    require Crypt::MultiKey::YubicoOTP;
@@ -106,24 +169,24 @@ elsif ($pkey->protection_scheme eq 'YKChalResp') {
    my @devices= Crypt::MultiKey::YubicoOTP::list_devices()
       or die "No yubico-otp devices found.\n";
    while (@devices > 1) {
-      say "Multiple devices found:";
-      printf " %2d %12s (%s)\n", $_->idx, $_->serial, $_->path
+      $prompt_fh->print("Multiple devices found:");
+      $prompt_fh->printf(" %2d %12s (%s)\n", $_->idx, $_->serial, $_->path)
          for @devices;
-      print "enter number or serial of device: ";
-      chomp(my $sel= <STDIN>);
+      $prompt_fh->print("enter number or serial of device: ");
+      chomp(my $sel= <$in_fh>);
       if (my ($sel_dev)= grep $_->idx eq $sel || $_->serial eq $sel) {
          @devices= ($sel_dev);
       } else {
-         say "no such device.";
+         $prompt_fh->print("no such device.\n");
       }
    }
-   say "If required, touch device to authorize challenge/response";
+   warn "If required, touch device to authorize challenge/response\n";
    $pkey->encrypt_private($devices[0]);
-   say "Verifying...";
+   warn "Verifying...\n";
    my $pkey2= Crypt::MultiKey::PKey->load($pkey->export);
-   say "If required, touch device again to verify challenge/response";
+   warn "If required, touch device again to verify challenge/response\n";
    $pkey2->obtain_private;
-   say "Verified.";
+   warn "Verified.\n";
 }
 elsif ($pkey->protection_scheme eq 'FIDO2') {
    die "Crypt::MultiKey was built without libfido2 support.\n"
@@ -135,8 +198,8 @@ elsif ($pkey->protection_scheme eq 'FIDO2') {
       or die "No FIDO2 devices found\n";
    my $dev= $devices[0];
    if (@devices > 1) {
-      say "Found ".scalar(@devices)." authenticators.";
-      say "Please touch desired authenticator...";
+      warn "Found ".scalar(@devices)." authenticators.\n";
+      $prompt_fh->print("Please touch desired authenticator...\n");
       # request indefinite timeout.  ^C will end the loop and return undef.
       $dev= Crypt::MultiKey::FIDO2::select_device(undef, \@devices);
    }
@@ -154,28 +217,32 @@ elsif ($pkey->protection_scheme eq 'FIDO2') {
       $pkey->fido2_credential(\%fido2_cred);
       $pkey->fido2_aaguid($dev->aaguid);
    } else {
-      say "This will create a new credential, consuming a slot on your device.";
-      print "Proceed? [y/n] ";
-      my $resp= <STDIN>;
-      die "aborted.\n"
-         unless $resp =~ /y/i;
-      say "Creating credential.  Touch device to accept.";
-      $pkey->create_credential($dev);
-      say "You can re-enter this credential with:";
-      for (sort keys %{$pkey->fido2_credential}) {
-         (my $opt= "fido2-cred-$_") =~ s/_/-/g;
-         my $v= $pkey->fido2_credential->{$_};
-         say "  --$opt:".($v =~ /[^\x20-\x7E]/? encode_base64($v, '') : $v);
+      unless ($opt_fido2_create_cred) {
+         $prompt_fh->print("This will create a new credential, consuming a slot on your device.\n"
+                         . "Proceed? [y/n] ");
+         my $resp= <$in_fh>;
+         die "aborted.\n"
+            unless $resp =~ /y/i;
       }
-      say;
+      warn "Creating credential.  Touch device to accept.\n";
+      $pkey->create_credential($dev);
+      warn join('',
+         "You can re-enter this credential with:\n",
+         (map {
+            (my $opt= "fido2-cred-$_") =~ s/_/-/g;
+            my $v= $pkey->fido2_credential->{$_};
+            sprintf("  --%s:%s\n", $opt, $v =~ /[^\x20-\x7E]/? encode_base64($v, '') : $v)
+         } sort keys %{$pkey->fido2_credential}),
+         "\n"
+      );
    }
-   say "Running challenge/response.  Touch device to accept.";
+   warn "Running challenge/response.  Touch device to accept.\n";
    $pkey->encrypt_private($dev);
-   say "Verifying...";
+   warn "Verifying...\n";
    my $pkey2= Crypt::MultiKey::PKey->load($pkey->export);
-   say "If required, touch device again to verify";
+   warn "If required, touch device again to verify\n";
    $pkey2->obtain_private(fido2_devices => [$dev]);
-   say "Verified.";
+   warn "Verified.\n";
 }
 else {
    die "unsupported protection_scheme '".$pkey->protection_scheme."'\n";
@@ -183,11 +250,11 @@ else {
 
 my $out;
 if (defined $opt_output && $opt_output ne '-') {
-   print 'Saving... ';
+   warn "Saving... \n";
    sysopen($out, $opt_output, Fcntl::O_RDWR() | Fcntl::O_CREAT() | Fcntl::O_EXCL() )
       or die "open(create exclusive): $!";
 } else {
-   say ''; # add a blank line
+   say '' if -t STDOUT; # add a blank line if viewed on a TTY
 }
 my $buf= $pkey->export;
 my $pos= 0;
@@ -197,6 +264,6 @@ while ($pos < $buf->length) {
       or die "write: $!";
    $pos += $wrote;
 }
-say "Done" if defined $out;
+warn "Done\n" if defined $out;
 
 exit 0;
