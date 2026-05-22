@@ -4,6 +4,7 @@ use warnings;
 use Pod::Usage;
 use Getopt::Long;
 use IO::Handle;
+use Fcntl;
 use Crypt::SecretBuffer qw/ secret /;
 use MIME::Base64 qw( encode_base64 decode_base64 );
 use Crypt::MultiKey::PKey;
@@ -11,7 +12,12 @@ use Crypt::MultiKey::FIDO2;
 
 =head1 USAGE
 
-  crypt-multikey-new-pkey [OPTIONS] [FILENAME]
+  crypt-multikey-new-pkey [OPTIONS] [OUT_FILENAME]
+  # or
+  echo $PASSWORD | crypt-multikey-new-pkey [OPTIONS] > OUT_FILENAME
+
+This creates a new PKey (public/private keypair) protected by a password
+(or specified C<--protection-scheme>) and exports it in PEM format.
 
 =head1 OPTIONS
 
@@ -32,7 +38,11 @@ The default is C<Password>.
 
 =item --output (-o) FILENAME
 
-Specify the output filename.  C<-> means STDOUT.
+Specify the output filename.  C<-> means STDOUT.  The file must not already exist.
+
+=item --opt-ident PUBKEY_HEX
+
+Specify an SSH Agent Identify to use for C<< -p SSHAgentSignature >>.
 
 =item --fido2-create-cred
 
@@ -60,6 +70,7 @@ GetOptions(
    'type|t=s'              => \my $opt_type,
    'protection-scheme|p=s' => \my $opt_prot,
    'output|o=s'            => \my $opt_output,
+   'ident=s'               => \my $opt_ident,
    'fido2-cred-id=s'       => \$fido2_cred{id},
    'fido2-cred-pubkey=s'   => \$fido2_cred{pubkey},
    'fido2-cred-cose-alg=s' => \$fido2_cred{cose_alg},
@@ -90,22 +101,22 @@ exists $prot_scheme{$opt_prot}
         . "  none\n"
         . "\n";
 
-# talk to the terminal/console, not STDOUT, if the output of the command is redirected.
-my $in_fh= -t STDIN? \*STDIN : undef;
-my $prompt_fh= -t STDOUT? \*STDOUT : -t STDERR? \*STDERR : undef;
-if (!defined $in_fh || !defined $prompt_fh) {
-   if ($^O eq 'MSWin32') {
-      open($in_fh, '+<', 'CONIN$') || die 'open(CONIN$): '.$!
-         unless defined $in_fh;
-      open($prompt_fh, '>', 'CONOUT$') || die 'open(CONOUT$): '.$!
-         unless defined $prompt_fh;
+my $interactive= -t STDIN;
+my $prompt_fh;
+# If running interactively and STDOUT is not also a TTY, we need to open
+# a writable handle to the same terminal/console as STDIN.
+if ($interactive) {
+   if (-t STDOUT) {
+      $prompt_fh= \*STDOUT;
    } else {
-      open(my $tty, '+<', '/dev/tty') || die "open(/dev/tty): $!";
-      $in_fh //= $tty;
-      $prompt_fh //= $tty;
+      if ($^O eq 'MSWin32') {
+         open($prompt_fh, '>', 'CONOUT$') || die 'open(CONOUT$): '.$!;
+      } else {
+         open($prompt_fh, '>', '/dev/tty') || die "open(/dev/tty): $!";
+      }
    }
+   $prompt_fh->autoflush(1); # for prompts that don't end with \n
 }
-$prompt_fh->autoflush(1); # for prompts that don't end with \n
 
 my $pkey= Crypt::MultiKey::PKey->new(
    generate          => $opt_type,
@@ -118,22 +129,31 @@ if (!defined $pkey->protection_scheme) {
 }
 elsif ($pkey->protection_scheme eq 'Password') {
    my $secret= secret;
-   $secret->append_console_line(
-      input_fh => $in_fh, prompt_fh => $prompt_fh,
-      prompt => 'password: '
-   ) or die "aborted.\n";
+   if ($interactive) {
+      $secret->append_console_line(
+         input_fh => \*STDIN, prompt_fh => $prompt_fh,
+         prompt => 'password: '
+      ) or die "aborted.\n";
+   } else {
+      # If not interactive, assume we can just read from the STDIN pipe.
+      $secret->append(scalar <STDIN>);
+   }
    $secret->length
       or die "aborted.  (use '-p none' to export an unencrypted key)\n";
    $pkey->encrypt_private($secret);
-   warn "Verifying...\n";
    my $pkey2= Crypt::MultiKey::PKey->load($pkey->export);
-   $secret= secret();
-   $secret->append_console_line(
-      input_fh => $in_fh, prompt_fh => $prompt_fh,
-      prompt => 're-enter password: '
-   ) or die "aborted.\n";
-   $pkey2->decrypt_private($secret);
-   warn "Verified.\n";
+   if ($interactive) {
+      warn "Verifying...\n";
+      $secret= secret();
+      $secret->append_console_line(
+         input_fh => \*STDIN, prompt_fh => $prompt_fh,
+         prompt => 're-enter password: '
+      ) or die "aborted.\n";
+      $pkey2->decrypt_private($secret);
+      warn "Verified.\n";
+   } else {
+      $pkey2->decrypt_private($secret);
+   }
 }
 elsif ($pkey->protection_scheme eq 'SSHAgentSignature') {
    my $agent= $pkey->agent;
@@ -141,20 +161,32 @@ elsif ($pkey->protection_scheme eq 'SSHAgentSignature') {
       or die "No usable keys are loaded in your agent.\n"
            . "Note that only types ssh-rsa, ssh-dsa, and ssh-ed25519 have a stable\n"
            . " signature algorithm that can be used for encryption.\n";
-   while (@keys > 1) {
-      $prompt_fh->print("Choose an agent key to use:\n\n");
-      $prompt_fh->printf(" %2d: %s %s %s\n", $_, @{$keys[$_]}{'type','pubkey_base64','comment'})
-         for 0..$#keys;
-      $prompt_fh->print("\nenter number [0-$#keys]: ");
-      chomp(my $sel= <$in_fh>);
-      if ($sel =~ /^[0-9]+\z/ && $sel <= $#keys) {
-         (@keys)= ($keys[$sel]);
+   my $sel;
+   if (@keys > 1) {
+      if ($interactive) {
+         while (!defined $sel) {
+            $prompt_fh->print("Choose an agent key to use:\n\n");
+            $prompt_fh->printf(" %2d: %s %s %s\n", $_, @{$keys[$_]}{'type','pubkey_base64','comment'})
+               for 0..$#keys;
+            $prompt_fh->print("\nenter number [0-$#keys]: ");
+            chomp($sel= <STDIN>);
+            if ($sel =~ /^[0-9]+\z/ && $sel <= $#keys) {
+               $sel= $keys[$sel];
+            } else {
+               $prompt_fh->print("invalid selection\n");
+            }
+         }
       } else {
-         $prompt_fh->print("invalid selection\n");
+         chomp($opt_ident= <STDIN>)
+            unless defined $opt_ident;
+         ($sel)= grep $_->{pubkey_base64} eq $opt_ident || $_->{comment} eq $opt_ident, @keys
+            or die "No SSH Agent identity matched selection.\n";
       }
+   } else {
+      $sel= $keys[0];
    }
    warn "If required, authorize signature request\n";
-   $pkey->encrypt_private($keys[0]);
+   $pkey->encrypt_private($sel);
    warn "Verifying...\n";
    my $pkey2= Crypt::MultiKey::PKey->load($pkey->export);
    warn "If required, authorize signature request again\n";
@@ -168,16 +200,18 @@ elsif ($pkey->protection_scheme eq 'YKChalResp') {
       unless Crypt::MultiKey::YubicoOTP->available;
    my @devices= Crypt::MultiKey::YubicoOTP::list_devices()
       or die "No yubico-otp devices found.\n";
-   while (@devices > 1) {
-      $prompt_fh->print("Multiple devices found:");
-      $prompt_fh->printf(" %2d %12s (%s)\n", $_->idx, $_->serial, $_->path)
-         for @devices;
-      $prompt_fh->print("enter number or serial of device: ");
-      chomp(my $sel= <$in_fh>);
-      if (my ($sel_dev)= grep $_->idx eq $sel || $_->serial eq $sel) {
-         @devices= ($sel_dev);
-      } else {
-         $prompt_fh->print("no such device.\n");
+   if (@devices > 1 && $interactive) {
+      while (@devices > 1) {
+         $prompt_fh->print("Multiple devices found:");
+         $prompt_fh->printf(" %2d %12s (%s)\n", $_->idx, $_->serial, $_->path)
+            for @devices;
+         $prompt_fh->print("enter number or serial of device: ");
+         chomp(my $sel= <STDIN>);
+         if (my ($sel_dev)= grep $_->idx eq $sel || $_->serial eq $sel, @devices) {
+            @devices= ($sel_dev);
+         } else {
+            $prompt_fh->print("no such device.\n");
+         }
       }
    }
    warn "If required, touch device to authorize challenge/response\n";
@@ -198,10 +232,11 @@ elsif ($pkey->protection_scheme eq 'FIDO2') {
       or die "No FIDO2 devices found\n";
    my $dev= $devices[0];
    if (@devices > 1) {
-      warn "Found ".scalar(@devices)." authenticators.\n";
-      $prompt_fh->print("Please touch desired authenticator...\n");
-      # request indefinite timeout.  ^C will end the loop and return undef.
-      $dev= Crypt::MultiKey::FIDO2::select_device(undef, \@devices);
+      warn "Found ".scalar(@devices)." authenticators.\n"
+         . "Please touch desired authenticator...\n";
+      # use indefinite timeout with ^C to abort, if interactive.
+      my $timeout= $interactive? undef : 10;
+      $dev= Crypt::MultiKey::FIDO2::select_device($timeout, \@devices);
    }
    die "No device selected.\n" unless defined $dev;
 
@@ -218,9 +253,11 @@ elsif ($pkey->protection_scheme eq 'FIDO2') {
       $pkey->fido2_aaguid($dev->aaguid);
    } else {
       unless ($opt_fido2_create_cred) {
+         die "When running non-interactively, use --fido2-create-cred or specify a credential\n"
+            unless $interactive;
          $prompt_fh->print("This will create a new credential, consuming a slot on your device.\n"
                          . "Proceed? [y/n] ");
-         my $resp= <$in_fh>;
+         my $resp= <STDIN>;
          die "aborted.\n"
             unless $resp =~ /y/i;
       }
