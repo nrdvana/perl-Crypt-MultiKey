@@ -91,6 +91,7 @@ use constant {
    HEADER_MARKER => "\0===== Crypt::MultiKey::Vault =====\n",
    HEADER_MAC_SIZE => 32, # HMAC-SHA256
 };
+our @CARP_NOT= qw( Crypt::MultiKey );
 
 =attribute path
 

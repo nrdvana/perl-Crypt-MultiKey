@@ -48,6 +48,7 @@ use Scalar::Util qw( blessed refaddr );
 use MIME::Base64 qw( encode_base64 decode_base64 );
 use Crypt::SecretBuffer qw( secret );
 use Time::HiRes qw( time sleep );
+our @CARP_NOT= qw( Crypt::MultiKey );
 
 =constructor new
 

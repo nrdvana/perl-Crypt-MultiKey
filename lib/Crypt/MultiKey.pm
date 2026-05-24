@@ -156,6 +156,9 @@ our @EXPORT_OK= qw(
    pkey new_pkey load_pkey coffer new_coffer load_coffer vault new_vault load_vault
    sha256 hkdf hmac_sha256 symmetric_encrypt symmetric_decrypt lazy_load lazy_loadable
 );
+our @CARP_NOT= qw(
+   Crypt::MultiKey::Coffer Crypt::MultiKey::Vault Crypt::MultiKey::PKey
+);
 
 =head1 FUNCTIONS
 
@@ -375,6 +378,7 @@ sub _extract_pems_from_something {
            )
    ) {
       $options->{path} //= "$something" if defined $options;
+      local @Crypt::SecretBuffer::CARP_NOT= ( @Crypt::SecretBuffer::CARP_NOT, __PACKAGE__ );
       $something= secret(load_file => $something);
    }
    # Now load all PEM blocks from that buffer

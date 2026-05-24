@@ -13,6 +13,7 @@ use Crypt::SecretBuffer::PEM 0.020;
 use Crypt::MultiKey;
 use Crypt::MultiKey::LockMechanism;
 use constant { DICT_CONTENT_TYPE => 'application/crypt-multikey-coffer-dict' };
+our @CARP_NOT= qw( Crypt::MultiKey );
 
 sub _isa_pem_obj { blessed($_[0]) && $_[0]->isa('Crypt::SecretBuffer::PEM') }
 sub _isa_secret { blessed($_[0]) && $_[0]->isa('Crypt::SecretBuffer') }

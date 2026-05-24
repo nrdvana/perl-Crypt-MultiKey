@@ -12,6 +12,7 @@ use Digest::SHA qw/ sha256_base64 /;
 use Crypt::SecretBuffer qw/ secret span BASE64 ISO8859_1 /;
 use Crypt::SecretBuffer::PEM;
 use Crypt::MultiKey;
+our @CARP_NOT= qw( Crypt::MultiKey );
 
 =head1 SYNOPSIS
 
