@@ -1,0 +1,83 @@
+#! /usr/bin/env perl
+use v5.12;
+use warnings;
+use Pod::Usage;
+use Getopt::Long qw( :config gnu_getopt );
+use Crypt::SecretBuffer qw/ secret /;
+use Crypt::MultiKey::PKey;
+use Crypt::MultiKey::Coffer;
+
+=head1 USAGE
+
+  cmk-coffer-get [OPTIONS] COFFER_FILE [PKEY_FILE...]
+
+Open COFFER_FILE, unlock it by whatever means are required, and then print
+the secret on standard out (without a trailing newline).
+
+A list of PKey files may follow it on the argument list, each of which will
+be loaded and considered for whether it can help unlock the Coffer.
+For Coffers with the PKey objects serialized in the same file, use option
+C<< --bundled-keys (-b) >>.
+
+For Coffers containing Name/Value dictionary content, use C<< -n NAME >>
+to select a single entry.
+
+=head1 OPTIONS
+
+=over
+
+=item --bundled-keys (-b)
+
+Scan the remainder of the coffer file for embedded PKey objects
+
+=item --dict-name (-n) NAME
+
+For Coffers using dictionary storage, this specifies which name to retrieve.
+
+=back
+
+=cut
+
+GetOptions(
+   'bundled-keys|b'        => \my $opt_bundled_keys,
+   'dict-name|n=s'         => \my $opt_dict_name,
+   'list-names|l'          => \my $opt_list_names,
+   'help'                  => sub { pod2usage(1) },
+) && @ARGV >= 1
+  or pod2usage(2);
+
+my $fname= shift;
+my %options;
+$options{bundled_keys}= 1 if $opt_bundled_keys;
+my $coffer= Crypt::MultiKey::Coffer->load($fname, %options);
+for (@ARGV) {
+   my $pkey= Crypt::MultiKey::PKey->load($_);
+   $coffer->insert_keys($pkey);
+}
+$coffer->interactive_unlock;
+
+if ($opt_list_names) {
+   say for sort keys %{$coffer->content_dict};
+   exit 0;
+}
+
+my $secret;
+if (defined $opt_dict_name) {
+   die "Not a dictionary content_type"
+      unless $coffer->is_dict;
+   $secret= $coffer->get($opt_dict_name);
+   exit 3 unless defined $secret;
+   $secret= secret($secret); # needs to be a buffer object below
+} else {
+   $secret= $coffer->content;
+}
+
+# Could be writing into a pipe, so iterate until complete.
+my $pos= 0;
+while ($pos < $secret->length) {
+   my $wrote= $secret->syswrite(\*STDOUT, $secret->length - $pos, $pos);
+   die "write: $!\n" unless defined $wrote;
+   die "write: EOF\n" unless $wrote;
+   $pos += $wrote;
+}
+exit 0;

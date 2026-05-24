@@ -8,7 +8,7 @@ use Carp;
 use version;
 use Scalar::Util qw/ blessed looks_like_number /;
 use MIME::Base64 qw/ encode_base64 decode_base64 /;
-use Crypt::SecretBuffer qw/ secret HEX BASE64 ISO8859_1 /;
+use Crypt::SecretBuffer qw/ secret span HEX BASE64 ISO8859_1 /;
 use Crypt::SecretBuffer::PEM 0.020;
 use Crypt::MultiKey;
 use Crypt::MultiKey::LockMechanism;
@@ -554,6 +554,7 @@ fail if the Coffer is L</locked>.
 
 sub get {
    my ($self, $key)= @_;
+   croak "Key should be a plain scalar" if ref $key;
    my $dict= $self->content_dict;
    croak "content is not initialized"
       unless $dict;
@@ -577,6 +578,7 @@ store a state of "exists but undefined".
 
 sub set {
    my ($self, $key, $val)= @_;
+   croak "Key should be a plain scalar" if ref $key;
    if (!defined $self->content_type && !$self->has_ciphertext && !$self->has_content) {
       # initialize KV storage, which sets content_type.
       $self->content_dict({});
@@ -853,4 +855,10 @@ sub _export_pem {
    );
 }
 
-1;
+# Avoid depending on namespace::clean
+delete @Crypt::MultiKey::Coffer::{qw(
+   carp croak confess
+   blessed looks_like_number
+   encode_base64 decode_base64
+   secret span HEX BASE64 ISO8859_1
+)};
