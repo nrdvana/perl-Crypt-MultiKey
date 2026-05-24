@@ -249,7 +249,8 @@ sub has_ciphertext { defined $_[0]{cipher_data} && defined $_[0]{cipher_data}{ci
 
 Specify the MIME type of the L</content> attribute.  The special value
 C<< application/crypt-multikey-coffer-dict >> enables the L</get> and L</set> methods to use the
-C<content> as a key/value dictionary.
+C<content> as a key/value dictionary.  This is stored unencrypted in the headers of the Coffer,
+so you may with to omit it.
 
 =over
 
@@ -832,7 +833,7 @@ sub _export_pem {
       writer_version => __PACKAGE__->VERSION,
       user_meta      => $self->user_meta,
       %{ $self->lock_mechanism->_export_attrs },
-      content_type   => $self->content_type,
+      (content_type   => $self->content_type)x!!(defined $self->content_type),
       cipher_data    => \%cipher_data_export,
    );
    # Build the canonical PEM header text so we can validate it with a MAC.
