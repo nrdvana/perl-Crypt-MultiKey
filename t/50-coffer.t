@@ -61,18 +61,18 @@ subtest dict_names => sub {
    $c->set('alpha', 'a');
    $c->set('alphabet', 'ab');
    $c->set('beta', 'b');
-   is( [ $c->list_names_plaintext('alpha') ], ['alpha'], 'exact name match' );
-   is( [ $c->list_names_plaintext('alp', Crypt::MultiKey::Coffer::LIST_NAMES_PREFIX) ],
+   is( [ $c->list_names_plaintext ], [ 'alpha', 'alphabet', 'beta' ], 'list_names' );
+   is( [ $c->list_names_plaintext('alp') ],
       [ 'alpha', 'alphabet' ],
       'prefix name matches'
    );
    is( $c->get('alphabet')->memcmp('ab'), 0, 'get by name' );
    $c->set('alpha', undef);
-   is( [ $c->list_names_plaintext('alp', Crypt::MultiKey::Coffer::LIST_NAMES_PREFIX) ],
+   is( [ $c->list_names_plaintext('alp') ],
       [ 'alphabet' ],
       'delete updates index'
    );
-   is( [ $c->list_names('alp', Crypt::MultiKey::Coffer::LIST_NAMES_PREFIX) ],
+   is( [ $c->list_names('alp') ],
       array {
          item object { call [ memcmp => 'alphabet' ], 0; };
          end;

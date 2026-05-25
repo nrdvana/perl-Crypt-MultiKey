@@ -14,8 +14,6 @@ use Crypt::MultiKey;
 use Crypt::MultiKey::LockMechanism;
 use constant {
    DICT_CONTENT_TYPE => 'application/crypt-multikey-coffer-dict',
-   LIST_NAMES_PREFIX => 0x01,
-   LIST_NAMES_PLAINTEXT => 0x02,
 };
 our @CARP_NOT= qw( Crypt::MultiKey );
 
@@ -255,13 +253,14 @@ sub has_ciphertext { defined $_[0]{cipher_data} && defined $_[0]{cipher_data}{ci
 Specify the MIME type of the L</content> attribute.  The special value
 C<< application/crypt-multikey-coffer-dict >> enables the L</get> and L</set> methods to use the
 C<content> as a key/value dictionary.  This is stored unencrypted in the headers of the Coffer,
-so you may with to omit it.
+so you may wish to omit it for non-dictionary types if the content type would leak information.
 
 =over
 
 =item is_dict
 
 Accessor to test whether the content_type indicates a dictionary encoding.
+Currently only C<< application/crypt-multikey-coffer-dict >> is supported.
 
 =back
 
@@ -330,22 +329,18 @@ sub _set_content {
    if (!defined $val) {
       $self->{content}= undef;
    } elsif (ref($val) eq 'ARRAY' || ref($val) eq 'HASH') {
+      # Make copies of the user-supplied keys and values, for safety at the expense
+      # of some performance.  Note that _unpack_content_dict does *not* make copies
+      # since the user is unlikely to have access to the underlying buffer.
+      # Maybe I should add a 'readonly' flag to SecretBuffer to enable some optimizations...
       if (ref($val) eq 'HASH') {
-         my @flat;
-         for my $k (keys %$val) {
-            push @flat, $k, $val->{$k};
-         }
-         $val= \@flat;
+         $val= [ map secret($_), %$val ];
+      } else {
+         croak "Expected even-length arrayref containing alternating name/value"
+            if @$val & 1;
+         $val= [ map secret($_), @$val ];
       }
-      croak "Expected arrayref containing alternating name/value"
-         if @$val & 1;
-      # Clone input and coerce names/values to secret buffers.
-      $dict= [ @$val ];
-      for (my $i= 0; $i < @$dict; $i += 2) {
-         $dict->[$i]= _coerce_secret($dict->[$i]);
-         $dict->[$i+1]= _coerce_secret($dict->[$i+1]);
-      }
-      $self->{content}= $dict;
+      $self->{content}= $val;
       $self->{content_type}= DICT_CONTENT_TYPE;
    } else {
       $self->{content}= _coerce_secret($val);
@@ -366,7 +361,7 @@ sub _unpack_content_dict {
       if !@kv && $span->len; # empty content is not an error
    croak "Failed to parse Key/Value pairs: odd number of strings"
       if @kv & 1;
-   $self->{content}= \@kv;
+   $self->{content}= \@kv; # these spans are still referencing the original ->{content} buffer.
    delete $self->{_dict_name_cache};
 }
 
@@ -535,9 +530,16 @@ sub load {
 
   $secret= $coffer->get($name);
 
-When L<content_type> is C<< application/crypt-multikey-coffer-dict >>, this method can be used to
-retrieve a secret by name.  If the content is not yet decrypted, it will try decrypting it and
-fail if the Coffer is L</locked>.
+When using dictionary mode (based on L</content_type> / L</is_dict> flag), this method can be
+used to retrieve a secret by name.  It dies if the content_type is not a supported dictionary
+type.  In Coffer's dictionary mode, a name that exists in the collection always has a defined
+value, so checking defined-ness of the return value is equivalent to checking 'exists' on a
+perl hashref.
+
+If the content is not yet decrypted, it will try decrypting it and fail if the Coffer is
+L</locked>.
+
+B<Do not modify> the buffer referenced by the returned C<$secret> Span object.
 
 =cut
 
@@ -553,13 +555,13 @@ sub get {
 
   $coffer->set($name, $secret);
 
-When L<content_type> is C<< application/crypt-multikey-coffer-dict >>, this method can be used
-to store a secret by name.  If the content is not yet decrypted, it will try decrypting it and
-fail if the Coffer is L</locked>.  Using this method when no content or ciphertext are
-defined will initialize the content_type to C<< application/crypt-multikey-coffer-dict >> and
-the hidden dictionary storage.
+When using dictionary mode (based on L</content_type> / L</is_dict> flag), this method can be
+used to store a secret by name.  Using this method when no content or ciphertext are defined
+will initialize the content_type to C<< application/crypt-multikey-coffer-dict >> and the hidden
+dictionary storage.  If content exists but is not yet decrypted, this will try decrypting it and
+fail if the Coffer is L</locked>.
 
-If the C<$secret> is not defined, it deletes C<$name> from the hashref.  There is no way to
+If C<$secret> is not defined, it deletes C<$name> from the dictionary.  There is no way to
 store a state of "exists but undefined".
 
 =cut
@@ -574,18 +576,19 @@ sub set {
    my $dict= $self->_content_dict;
    my (undef, $idx)= $self->_dict_find_name_idx($key);
    if (defined $val) {
+      # make copies of key and/or val so that the caller doesn't have to worry about
+      # keeping them constant.
       if (defined $idx) {
-         $dict->[$idx+1]= _coerce_secret($val);
+         $dict->[$idx+1]= secret($val);
       } else {
-         push @$dict, _coerce_secret($key), _coerce_secret($val);
+         push @$dict, secret($key), secret($val);
+         delete $self->{_dict_name_cache};
       }
-      delete $self->{_dict_name_cache};
-      $self->content_changed(1);
    } elsif (defined $idx) {
       splice(@$dict, $idx, 2);
       delete $self->{_dict_name_cache};
-      $self->content_changed(1);
    }
+   $self->content_changed(1);
    $self;
 }
 
@@ -596,12 +599,13 @@ sub _dict_name_cache {
    return $cache if $cache;
    $cache= [];
    for (my $i= 0; $i < @$dict; $i += 2) {
-      push @$cache, [ span($dict->[$i]), $i ];
+      push @$cache, [ $dict->[$i], $i ];
    }
    @$cache= sort { memcmp($a->[0], $b->[0]) } @$cache;
    $self->{_dict_name_cache}= $cache;
 }
 
+# Returns nearest index within cache, and index of matching element within @_content_dict
 sub _dict_find_name_idx {
    my ($self, $name)= @_;
    my $cache= $self->_dict_name_cache;
@@ -619,40 +623,48 @@ sub _dict_find_name_idx {
    ($lo, $cache->[$lo][1]);
 }
 
+=method list_names
+
+  @names= $coffer->list_names;
+  @names= $coffer->list_names($prefix);
+
+When using dictionary mode (based on L</content_type> / L</is_dict> flag), this method returns a
+list of the available names.  You can optionally filter them by a prefix.  The names are
+returned as L<Span objects|Crypt::SecretBuffer::Span>.  C<Do not modify> the buffer underlying
+the name Spans.  See also L</list_names_plaintext>.
+
+=cut
+
 sub list_names {
-   my ($self, $name, $flags)= @_;
-   $flags //= 0;
+   my ($self, $prefix)= @_;
    my $dict= $self->_content_dict;
    my $cache= $self->_dict_name_cache;
    return () unless @$cache;
-   my $prefix= _coerce_secret($name);
-   my ($pos)= $self->_dict_find_name_idx($prefix);
    my @ret;
-   if ($flags & LIST_NAMES_PREFIX) {
-      my $prefix_len= span($prefix)->len;
-      for (my $i= $pos; $i < @$cache; $i++) {
+   my $prefix_len= defined $prefix && ($prefix= _coerce_secret($prefix))->len;
+   if ($prefix_len) {
+      my ($i)= $self->_dict_find_name_idx($prefix);
+      for (; $i < @$cache; $i++) {
          my $name_prefix= span($cache->[$i][0], 0, $prefix_len);
          last if memcmp($name_prefix, $prefix) != 0;
-         push @ret, span($dict->[ $cache->[$i][1] ]);
+         push @ret, span($cache->[$i][0]);
       }
    }
-   elsif (defined $cache->[$pos] && memcmp($cache->[$pos][0], $prefix) == 0) {
-      push @ret, span($dict->[ $cache->[$pos][1] ]);
-   }
-   if ($flags & LIST_NAMES_PLAINTEXT) {
-      @ret= map {
-         my $name_text;
-         span($_)->copy_to($name_text);
-         $name_text;
-      } @ret;
+   else {
+      @ret= map span($_->[0]), @$cache;
    }
    @ret;
 }
 
+=method list_names_plaintext
+
+Same as L</list_names>, but returns plain strings instead of Span objects.
+
+=cut
+
 sub list_names_plaintext {
-   my ($self, $name, $flags)= @_;
-   $flags //= 0;
-   $self->list_names($name, $flags | LIST_NAMES_PLAINTEXT);
+   my ($self, $prefix)= @_;
+   return map { my $plain; $_->copy_to($plain); $plain } $self->list_names($prefix);
 }
 
 =method export
