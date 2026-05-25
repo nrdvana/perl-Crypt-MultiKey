@@ -8,11 +8,15 @@ use Carp;
 use version;
 use Scalar::Util qw/ blessed looks_like_number /;
 use MIME::Base64 qw/ encode_base64 decode_base64 /;
-use Crypt::SecretBuffer qw/ secret span HEX BASE64 ISO8859_1 /;
+use Crypt::SecretBuffer qw/ secret span memcmp HEX BASE64 ISO8859_1 /;
 use Crypt::SecretBuffer::PEM 0.020;
 use Crypt::MultiKey;
 use Crypt::MultiKey::LockMechanism;
-use constant { DICT_CONTENT_TYPE => 'application/crypt-multikey-coffer-dict' };
+use constant {
+   DICT_CONTENT_TYPE => 'application/crypt-multikey-coffer-dict',
+   LIST_NAMES_PREFIX => 0x01,
+   LIST_NAMES_PLAINTEXT => 0x02,
+};
 our @CARP_NOT= qw( Crypt::MultiKey );
 
 sub _isa_pem_obj { blessed($_[0]) && $_[0]->isa('Crypt::SecretBuffer::PEM') }
@@ -202,7 +206,7 @@ sub locked {
 An arbitrary hashref of name/value strings that will be added to the exported PEM as headers
 of the form C<< user_meta.$name = $value >>.  Note that headers are B<plaintext>.
 If you wish to store secret user metadata it needs to be part of L</content>, which can be
-accomplished conveniently using L</content_dict>.
+accomplished conveniently using L</get> and L</set>.
 
 Because PEM has no escaping system, the names and values may not contain control characters or
 begin or end with space characters.  The names also may not contain '.' or be purely numeric,
@@ -283,9 +287,9 @@ trigger a serialization of the data.
 
 =item has_content
 
-True if the C<content> or C<content_dict> attributes are defined, meaning that either the Coffer
-is decrypted or has been initialized to a new value.  Maybe unintuitively, it returns false for
-a not-locked coffer where the content hasn't been lazy-decrypted yet.
+True if the C<content> attribute or hidden dictionary storage are defined, meaning that either
+the Coffer is decrypted or has been initialized to a new value.  Maybe unintuitively, it returns
+false for a not-locked coffer where the content hasn't been lazy-decrypted yet.
 
 =item initialized
 
@@ -293,17 +297,9 @@ True if C<has_content> or C<has_ciphertext>, meaning that content has been added
 
 =back
 
-=attribute content_dict
-
-This attribute is used when the content type is C<< application/crypt-multikey-coffer-dict >>.
-and allows you to work with a hash of name/value pairs where each value is a SecretBuffer
-or L<Span|Crypt::SecretBuffer::Span>.  Changes to this hash will not be seen automatically;
-either use L</set>, or write the whole attribute to properly indicate to the Coffer that it
-needs re-encrypted.
-
 =attribute content_changed
 
-True if you have used accessors to alter your C<content> or C<content_dict> attribute.  If you
+True if you have used accessors to alter your C<content> or hidden dictionary storage.  If you
 modify the content SecretBuffer yourself, you should set this attribute to true so that the
 Coffer knows it needs to re-encrypt the content.
 
@@ -320,56 +316,41 @@ sub content {
    $self->decrypt
       if !$self->has_content && $self->has_ciphertext;
    $self->_pack_content_dict
-      if !defined $self->{content} && defined $self->{content_dict};
+      if ref($self->{content}) eq 'ARRAY';
    $self->{content}
 }
 
-sub content_dict {
-   my $self= shift;
-   return $self->_set_content_dict($_[0])
-      if @_;
-   croak "content_type is not ".DICT_CONTENT_TYPE
-      unless $self->is_dict;
-   $self->decrypt
-      if !$self->has_content && $self->has_ciphertext;
-   $self->_unpack_content_dict
-      if !defined $self->{content_dict} && defined $self->{content};
-   $self->{content_dict} //= {};
-}
-
-sub has_content { defined $_[0]{content} || defined $_[0]{content_dict} }
+sub has_content { defined $_[0]{content} }
 sub initialized { $_[0]->has_content || $_[0]->has_ciphertext }
 sub content_changed { $_[0]{content_changed}= $_[1] if @_ > 1; !!$_[0]{content_changed} }
 
 sub _set_content {
    my ($self, $val)= @_;
+   my $dict;
    if (!defined $val) {
       $self->{content}= undef;
-      $self->{content_dict}= undef;
+   } elsif (ref($val) eq 'ARRAY' || ref($val) eq 'HASH') {
+      if (ref($val) eq 'HASH') {
+         my @flat;
+         for my $k (keys %$val) {
+            push @flat, $k, $val->{$k};
+         }
+         $val= \@flat;
+      }
+      croak "Expected arrayref containing alternating name/value"
+         if @$val & 1;
+      # Clone input and coerce names/values to secret buffers.
+      $dict= [ @$val ];
+      for (my $i= 0; $i < @$dict; $i += 2) {
+         $dict->[$i]= _coerce_secret($dict->[$i]);
+         $dict->[$i+1]= _coerce_secret($dict->[$i+1]);
+      }
+      $self->{content}= $dict;
+      $self->{content_type}= DICT_CONTENT_TYPE;
    } else {
       $self->{content}= _coerce_secret($val);
    }
-   # discard key/value map, if any
-   delete $self->{content_dict};
-   $self->content_changed(1);
-   $self;
-}
-
-sub _set_content_dict {
-   my ($self, $val)= @_;
-   croak "Clear content with ->content(undef) rather than ->content_dict(undef)"
-      unless defined $val;
-   croak "Expected hashref"
-      unless ref $val eq 'HASH';
-   # Ensure that all values are SecretBuffer or SecretBuffer::Span
-   $val= { %$val }; # clone before converting values
-   $_= _coerce_secret($_)
-      for values %$val;
-   $self->{content_dict}= $val;
-   # override content type
-   $self->{content_type}= DICT_CONTENT_TYPE;
-   # discard plain scalar content, if any
-   delete $self->{content};
+   delete $self->{_dict_name_cache};
    $self->content_changed(1);
    $self;
 }
@@ -385,23 +366,29 @@ sub _unpack_content_dict {
       if !@kv && $span->len; # empty content is not an error
    croak "Failed to parse Key/Value pairs: odd number of strings"
       if @kv & 1;
-   # All strings are currently SecretBuffer objects.  Unmask the keys.
-   for (0 .. ($#kv-1)/2) {
-      my $k;
-      $kv[$_*2]->copy_to($k);
-      $kv[$_*2]= $k;
-   }
-   my %kv= @kv;
-   delete $self->{content}; # content_dict is the official value, now
-   $self->{content_dict}= \%kv;
+   $self->{content}= \@kv;
+   delete $self->{_dict_name_cache};
 }
 
 sub _pack_content_dict {
    my $self= shift;
    my $buf= secret;
-   $buf->append_lenprefixed($_) for %{ $self->{content_dict} };
-   delete $self->{content_dict};
+   $buf->append_lenprefixed(@{ $self->{content} });
    $self->{content}= $buf;
+}
+
+sub _content_dict {
+   my $self= shift;
+   croak "content_type is not ".DICT_CONTENT_TYPE
+      unless $self->is_dict;
+   $self->decrypt
+      if !$self->has_content && $self->has_ciphertext;
+   $self->_unpack_content_dict
+      if ref($self->{content}) ne 'ARRAY' && defined $self->{content};
+   $self->{content} //= [];
+   $self->{content}= []
+      unless ref($self->{content}) eq 'ARRAY';
+   $self->{content};
 }
 
 =attribute authentication
@@ -480,6 +467,8 @@ sub new {
    $self->_init(\%attrs) if $self->can('_init');
    # Every remaining attribute must have a writable accessor
    for (sort { ($_attr_pri{$a}||0) <=> ($_attr_pri{$b}||0) } keys %attrs) {
+      croak "Unknown or internal attribute '$_'"
+         if substr($_,0,1) eq '_';
       my $setter= "_set_$_";
       $self->$setter($attrs{$_});
    }
@@ -555,10 +544,9 @@ fail if the Coffer is L</locked>.
 sub get {
    my ($self, $key)= @_;
    croak "Key should be a plain scalar" if ref $key;
-   my $dict= $self->content_dict;
-   croak "content is not initialized"
-      unless $dict;
-   $dict->{$key};
+   my (undef, $idx)= $self->_dict_find_name_idx($key);
+   return undef unless defined $idx;
+   $self->_content_dict->[$idx+1];
 }
 
 =method set
@@ -569,7 +557,7 @@ When L<content_type> is C<< application/crypt-multikey-coffer-dict >>, this meth
 to store a secret by name.  If the content is not yet decrypted, it will try decrypting it and
 fail if the Coffer is L</locked>.  Using this method when no content or ciphertext are
 defined will initialize the content_type to C<< application/crypt-multikey-coffer-dict >> and
-the C<content_dict> attribute to a hashref.
+the hidden dictionary storage.
 
 If the C<$secret> is not defined, it deletes C<$name> from the hashref.  There is no way to
 store a state of "exists but undefined".
@@ -581,17 +569,90 @@ sub set {
    croak "Key should be a plain scalar" if ref $key;
    if (!defined $self->content_type && !$self->has_ciphertext && !$self->has_content) {
       # initialize KV storage, which sets content_type.
-      $self->content_dict({});
+      $self->content([]);
    }
-   my $dict= $self->content_dict;
+   my $dict= $self->_content_dict;
+   my (undef, $idx)= $self->_dict_find_name_idx($key);
    if (defined $val) {
-      $dict->{$key}= _coerce_secret($val);
+      if (defined $idx) {
+         $dict->[$idx+1]= _coerce_secret($val);
+      } else {
+         push @$dict, _coerce_secret($key), _coerce_secret($val);
+      }
+      delete $self->{_dict_name_cache};
       $self->content_changed(1);
-   } elsif (exists $dict->{$key}) {
-      delete $dict->{$key};
+   } elsif (defined $idx) {
+      splice(@$dict, $idx, 2);
+      delete $self->{_dict_name_cache};
       $self->content_changed(1);
    }
    $self;
+}
+
+sub _dict_name_cache {
+   my $self= shift;
+   my $dict= $self->_content_dict;
+   my $cache= $self->{_dict_name_cache};
+   return $cache if $cache;
+   $cache= [];
+   for (my $i= 0; $i < @$dict; $i += 2) {
+      push @$cache, [ span($dict->[$i]), $i ];
+   }
+   @$cache= sort { memcmp($a->[0], $b->[0]) } @$cache;
+   $self->{_dict_name_cache}= $cache;
+}
+
+sub _dict_find_name_idx {
+   my ($self, $name)= @_;
+   my $cache= $self->_dict_name_cache;
+   $name= _coerce_secret($name);
+   my ($lo, $hi)= (0, scalar @$cache);
+   while ($lo < $hi) {
+      my $mid= int(($lo + $hi) / 2);
+      if (memcmp($cache->[$mid][0], $name) < 0) {
+         $lo= $mid + 1;
+      } else {
+         $hi= $mid;
+      }
+   }
+   return ($lo, undef) if $lo >= @$cache || memcmp($cache->[$lo][0], $name) != 0;
+   ($lo, $cache->[$lo][1]);
+}
+
+sub list_names {
+   my ($self, $name, $flags)= @_;
+   $flags //= 0;
+   my $dict= $self->_content_dict;
+   my $cache= $self->_dict_name_cache;
+   return () unless @$cache;
+   my $prefix= _coerce_secret($name);
+   my ($pos)= $self->_dict_find_name_idx($prefix);
+   my @ret;
+   if ($flags & LIST_NAMES_PREFIX) {
+      my $prefix_len= span($prefix)->len;
+      for (my $i= $pos; $i < @$cache; $i++) {
+         my $name_prefix= span($cache->[$i][0], 0, $prefix_len);
+         last if memcmp($name_prefix, $prefix) != 0;
+         push @ret, span($dict->[ $cache->[$i][1] ]);
+      }
+   }
+   elsif (defined $cache->[$pos] && memcmp($cache->[$pos][0], $prefix) == 0) {
+      push @ret, span($dict->[ $cache->[$pos][1] ]);
+   }
+   if ($flags & LIST_NAMES_PLAINTEXT) {
+      @ret= map {
+         my $name_text;
+         span($_)->copy_to($name_text);
+         $name_text;
+      } @ret;
+   }
+   @ret;
+}
+
+sub list_names_plaintext {
+   my ($self, $name, $flags)= @_;
+   $flags //= 0;
+   $self->list_names($name, $flags | LIST_NAMES_PLAINTEXT);
 }
 
 =method export
@@ -703,7 +764,7 @@ sub lock {
    # deletes primary_skey
    $self->lock_mechanism->lock;
    # Delete all secrets
-   delete @{$self}{qw( content content_dict content_changed )};
+   delete @{$self}{qw( content _dict_name_cache content_changed )};
    $self;
 }
 
@@ -711,8 +772,8 @@ sub lock {
 
   $coffer->encrypt;
 
-Regenerate the L</cipher_data> attribute from L</content> (or C<content_dict>) attribute.
-The C<content> or C<content_dict> attributes must be initialized.
+Regenerate the L</cipher_data> attribute from L</content> (or hidden dictionary storage).
+The C<content> attribute or hidden dictionary storage must be initialized.
 This will use a fresh AES key if all lock tumblers have public keys present.
 
 This is called automatically during L</save> if the Coffer is aware that the L</cipher_data>
@@ -757,7 +818,8 @@ Regenerate the C<content> attribute from the C<cipher_data> attribute.  Returns 
 chaining.  The L</cipher_data> attribute must be initialized and the correct primary secret key
 must be loaded in the L</lock_mechanism>.
 
-This is called automatically when accessing an uninitialized C<content> or C<content_dict> if the
+This is called automatically when accessing an uninitialized C<content> in either scalar or
+dictionary mode if the
 Coffer is not locked.
 
 =cut
