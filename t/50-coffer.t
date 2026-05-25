@@ -30,19 +30,54 @@ subtest ctor => sub {
       },
       'coffer with initial content'
    );
-   is( Crypt::MultiKey::Coffer->new(content_dict => { a => 1, b => "x" }),
+   is( Crypt::MultiKey::Coffer->new(content => [ a => 1, b => "x" ]),
       object {
          call has_content => T;
          call has_ciphertext => F;
          call locked => F;
          call initialized => T;
          call content_type => 'application/crypt-multikey-coffer-dict';
-         call content_dict => {
-            a => object { call [ memcmp => 1 ], 0; },
-            b => object { call [ memcmp => 'x' ], 0; },
-         };
+         call [ get => 'a' ] => object { call [ memcmp => 1 ], 0; };
+         call [ get => 'b' ] => object { call [ memcmp => 'x' ], 0; };
       },
-      'coffer with initial content_dict'
+      'coffer with initial dict-like content arrayref'
+   );
+   is( Crypt::MultiKey::Coffer->new(content => { a => 1, b => "x" }),
+      object {
+         call has_content => T;
+         call has_ciphertext => F;
+         call locked => F;
+         call initialized => T;
+         call content_type => 'application/crypt-multikey-coffer-dict';
+         call [ get => 'a' ] => object { call [ memcmp => 1 ], 0; };
+         call [ get => 'b' ] => object { call [ memcmp => 'x' ], 0; };
+      },
+      'coffer with initial dict-like content hashref'
+   );
+};
+
+subtest dict_names => sub {
+   my $c= Crypt::MultiKey::Coffer->new;
+   $c->set('alpha', 'a');
+   $c->set('alphabet', 'ab');
+   $c->set('beta', 'b');
+   is( [ $c->list_names_plaintext('alpha') ], ['alpha'], 'exact name match' );
+   is( [ $c->list_names_plaintext('alp', Crypt::MultiKey::Coffer::LIST_NAMES_PREFIX) ],
+      [ 'alpha', 'alphabet' ],
+      'prefix name matches'
+   );
+   is( $c->get('alphabet')->memcmp('ab'), 0, 'get by name' );
+   $c->set('alpha', undef);
+   is( [ $c->list_names_plaintext('alp', Crypt::MultiKey::Coffer::LIST_NAMES_PREFIX) ],
+      [ 'alphabet' ],
+      'delete updates index'
+   );
+   is( [ $c->list_names('alp', Crypt::MultiKey::Coffer::LIST_NAMES_PREFIX) ],
+      array {
+         item object { call [ memcmp => 'alphabet' ], 0; };
+         end;
+      },
+      'list_names returns spans by default'
    );
 };
 
