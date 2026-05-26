@@ -57,7 +57,7 @@ for (@ARGV) {
 $coffer->interactive_unlock;
 
 if ($opt_list_names) {
-   say for sort keys %{$coffer->content_dict};
+   say for $coffer->list_names_plaintext;
    exit 0;
 }
 

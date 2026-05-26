@@ -110,10 +110,9 @@ if (defined $opt_parse || @opt_dict_item) {
       my $span= span($in);
       if ($opt_parse eq '0') {
          while ($span->len) {
-            ($span->parse(qr/[^\0]/) // die "Encountered 0-length dict name in input\n")
-               ->copy_to(my $k);
-            $span->ltrim("\0");
-            my $v= $span->parse(qr/[^\0]/);
+            my $k= $span->parse(qr/[^\0]/)
+               // die "Encountered 0-length dict name in input\n";
+            my $v= $span->ltrim("\0")->parse(qr/[^\0]/);
             $span->ltrim("\0");
             $coffer->set($k, $v // '');
          }
@@ -128,8 +127,7 @@ if (defined $opt_parse || @opt_dict_item) {
             die "INI headers are not permitted\n"
                if defined $attrs->{section};
             next unless defined $attrs->{key};
-            $attrs->{key}->copy_to(my $k);
-            $coffer->set($k, $attrs->{value} // '');
+            $coffer->set($attrs->{key}, $attrs->{value} // '');
          }
       }
       else {

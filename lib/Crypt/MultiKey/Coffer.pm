@@ -545,7 +545,6 @@ B<Do not modify> the buffer referenced by the returned C<$secret> Span object.
 
 sub get {
    my ($self, $key)= @_;
-   croak "Key should be a plain scalar" if ref $key;
    my (undef, $idx)= $self->_dict_find_name_idx($key);
    return undef unless defined $idx;
    $self->_content_dict->[$idx+1];
@@ -568,7 +567,6 @@ store a state of "exists but undefined".
 
 sub set {
    my ($self, $key, $val)= @_;
-   croak "Key should be a plain scalar" if ref $key;
    if (!defined $self->content_type && !$self->has_ciphertext && !$self->has_content) {
       # initialize KV storage, which sets content_type.
       $self->content([]);
