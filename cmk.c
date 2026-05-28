@@ -13,7 +13,6 @@
 #include <openssl/err.h>
 #include <openssl/crypto.h>
 #include <openssl/kdf.h>
-#include <openssl/bio.h>
 #include <openssl/buffer.h>
 #include <openssl/objects.h>
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
