@@ -1,4 +1,7 @@
 #! /usr/bin/env perl
+# PODNAME: cmk-coffer-get
+# ABSTRACT: Read values from a Coffer
+# VERSION
 use v5.12;
 use warnings;
 use Pod::Usage;

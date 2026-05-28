@@ -1,4 +1,7 @@
 #! /usr/bin/env perl
+# PODNAME: cmk-pkey-new
+# ABSTRACT: Create a new PKey object and serialize it to a file
+# VERSION
 use v5.12;
 use warnings;
 use Pod::Usage;

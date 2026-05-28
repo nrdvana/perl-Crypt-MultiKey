@@ -1,4 +1,7 @@
 #! /usr/bin/env perl
+# PODNAME: cmk-coffer-new
+# ABSTRACT: Create a new Coffer
+# VERSION
 use v5.12;
 use warnings;
 use Pod::Usage;

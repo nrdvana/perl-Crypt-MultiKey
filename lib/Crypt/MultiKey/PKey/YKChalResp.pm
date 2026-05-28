@@ -1,6 +1,6 @@
 package Crypt::MultiKey::PKey::YKChalResp;
 # VERSION
-# ABSTRACT: Use a YubiKey OTP challenge/response to encrypt/decrypt the private key
+# ABSTRACT: Use a YubiKey challenge/response to encrypt/decrypt the private key
 
 use v5.12;
 use warnings;
@@ -17,9 +17,9 @@ use parent 'Crypt::MultiKey::PKey';
 
 =head1 DESCRIPTION
 
-This module uses the L<YubiKey OTP protocol|Crypt::MultiKey::YubicoOTP>'s
+This module uses the L<YubiKey OTP application|Crypt::MultiKey::YubicoOTP>'s
 challenge/response feature to generate a password to decrypt the private half of a PKey.
-Not all YubiKeys support the OTP protocol, particularly the cheaper "Security Key" variety.
+Not all YubiKeys support the OTP application, particularly the cheaper "Security Key" variety.
 (for those, see L<Crypt::MultiKey::PKey::FIDO2>)
 You must have also configured one of the slots on your YubiKey to allow challenge/response.
 
@@ -39,7 +39,7 @@ use it to decrypt the PKey.
 Someone who knows the correct response could also build a fake USB device that emits the
 correct response without actually knowing the secret.
 
-For comparison, L<FIDO2|Crypt::MultiKey::PKey::FIDO2> authenticates the identify of the hardware
+For comparison, L<FIDO2|Crypt::MultiKey::PKey::FIDO2> authenticates the identity of the hardware
 device so that it can't be faked even if an attacker knows the correct response for a challenge.
 The downside with FIDO2 is that it requires an enrollment process and credential stored on the
 device for each enrolled PKey.  This C<YKChalResp> key can be set up without storing anything
