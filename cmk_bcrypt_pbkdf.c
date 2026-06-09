@@ -229,7 +229,7 @@ static const uint32_t cmk_blf_init_S[4][256] =
 }};
 
 /* Blowfish F function */
-static inline uint32_t
+PERL_STATIC_INLINE uint32_t
 cmk_blf_F(const cmk_blf_ctx *c, uint32_t x) {
    uint16_t a = (x >> 24) & 0xFF;
    uint16_t b = (x >> 16) & 0xFF;
@@ -244,9 +244,10 @@ cmk_blf_F(const cmk_blf_ctx *c, uint32_t x) {
 static void
 cmk_blf_encipher(cmk_blf_ctx *c, uint32_t *xl, uint32_t *xr) {
    uint32_t L = *xl, R = *xr;
+   int i;
    L ^= c->P[0];
    /* Two rounds per iteration */
-   for (int i = 1; i < 16; i += 2) {
+   for (i = 1; i < 16; i += 2) {
       R ^= cmk_blf_F(c, L) ^ c->P[i];
       L ^= cmk_blf_F(c, R) ^ c->P[i + 1];
    }
@@ -270,7 +271,8 @@ static uint32_t
 cmk_blf_stream2word(const uint8_t *data, size_t datalen, uint16_t *offp) {
    uint32_t word = 0;
    uint16_t off = *offp;
-   for (int i = 0; i < 4; i++) {
+   int i;
+   for (i = 0; i < 4; i++) {
       word = (word << 8) | data[off];
       off++;
       if (off >= datalen)
@@ -285,18 +287,19 @@ static void
 cmk_blf_expand0state(cmk_blf_ctx *c, const uint8_t *key, size_t keylen) {
    uint16_t off = 0;
    uint32_t L = 0, R = 0;
+   int i, s;
 
-   for (int i = 0; i < 18; i++)
+   for (i = 0; i < 18; i++)
       c->P[i] ^= cmk_blf_stream2word(key, keylen, &off);
 
-   for (int i = 0; i < 18; i += 2) {
+   for (i = 0; i < 18; i += 2) {
       cmk_blf_encipher(c, &L, &R);
       c->P[i] = L;
       c->P[i + 1] = R;
    }
 
-   for (int s = 0; s < 4; s++) {
-      for (int i = 0; i < 256; i += 2) {
+   for (s = 0; s < 4; s++) {
+      for (i = 0; i < 256; i += 2) {
          cmk_blf_encipher(c, &L, &R);
          c->S[s][i] = L;
          c->S[s][i + 1] = R;
@@ -311,12 +314,13 @@ cmk_blf_expandstate(cmk_blf_ctx *c,
                     const uint8_t *key,  size_t keylen) {
    uint16_t off = 0;
    uint32_t L = 0, R = 0;
+   int i, s;
 
-   for (int i = 0; i < 18; i++)
+   for (i = 0; i < 18; i++)
       c->P[i] ^= cmk_blf_stream2word(key, keylen, &off);
 
    off = 0;
-   for (int i = 0; i < 18; i += 2) {
+   for (i = 0; i < 18; i += 2) {
       L ^= cmk_blf_stream2word(data, datalen, &off);
       R ^= cmk_blf_stream2word(data, datalen, &off);
       cmk_blf_encipher(c, &L, &R);
@@ -324,8 +328,8 @@ cmk_blf_expandstate(cmk_blf_ctx *c,
       c->P[i + 1] = R;
    }
 
-   for (int s = 0; s < 4; s++) {
-      for (int i = 0; i < 256; i += 2) {
+   for (s = 0; s < 4; s++) {
+      for (i = 0; i < 256; i += 2) {
          L ^= cmk_blf_stream2word(data, datalen, &off);
          R ^= cmk_blf_stream2word(data, datalen, &off);
          cmk_blf_encipher(c, &L, &R);
@@ -338,7 +342,9 @@ cmk_blf_expandstate(cmk_blf_ctx *c,
 /* Encrypt blocks (ECB) in-place; blocks is number of 64-bit blocks */
 static void
 cmk_blf_enc(cmk_blf_ctx *c, uint32_t *data, uint16_t blocks) {
-   for (uint16_t i = 0; i < blocks; i++) {
+   uint16_t i;
+
+   for (i = 0; i < blocks; i++) {
       uint32_t *d = data + (2 * i);
       cmk_blf_encipher(c, &d[0], &d[1]);
    }
@@ -355,21 +361,22 @@ cmk_bcrypt_hash(const uint8_t sha2pass[64], const uint8_t sha2salt[64], uint8_t 
    uint8_t ciphertext[CMK_BCRYPT_HASHSIZE] = "OxychromaticBlowfishSwatDynamite";
    uint32_t cdata[CMK_BCRYPT_WORDS];
    uint16_t j = 0;
+   int i;
 
    cmk_blf_initstate(&state);
    cmk_blf_expandstate(&state, sha2salt, 64, sha2pass, 64);
-   for (int i = 0; i < 64; i++) {
+   for (i = 0; i < 64; i++) {
       cmk_blf_expand0state(&state, sha2salt, 64);
       cmk_blf_expand0state(&state, sha2pass, 64);
    }
 
-   for (int i = 0; i < CMK_BCRYPT_WORDS; i++)
+   for (i = 0; i < CMK_BCRYPT_WORDS; i++)
       cdata[i] = cmk_blf_stream2word(ciphertext, sizeof(ciphertext), &j);
 
-   for (int i = 0; i < 64; i++)
+   for (i = 0; i < 64; i++)
       cmk_blf_enc(&state, cdata, (uint16_t)(sizeof(cdata) / (sizeof(uint64_t))));
 
-   for (int i = 0; i < CMK_BCRYPT_WORDS; i++) {
+   for (i = 0; i < CMK_BCRYPT_WORDS; i++) {
       out[4 * i + 3] = (cdata[i] >> 24) & 0xFF;
       out[4 * i + 2] = (cdata[i] >> 16) & 0xFF;
       out[4 * i + 1] = (cdata[i] >>  8) & 0xFF;

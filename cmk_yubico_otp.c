@@ -185,9 +185,12 @@ static int get_serial_via_otp_hid(int fd, uint32_t *serial_out) {
 /* Same CRC-16 variant used by YubiKey OTP/personalization protocol */
 static uint16_t yubikey_crc16(const uint8_t *buf, size_t len) {
    uint16_t crc = 0xffff;
-   for (size_t i = 0; i < len; i++) {
+   size_t i;
+   int j;
+
+   for (i = 0; i < len; i++) {
       crc ^= buf[i];
-      for (int j = 0; j < 8; j++) {
+      for (j = 0; j < 8; j++) {
          if (crc & 1) {
             crc = (crc >> 1) ^ 0x8408;
          } else {
@@ -200,7 +203,7 @@ static uint16_t yubikey_crc16(const uint8_t *buf, size_t len) {
 
 static int hid_get_feature8(int fd, uint8_t data[FEATURE_RPT_SIZE]) {
    uint8_t buf[FEATURE_RPT_SIZE + 1];
-   memset(buf, 0, sizeof(buf));   // report id 0 for unnumbered reports
+   memset(buf, 0, sizeof(buf));   /* report id 0 for unnumbered reports */
    if (ioctl(fd, HIDIOCGFEATURE(sizeof(buf)), buf) < 0) {
       return -1;
    }
@@ -210,7 +213,7 @@ static int hid_get_feature8(int fd, uint8_t data[FEATURE_RPT_SIZE]) {
 
 static int hid_set_feature8(int fd, const uint8_t data[FEATURE_RPT_SIZE]) {
    uint8_t buf[FEATURE_RPT_SIZE + 1];
-   memset(buf, 0, sizeof(buf));   // report id 0 for unnumbered reports
+   memset(buf, 0, sizeof(buf));   /* report id 0 for unnumbered reports */
    memcpy(buf + 1, data, FEATURE_RPT_SIZE);
    if (ioctl(fd, HIDIOCSFEATURE(sizeof(buf)), buf) < 0) {
       return -1;
@@ -251,6 +254,7 @@ static int is_otp_interface(int fd, struct yk_status *status_out) {
    uint16_t top_usage = 0;
    int have_top_app = 0;
    int saw_feature_8x8 = 0;
+   int i, j;
 
    if (ioctl(fd, HIDIOCGRDESCSIZE, &desc_size) < 0)
       return -1;
@@ -265,31 +269,33 @@ static int is_otp_interface(int fd, struct yk_status *status_out) {
    if (ioctl(fd, HIDIOCGRDESC, &rd) < 0)
       return -1;
 
-   for (int i = 0; i < rd.size; ) {
+   for (i = 0; i < rd.size; ) {
+      int size_code, type, tag, size;
       uint8_t b = rd.value[i++];
+      uint32_t val;
 
       if (b == 0xFE) { /* long item */
+         int len;
          if (i + 1 >= rd.size) {
             errno = EPROTO;
             return -1;
          }
-         int len = rd.value[i];
+         len = rd.value[i];
          i += 2 + len;
          continue;
       }
 
-      int size_code = b & 0x03;
-      int type      = (b >> 2) & 0x03;
-      int tag       = (b >> 4) & 0x0F;
-      int size      = (size_code == 3) ? 4 : size_code;
-      uint32_t val  = 0;
+      size_code = b & 0x03;
+      type      = (b >> 2) & 0x03;
+      tag       = (b >> 4) & 0x0F;
+      size      = (size_code == 3) ? 4 : size_code;
 
       if (i + size > rd.size) {
          errno = EPROTO;
          return -1;
       }
 
-      for (int j = 0; j < size; j++)
+      for (j = 0, val= 0; j < size; j++)
          val |= ((uint32_t)rd.value[i + j]) << (8 * j);
       i += size;
 
@@ -460,6 +466,7 @@ static int write_to_key(int fd, uint8_t slot, const void *payload, size_t payloa
    const uint8_t *ptr;
    const uint8_t *end;
    int seq = 0;
+   uint16_t crc;
    
    if (payload_len > SLOT_DATA_SIZE) {
       errno = EMSGSIZE;
@@ -470,9 +477,11 @@ static int write_to_key(int fd, uint8_t slot, const void *payload, size_t payloa
    memcpy(frame.payload, payload, payload_len);
    frame.slot = slot;
    
-   // Yubico source computes CRC over the 64-byte payload only.
-   uint16_t crc = yubikey_crc16(frame.payload, sizeof(frame.payload));
-   frame.crc = crc; // Arch/x86_64 is little-endian, matching old tool behavior
+   /* Yubico source computes CRC over the 64-byte payload only.
+    * Arch/x86_64 is little-endian, matching old tool behavior.
+    */
+   crc = yubikey_crc16(frame.payload, sizeof(frame.payload));
+   frame.crc = crc;
    
    ptr = (const uint8_t *)&frame;
    end = ptr + sizeof(frame);
@@ -489,7 +498,7 @@ static int write_to_key(int fd, uint8_t slot, const void *payload, size_t payloa
          }
       }
       
-      // Same optimization as Yubico's code: skip all-zero interior chunks.
+      /* Same optimization as Yubico's code: skip all-zero interior chunks. */
       if (all_zeros && seq > 0 && ptr < end) {
          seq++;
          continue;
@@ -523,7 +532,7 @@ static int read_response_from_key(
    
    memset(buf, 0, bufsize);
    
-   // Wait for first chunk with RESP_PENDING_FLAG set.
+   /* Wait for first chunk with RESP_PENDING_FLAG set. */
    if (wait_for_key_status(fd, RESP_PENDING_FLAG, true, timeout, touch_timeout_ms > 0, data) < 0) {
       warn("wait_for_key_status < 0");
       return -1;

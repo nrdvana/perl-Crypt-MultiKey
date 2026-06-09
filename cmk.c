@@ -383,9 +383,9 @@ void cmk_pkey_get_algorithm_name(cmk_pkey *pk, SV *out) {
          sv_setpv(out, alg);
          #if OPENSSL_VERSION_NUMBER < 0x30000000L
          {
-            STRLEN len;
+            STRLEN i, len;
             char *str= SvPV(out, len);
-            for (STRLEN i = 0; i < len; i++)
+            for (i = 0; i < len; i++)
                str[i] = toUPPER(str[i]);
             SvSETMAGIC(out);
          }
@@ -1197,6 +1197,7 @@ cmk_sha256(U8 dest[32], SV **input, size_t n_items) {
    const char *err= NULL;
    EVP_MD_CTX *ctx = NULL;
    unsigned int outlen = 0;
+   size_t i;
 
    ERR_clear_error();
 
@@ -1207,7 +1208,7 @@ cmk_sha256(U8 dest[32], SV **input, size_t n_items) {
    if (EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) != 1)
       GOTO_CLEANUP_CROAK("EVP_DigestInit_ex(SHA-256) failed");
 
-   for (size_t i = 0; i < n_items; i++) {
+   for (i = 0; i < n_items; i++) {
       STRLEN len = 0;
       const U8 *buf = (const U8*) secret_buffer_SvPVbyte(input[i], &len);
 
@@ -1343,11 +1344,13 @@ void
 cmk_hmac_sha256(U8 dest[32], const U8 *key, size_t key_len, SV **input, size_t n_items) {
    const char *err = NULL;
    size_t outlen = 0;
+   size_t i;
 
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
    /* OpenSSL 3.x: EVP_MAC */
    EVP_MAC *mac = NULL;
    EVP_MAC_CTX *mctx = NULL;
+   OSSL_PARAM params[2];
 
    ERR_clear_error();
 
@@ -1360,14 +1363,13 @@ cmk_hmac_sha256(U8 dest[32], const U8 *key, size_t key_len, SV **input, size_t n
       GOTO_CLEANUP_CROAK("EVP_MAC_CTX_new failed");
 
    /* Set digest=SHA256 */
-   OSSL_PARAM params[2];
    params[0] = OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST, (char *)"SHA256", 0);
    params[1] = OSSL_PARAM_construct_end();
 
    if (EVP_MAC_init(mctx, key, key_len, params) != 1)
       GOTO_CLEANUP_CROAK("EVP_MAC_init(HMAC/SHA256) failed");
 
-   for (size_t i = 0; i < n_items; i++) {
+   for (i = 0; i < n_items; i++) {
       STRLEN len = 0;
       const U8 *buf = (const U8 *)secret_buffer_SvPVbyte(input[i], &len);
       if (len > 0) {
@@ -1396,7 +1398,7 @@ cleanup:
    if (HMAC_Init_ex(ctx, key, (int)key_len, EVP_sha256(), NULL) != 1)
       GOTO_CLEANUP_CROAK("HMAC_Init_ex(SHA-256) failed");
 
-   for (size_t i = 0; i < n_items; i++) {
+   for (i = 0; i < n_items; i++) {
       STRLEN len = 0;
       const U8 *buf = (const U8 *)secret_buffer_SvPVbyte(input[i], &len);
       if (len > 0) {

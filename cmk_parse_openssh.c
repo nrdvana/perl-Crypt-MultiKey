@@ -237,7 +237,7 @@ cmk_pkey_import_openssh_privkey(cmk_pkey *pk, const U8 *data, STRLEN data_len,
    secret_buffer_parse outer, inner;
    const U8 *ciphername=NULL, *kdfname=NULL, *kdfopts=NULL;
    size_t ciphername_len=0, kdfname_len=0, kdfopts_len=0;
-   uint32_t nkeys=0;
+   uint32_t i, nkeys=0;
 
    const U8 *pubblob0=NULL, *privblob=NULL;
    size_t pubblob0_len=0, privblob_len=0;
@@ -266,7 +266,7 @@ cmk_pkey_import_openssh_privkey(cmk_pkey *pk, const U8 *data, STRLEN data_len,
    if (!cmk_parse_ssh_string(&outer, &pubblob0, &pubblob0_len))
       croak("Truncated OpenSSH public key");
 
-   for (uint32_t i=1; i<nkeys; i++) {
+   for (i=1; i<nkeys; i++) {
       const U8 *tmp=NULL;
       size_t tmp_len=0;
       if (!cmk_parse_ssh_string(&outer, &tmp, &tmp_len))
@@ -299,7 +299,7 @@ cmk_pkey_import_openssh_privkey(cmk_pkey *pk, const U8 *data, STRLEN data_len,
                                                   &err);
       if (!plain_sb) /* failure here means openssl failures or unsupported formats */
          croak("Failed to decrypt OpenSSH private key: %s", err);
-//      warn("# decrypted privblob %ld bytes into %ld bytes of 'inner'\n", (long)privblob_len, (long)plain_sb->len);
+/*      warn("# decrypted privblob %ld bytes into %ld bytes of 'inner'\n", (long)privblob_len, (long)plain_sb->len); */
       inner.pos = plain_sb->data;
       inner.lim = plain_sb->data + plain_sb->len;
    }
